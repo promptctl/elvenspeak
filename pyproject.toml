@@ -1,0 +1,10 @@
+[project]
+name = "piper-server"
+version = "0.1.0"
+description = "Local ElevenLabs-compatible text-to-speech, backed by Piper"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "piper-tts>=1.7.0",
+    "uvicorn[standard]>=0.52.4",
+]
