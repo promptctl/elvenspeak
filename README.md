@@ -53,8 +53,21 @@ at a frame sync, matching the real API byte for byte at the front.
 
 An id this server does not know still gets audio, in the fallback voice, because
 clients hold ElevenLabs voice ids in saved settings and a server that 404s all
-of them replaces nothing. `aliases.toml` maps the nine original ElevenLabs
-voices onto comparable Piper ones — comparable in register, **not** in likeness.
+of them replaces nothing.
+
+`aliases.toml` maps the nine original ElevenLabs voices onto comparable Piper
+ones — comparable in register, **not** in likeness. **An alias only takes effect
+if its target voice is installed**: the table is filtered to `PIPER_VOICES` at
+startup, since an alias pointing at a voice that cannot speak is not an answer.
+So under the default single-voice setup the table is inert and all nine ids land
+on the fallback. To make them live, install their targets:
+
+```
+PIPER_VOICES=en_US-lessac-medium,en_US-hfc_female-medium,en_US-hfc_male-medium,en_US-amy-medium,en_US-joe-medium
+```
+
+`GET /v1/voices` reports each voice's live aliases, so what actually resolves is
+readable from the server rather than inferred from this file.
 
 Substitution is never invisible: every synthesis response carries
 `x-elvenspeak-voice` naming what actually spoke, and `x-elvenspeak-voice-requested` when

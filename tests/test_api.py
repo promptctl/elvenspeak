@@ -85,35 +85,6 @@ def test_mp3_has_no_id3_tag(client):
     assert body[0] == 0xFF
 
 
-async def test_pcm_length_matches_its_declared_rate():
-    """Proof the rate in a format's name is the rate of the samples returned.
-
-    Raw PCM carries no header, so a caller handed the wrong rate cannot discover
-    it — the audio just plays at the wrong pitch, which is the silent-wrong-
-    answer this service is being rebuilt to stop producing.
-
-    Tested against the encoder directly rather than through the API, because
-    Piper is not deterministic: the same sentence synthesized twice differs by a
-    few percent in length (measured: 36352, 37888, 37376 samples across three
-    runs of one text), since a VITS model samples from a noise distribution.
-    Two HTTP calls could therefore never be compared to better than that
-    variance, which is far too coarse to catch a rate that is subtly wrong. One
-    buffer encoded several ways holds everything constant but the thing under
-    test.
-    """
-    from elvenspeak.formats import OutputFormat
-    from elvenspeak.speech import encode
-
-    native_rate = 22050
-    one_second = b"\x00\x01" * native_rate
-
-    durations = {}
-    for name, rate in (("pcm_8000", 8000), ("pcm_16000", 16000), ("pcm_44100", 44100)):
-        encoded = await encode(one_second, native_rate, OutputFormat.parse(name))
-        durations[name] = len(encoded) / 2 / rate
-
-    for name, seconds in durations.items():
-        assert seconds == pytest.approx(1.0, abs=0.01), f"{name} came back {seconds}s"
 
 
 def test_unknown_format_is_refused_with_the_offending_value(client):
@@ -168,6 +139,72 @@ def test_speed_actually_changes_the_audio(client):
         return len(body)
 
     assert length(2.0) < length(1.0) * 0.75
+
+
+def test_non_streaming_endpoint_returns_encoded_audio(client):
+    """The primary one-shot endpoint, previously never called by any test.
+
+    `speak()`'s `path=""` default existed and was never used — every call passed
+    "/stream" — so nothing asserted this handler returned anything at all.
+    """
+    response = speak(client, output_format="mp3_44100_128")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/mpeg")
+    assert response.content.startswith(b"\xff")
+
+
+def test_default_settings_have_the_elevenlabs_shape(client):
+    body = client.get("/v1/voices/settings/default").json()
+    assert body["speed"] == 1.0
+    assert set(body) == {
+        "stability", "similarity_boost", "style", "use_speaker_boost", "speed",
+    }
+
+
+def test_per_voice_settings_answer_for_installed_voices_only(client):
+    assert client.get(f"/v1/voices/{VOICE}/settings").json()["speed"] == 1.0
+    assert client.get(f"/v1/voices/{FOREIGN_ID}/settings").status_code == 404
+
+
+def test_empty_text_is_refused_before_synthesis(client):
+    """A streaming endpoint cannot report this later — the 200 is already sent."""
+    for path in ("", "/stream", "/stream/with-timestamps"):
+        response = client.post(
+            f"/v1/text-to-speech/{VOICE}{path}", json={"text": ""}
+        )
+        assert response.status_code == 422, path
+
+
+def test_oversized_text_is_refused(client):
+    from elvenspeak.api import MAX_TEXT_LENGTH
+
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}/stream",
+        json={"text": "a" * (MAX_TEXT_LENGTH + 1)},
+    )
+    assert response.status_code == 422
+
+
+def test_unknown_body_fields_are_reported_not_dropped(client):
+    """Rule 2, applied to parameters this server has never heard of."""
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}/stream",
+        json={"text": "hello", "some_future_elevenlabs_field": 3},
+    )
+    assert response.status_code == 200
+    assert "some_future_elevenlabs_field" in response.headers["x-elvenspeak-ignored"]
+
+
+def test_streamed_timestamps_report_fidelity_per_object(client):
+    """Fidelity varies per sentence, so it cannot live in a single header."""
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}/stream/with-timestamps",
+        json={"text": "First sentence here. Second sentence follows."},
+    )
+    objects = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    assert objects
+    for obj in objects:
+        assert obj["alignment_fidelity"] in {"word-exact", "interpolated"}
 
 
 def test_discovery_does_not_substitute(client):

@@ -105,3 +105,38 @@ def test_empty_text_is_an_empty_alignment_not_a_crash():
     result = align("", [], [], RATE)
     assert result.characters == []
     assert result.starts == []
+
+
+def test_characters_before_the_first_word_are_placed():
+    """The leading-gap branch, reachable from any text starting with whitespace.
+
+    Untested until now, and its failure would be silent: the leading characters
+    keep their initialized 0.0 span, which reads as a valid timeline that happens
+    to start with several zero-width characters rather than as a fault.
+    """
+    result = align("  " + TEXT, PHONEMES, DURATIONS, RATE)
+    assert len(result.characters) == len(TEXT) + 2
+    assert result.starts[0] == pytest.approx(0.0)
+    # The gap owns real time — the model's run-up — and hands off to the first
+    # letter rather than collapsing onto it.
+    assert result.ends[1] == pytest.approx(result.starts[2])
+    assert result.ends[1] > 0.0
+
+
+def test_trailing_characters_are_placed():
+    result = align(TEXT + "   ", PHONEMES, DURATIONS, RATE)
+    assert len(result.characters) == len(TEXT) + 3
+    assert result.ends[-1] >= result.starts[-1]
+    for i in range(len(result.characters) - 1):
+        assert result.ends[i] == pytest.approx(result.starts[i + 1])
+
+
+def test_unmeasured_audio_forces_interpolated_even_when_words_line_up():
+    """[LAW:no-silent-failure] `measured=False` is the synthesizer's own report.
+
+    Word counts matching is not enough to claim measurement when some of the
+    audio was never attributed to a phoneme — the spans still cover the sound,
+    but some of them stand for samples nothing explained.
+    """
+    result = align(TEXT, PHONEMES, DURATIONS, RATE, measured=False)
+    assert result.fidelity is Fidelity.INTERPOLATED

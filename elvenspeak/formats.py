@@ -1,7 +1,7 @@
 """The audio shape a caller asked for, and how to produce it.
 
 ElevenLabs names an output format with one string — `mp3_44100_128`,
-`pcm_16000`, `ulaw_8000`. That string is a closed set of thirty values,
+`pcm_16000`, `ulaw_8000`. That string is a closed set of 28 values,
 published in the API reference, so it is treated here as an enumeration to
 *parse into*, never a string to inspect later.
 
@@ -16,7 +16,7 @@ had not been honoured.
 
 The fix is not a validation check next to the old code; it is that no code past
 [`OutputFormat.parse`] can hold a format that has not already been proven to be
-one of the thirty. Downstream takes an [`OutputFormat`], so "unsupported format"
+one of the 28. Downstream takes an [`OutputFormat`], so "unsupported format"
 is not a state a synthesis path can reach, and there is no second place where
 someone could forget to look.
 
@@ -26,8 +26,8 @@ someone could forget to look.
 functions and a dispatch, which makes the codec a *name* — `encode_mp3`,
 `encode_opus` — and every new format a new function. Instead the codec is a
 *value*: Piper always emits signed 16-bit PCM at its voice's native rate, and
-ffmpeg turns that into any of the thirty in a single pass that resamples and
-encodes together. A thirty-first format is a row in [`_FORMATS`], not code.
+ffmpeg turns that into any of the 28 in a single pass that resamples and
+encodes together. A twenty-ninth format is a row in [`_FORMATS`], not code.
 
 That also *removes* a dependency rather than adding one. This service used to
 shell out to `lame`, which knows exactly one codec — the single-format
@@ -58,7 +58,7 @@ class Codec(str, Enum):
 
 @dataclass(frozen=True)
 class OutputFormat:
-    """One of the thirty formats ElevenLabs publishes, already known to be legal.
+    """One of the 28 formats ElevenLabs publishes, already known to be legal.
 
     Frozen because it is a parsed fact about a request, not a workspace: two
     handlers holding the same format are holding the same value, and neither can
