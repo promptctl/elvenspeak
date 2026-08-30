@@ -266,10 +266,19 @@ def install(
 
     for key in keys:
         model_path = models_dir / f"{key}.onnx"
-        if not model_path.exists():
+        # Both halves, not just the weights. A voice is an .onnx and the
+        # .onnx.json beside it that `_describe` reads, and an interrupted
+        # download can leave one without the other — a killed container, a full
+        # disk, a bind mount that received a partial copy. Checking only the
+        # weights treats that as installed and defers the failure to `_describe`
+        # or, worse, to the first synthesis, instead of re-fetching.
+        config_path = models_dir / f"{key}.onnx.json"
+        if not (model_path.exists() and config_path.exists()):
             if not allow_download:
                 raise FileNotFoundError(
-                    f"voice {key!r} is not in {models_dir} and downloading is off"
+                    f"voice {key!r} is not completely installed in {models_dir} "
+                    f"(need both {model_path.name} and {config_path.name}) "
+                    f"and downloading is off"
                 )
             _LOGGER.info("downloading voice %s into %s", key, models_dir)
             download_voice(key, models_dir)
@@ -284,9 +293,17 @@ def install(
             f"{', '.join(sorted(voices)) or '(none)'}"
         )
 
-    return Catalog(
+    catalog = Catalog(
         voices=voices, fallback=fallback, include_alignments=include_alignments
     )
+    # Touched here so `aliases.toml` is parsed during startup rather than on
+    # whichever request first needs an alias. The file is documented as
+    # operator-editable, so a malformed edit is a realistic event; parsed lazily
+    # it surfaces as an uncaught TOMLDecodeError on a synthesis call, which is
+    # the opposite of this module's "one clean failure to boot" rule and is
+    # invisible to a healthcheck that never touches resolution.
+    _ = catalog._aliases  # noqa: SLF001 - same module; forces the cached_property
+    return catalog
 
 
 def _describe(key: str, model_path: Path) -> Voice:

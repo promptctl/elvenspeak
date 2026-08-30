@@ -60,7 +60,12 @@ class Settings:
         if not voices:
             problems.append("PIPER_VOICES is empty; name at least one voice")
 
+        # Stripped like the entries it is compared against. Comparing a raw value
+        # to trimmed ones made a trailing space in a .env file report that a
+        # plainly-present voice was missing.
         fallback = env.get("PIPER_FALLBACK_VOICE", voices[0] if voices else None)
+        if fallback is not None:
+            fallback = fallback.strip()
         if fallback == "":
             fallback = None
         elif fallback is not None and voices and fallback not in voices:
@@ -75,6 +80,24 @@ class Settings:
         except ValueError:
             problems.append(f"PORT={port_text!r} is not a number")
             port = 0
+        else:
+            # Parsing is not validating: -1 and 99999 are integers and neither is
+            # a port. Caught here so it joins the list this module exists to
+            # produce, instead of failing later inside uvicorn with a worse
+            # message.
+            if not 1 <= port <= 65535:
+                problems.append(f"PORT={port} is outside 1-65535")
+
+        flags = {}
+        for name, default in (
+            ("PIPER_ALLOW_DOWNLOAD", True),
+            ("ELVENSPEAK_TIMESTAMPS", True),
+        ):
+            try:
+                flags[name] = _flag(env, name, default=default)
+            except ValueError as error:
+                problems.append(str(error))
+                flags[name] = default
 
         if problems:
             raise ConfigError(problems)
@@ -85,9 +108,9 @@ class Settings:
             models_dir=Path(
                 env.get("PIPER_MODELS_DIR", str(Path(__file__).parent.parent / "models"))
             ),
-            allow_download=_flag(env, "PIPER_ALLOW_DOWNLOAD", default=True),
+            allow_download=flags["PIPER_ALLOW_DOWNLOAD"],
             api_key=env.get("ELVENSPEAK_API_KEY") or None,
-            timestamps=_flag(env, "ELVENSPEAK_TIMESTAMPS", default=True),
+            timestamps=flags["ELVENSPEAK_TIMESTAMPS"],
             host=env.get("HOST", "0.0.0.0"),
             port=port,
         )
@@ -106,8 +129,28 @@ class ConfigError(ValueError):
         self.problems = problems
 
 
+_TRUE = frozenset({"1", "true", "yes", "on"})
+_FALSE = frozenset({"0", "false", "no", "off"})
+
+
 def _flag(env, name: str, default: bool) -> bool:
+    """Reads a boolean setting, refusing anything that is not clearly one.
+
+    [LAW:no-silent-failure] The obvious implementation — true if the value is in
+    a true-set, false otherwise — makes `PIPER_ALLOW_DOWNLOAD=tru` mean "off",
+    silently, in the one module whose stated job is catching configuration
+    mistakes at startup. A typo in a boolean is exactly as much a mistake as a
+    typo in a port, and is reported the same way.
+    """
     raw = env.get(name)
     if raw is None:
         return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    value = raw.strip().lower()
+    if value in _TRUE:
+        return True
+    if value in _FALSE:
+        return False
+    raise ValueError(
+        f"{name}={raw!r} is not a boolean; "
+        f"use one of {', '.join(sorted(_TRUE))} or {', '.join(sorted(_FALSE))}"
+    )
