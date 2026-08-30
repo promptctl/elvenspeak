@@ -1,0 +1,412 @@
+"""The ElevenLabs text-to-speech surface, served from local Piper voices.
+
+The shape of this module is dictated by an API this project does not own, which
+is the whole point: a client written against ElevenLabs should reach this server
+by changing a base URL and nothing else. So the paths, the request bodies, the
+response fields and the status codes are theirs, transcribed from the published
+reference rather than invented here.
+
+# What "compatible" is allowed to mean
+
+[LAW:no-silent-failure] Compatible cannot mean "accepts the request and answers
+200 regardless". Three rules keep it honest, and every one of them exists
+because the previous version of this service broke it:
+
+1. A parameter that *can* be honoured is honoured. `output_format` selects from
+   all thirty published formats; `voice_id` selects a real voice; `speed`
+   changes the speech rate.
+2. A parameter that *cannot* be honoured is named in the `x-piper-ignored`
+   response header. Piper has no equivalent for `stability` or `seed`, so those
+   are dropped — but a caller is told which of the things it asked for did not
+   happen, instead of having to infer it from the audio.
+3. A request that cannot be served is refused. An unknown `output_format` is a
+   422 quoting the offending value, not a silent substitution.
+
+# Why substitution survives rule 3
+
+An unrecognised `voice_id` still answers, in the fallback voice, because clients
+hold ElevenLabs voice ids and a server that 404s all of them replaces nothing.
+That is a documented contract rather than a swallowed failure, and the
+`x-piper-voice` header names whatever actually spoke — see
+[`piper_server.voices`].
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
+
+from . import alignment as align_mod
+from . import speech, voices
+from .formats import SUPPORTED_OUTPUT_FORMATS, OutputFormat, UnknownOutputFormat
+from .settings import Settings
+
+_LOGGER = logging.getLogger("piper_server.api")
+
+#: Body fields ElevenLabs accepts that describe a generative model's sampling,
+#: cross-request conditioning, or a pronunciation database — none of which a
+#: Piper voice has. Named here, once, so the header in rule 2 above is derived
+#: from one list rather than assembled at each endpoint.
+_UNSUPPORTED_BODY_FIELDS = (
+    "model_id",
+    "language_code",
+    "seed",
+    "previous_text",
+    "next_text",
+    "previous_request_ids",
+    "next_request_ids",
+    "pronunciation_dictionary_locators",
+    "apply_text_normalization",
+    "apply_language_text_normalization",
+    "use_pvc_as_ivc",
+)
+
+_UNSUPPORTED_VOICE_SETTINGS = (
+    "stability",
+    "similarity_boost",
+    "style",
+    "use_speaker_boost",
+)
+
+
+class VoiceSettings(BaseModel):
+    """ElevenLabs' `voice_settings`, of which Piper implements `speed`.
+
+    The rest are declared rather than swept into an `extra` bucket so that the
+    schema states plainly what may be sent, and so a caller sending `stability`
+    gets it reported back as ignored instead of silently discarded by the parser.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    speed: float | None = Field(default=None, gt=0.25, le=4.0)
+    stability: float | None = None
+    similarity_boost: float | None = None
+    style: float | None = None
+    use_speaker_boost: bool | None = None
+
+
+class SpeechRequest(BaseModel):
+    """The request body every text-to-speech endpoint takes."""
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    text: str
+    voice_settings: VoiceSettings | None = None
+    model_id: str | None = None
+    language_code: str | None = None
+    seed: int | None = Field(default=None, ge=0, le=4294967295)
+    previous_text: str | None = None
+    next_text: str | None = None
+    previous_request_ids: list[str] | None = None
+    next_request_ids: list[str] | None = None
+    pronunciation_dictionary_locators: list[dict] | None = None
+    apply_text_normalization: str | None = None
+    apply_language_text_normalization: bool | None = None
+    use_pvc_as_ivc: bool | None = None
+
+    def prosody(self) -> speech.Prosody:
+        speed = self.voice_settings.speed if self.voice_settings else None
+        return speech.Prosody(speed=speed if speed is not None else 1.0)
+
+    def ignored(self) -> tuple[str, ...]:
+        """Which of the caller's parameters this server could not honour.
+
+        Only fields actually sent are reported — a caller that asked for nothing
+        unsupported gets no header at all, so the header's presence means
+        something happened rather than being constant noise.
+        """
+        sent = [name for name in _UNSUPPORTED_BODY_FIELDS if getattr(self, name) is not None]
+        if self.voice_settings is not None:
+            sent += [
+                f"voice_settings.{name}"
+                for name in _UNSUPPORTED_VOICE_SETTINGS
+                if getattr(self.voice_settings, name) is not None
+            ]
+        return tuple(sent)
+
+
+def create_app(settings: Settings) -> FastAPI:
+    """Builds the application around an already-installed voice catalog.
+
+    Takes [`Settings`] rather than reading the environment, so tests construct a
+    server without touching the process environment and the deployment has one
+    place its configuration comes from.
+    """
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Voices are installed before the first request, not on demand: a model
+        # is ~60 MB, and fetching one inside a call would charge that caller an
+        # unbounded, silent delay. A voice that cannot be installed is one clean
+        # failure to boot instead.
+        app.state.catalog = voices.install(
+            keys=settings.voices,
+            models_dir=settings.models_dir,
+            fallback=settings.fallback,
+            include_alignments=settings.timestamps,
+            allow_download=settings.allow_download,
+        )
+        _LOGGER.info(
+            "serving %s (fallback: %s)",
+            ", ".join(settings.voices),
+            settings.fallback or "none",
+        )
+        yield
+
+    app = FastAPI(
+        title="piper-server",
+        summary="ElevenLabs-compatible text-to-speech, served from local Piper voices",
+        version="1.0.0",
+        lifespan=lifespan,
+    )
+    app.state.settings = settings
+
+    def require_key(xi_api_key: str | None = Header(default=None)) -> None:
+        """Checks `xi-api-key` when one is configured.
+
+        A constant-time comparison would be theatre here: the header is compared
+        against a value the operator set, over a link they control, and the
+        endpoint's timing is dominated by ONNX inference. The check exists so a
+        deployment *can* be closed, not because this is an authentication
+        system.
+        """
+        expected = settings.api_key
+        if expected is None:
+            return
+        if xi_api_key != expected:
+            raise HTTPException(status_code=401, detail="invalid xi-api-key")
+
+    guarded = [Depends(require_key)]
+
+    def catalog(request: Request) -> voices.Catalog:
+        return request.app.state.catalog
+
+    def parse_format(value: str) -> OutputFormat:
+        try:
+            return OutputFormat.parse(value)
+        except UnknownOutputFormat as error:
+            # 422 rather than 400 because that is what the published API answers
+            # for a malformed parameter, and a client's error handling is keyed
+            # to the status it already expects.
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": str(error),
+                    "supported": list(SUPPORTED_OUTPUT_FORMATS),
+                },
+            ) from None
+
+    def resolve(cat: voices.Catalog, voice_id: str) -> voices.Resolution:
+        try:
+            return cat.resolve(voice_id)
+        except voices.VoiceNotInstalled as error:
+            raise HTTPException(status_code=404, detail=str(error)) from None
+
+    def headers(resolution: voices.Resolution, body: SpeechRequest) -> dict[str, str]:
+        out = {"x-piper-voice": resolution.voice.key}
+        if resolution.substituted:
+            out["x-piper-voice-requested"] = resolution.requested
+        ignored = body.ignored()
+        if ignored:
+            out["x-piper-ignored"] = ", ".join(ignored)
+        return out
+
+    # ----------------------------------------------------------------- health
+
+    @app.get("/health")
+    def health(request: Request) -> dict:
+        cat = request.app.state.catalog
+        return {
+            "status": "ok",
+            "voices": [voice.key for voice in cat.installed] if cat else [],
+        }
+
+    # --------------------------------------------------------------- synthesis
+
+    @app.post("/v1/text-to-speech/{voice_id}", dependencies=guarded)
+    async def convert(
+        voice_id: str,
+        body: SpeechRequest,
+        request: Request,
+        output_format: str = Query(default="mp3_44100_128"),
+    ) -> Response:
+        cat = catalog(request)
+        fmt = parse_format(output_format)
+        resolution = resolve(cat, voice_id)
+        model = cat.model(resolution.voice)
+
+        pcm = b"".join(speech.stream_pcm(model, body.text, body.prosody()))
+        audio = await speech.encode(pcm, resolution.voice.sample_rate, fmt)
+        return Response(
+            content=audio,
+            media_type=fmt.content_type,
+            headers=headers(resolution, body),
+        )
+
+    @app.post("/v1/text-to-speech/{voice_id}/stream", dependencies=guarded)
+    async def convert_stream(
+        voice_id: str,
+        body: SpeechRequest,
+        request: Request,
+        output_format: str = Query(default="mp3_44100_128"),
+    ) -> StreamingResponse:
+        cat = catalog(request)
+        fmt = parse_format(output_format)
+        resolution = resolve(cat, voice_id)
+        model = cat.model(resolution.voice)
+
+        # The generator is handed over unstarted: synthesis begins when the
+        # response body is first read, so a client that disconnects between
+        # request and read costs nothing.
+        chunks = speech.stream_pcm(model, body.text, body.prosody())
+        return StreamingResponse(
+            speech.encode_stream(chunks, resolution.voice.sample_rate, fmt),
+            media_type=fmt.content_type,
+            headers=headers(resolution, body),
+        )
+
+    @app.post("/v1/text-to-speech/{voice_id}/with-timestamps", dependencies=guarded)
+    async def convert_with_timestamps(
+        voice_id: str,
+        body: SpeechRequest,
+        request: Request,
+        output_format: str = Query(default="mp3_44100_128"),
+    ) -> JSONResponse:
+        cat = catalog(request)
+        fmt = parse_format(output_format)
+        resolution = resolve(cat, voice_id)
+        _require_timestamps(request)
+        model = cat.model(resolution.voice)
+
+        timed = speech.synthesize_timed(
+            model, body.text, body.prosody(), resolution.voice.sample_rate
+        )
+        audio = await speech.encode(timed.pcm, timed.sample_rate, fmt)
+        aligned = align_mod.align(
+            body.text, timed.phonemes, timed.durations, timed.sample_rate
+        )
+        response_headers = headers(resolution, body)
+        response_headers["x-piper-alignment"] = aligned.fidelity.value
+        return JSONResponse(
+            content=_timestamped(audio, aligned),
+            headers=response_headers,
+        )
+
+    @app.post(
+        "/v1/text-to-speech/{voice_id}/stream/with-timestamps", dependencies=guarded
+    )
+    async def convert_stream_with_timestamps(
+        voice_id: str,
+        body: SpeechRequest,
+        request: Request,
+        output_format: str = Query(default="mp3_44100_128"),
+    ) -> StreamingResponse:
+        cat = catalog(request)
+        fmt = parse_format(output_format)
+        resolution = resolve(cat, voice_id)
+        _require_timestamps(request)
+        model = cat.model(resolution.voice)
+        prosody = body.prosody()
+        sample_rate = resolution.voice.sample_rate
+
+        async def stream() -> AsyncIterator[bytes]:
+            # Split here rather than letting Piper split internally, because an
+            # alignment has to be measured against a known stretch of text and
+            # Piper's chunks do not say which words they came from. Owning the
+            # split is what makes each emitted object's timings meaningful.
+            elapsed = 0.0
+            for sentence in speech.split_sentences(body.text):
+                timed = speech.synthesize_timed(model, sentence, prosody, sample_rate)
+                audio = await speech.encode(timed.pcm, sample_rate, fmt)
+                aligned = align_mod.align(
+                    sentence, timed.phonemes, timed.durations, sample_rate, elapsed
+                )
+                elapsed += len(timed.pcm) / 2 / sample_rate
+                yield json.dumps(_timestamped(audio, aligned)).encode() + b"\n"
+
+        return StreamingResponse(
+            stream(),
+            media_type="application/json",
+            headers=headers(resolution, body),
+        )
+
+    # ------------------------------------------------------------------ voices
+
+    @app.get("/v1/voices", dependencies=guarded)
+    def list_voices(request: Request) -> dict:
+        cat = catalog(request)
+        return {
+            "voices": [
+                voice.as_elevenlabs(cat.aliases_for(voice.key))
+                for voice in cat.installed
+            ]
+        }
+
+    @app.get("/v1/voices/settings/default", dependencies=guarded)
+    def default_settings() -> dict:
+        # ElevenLabs' documented defaults, reported unchanged. Only `speed` has
+        # any effect here; the others are echoed so a settings screen built
+        # against the real API renders with the values it expects rather than
+        # with blanks.
+        return {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.0,
+            "use_speaker_boost": True,
+            "speed": 1.0,
+        }
+
+    @app.get("/v1/voices/{voice_id}", dependencies=guarded)
+    def get_voice(voice_id: str, request: Request) -> dict:
+        cat = catalog(request)
+        # Exact match only: a listing endpoint that answered for every id would
+        # report a voice the caller does not have, which is the opposite of what
+        # it is for. Synthesis substitutes; discovery does not.
+        voice = cat.get(voice_id)
+        if voice is None:
+            raise HTTPException(status_code=404, detail=f"unknown voice {voice_id!r}")
+        return voice.as_elevenlabs(cat.aliases_for(voice.key))
+
+    @app.get("/v1/voices/{voice_id}/settings", dependencies=guarded)
+    def voice_settings(voice_id: str, request: Request) -> dict:
+        cat = catalog(request)
+        if cat.get(voice_id) is None:
+            raise HTTPException(status_code=404, detail=f"unknown voice {voice_id!r}")
+        return default_settings()
+
+    return app
+
+
+def _require_timestamps(request: Request) -> None:
+    """Refuses the timestamp endpoints when models were loaded without alignment.
+
+    [LAW:no-silent-failure] The alternative is answering with plausible timings
+    derived from nothing, which a caption renderer would trust.
+    """
+    if not request.app.state.settings.timestamps:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "timestamps are disabled; set PIPER_TIMESTAMPS=1 and restart so "
+                "voices load with alignment support"
+            ),
+        )
+
+
+def _timestamped(audio: bytes, aligned: align_mod.Alignment) -> dict:
+    """The body shape both timestamp endpoints return."""
+    return {
+        "audio_base64": base64.b64encode(audio).decode("ascii"),
+        "alignment": aligned.as_elevenlabs(),
+        # ElevenLabs distinguishes the alignment of the text as written from the
+        # text as normalized for speech. Piper is fed the text as written, so the
+        # two are the same object here rather than a second, invented one.
+        "normalized_alignment": aligned.as_elevenlabs(),
+    }
