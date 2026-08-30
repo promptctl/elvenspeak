@@ -95,7 +95,7 @@ class OutputFormat:
         """The output half of an ffmpeg command line for this format.
 
         Excludes input flags and the output target, which belong to the caller
-        that owns the process — see [`piper_server.speech`].
+        that owns the process — see [`elvenspeak.speech`].
         """
         args = ["-ar", str(self.sample_rate), "-ac", "1"]
         args += _CODEC_ARGS[self.codec]

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from piper_server.alignment import Fidelity, align
+from elvenspeak.alignment import Fidelity, align
 
 RATE = 22050
 

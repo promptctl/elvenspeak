@@ -12,7 +12,7 @@
 # the Piper voice by name instead.
 #
 # An ID absent from this table is not an error: see `fallback` in settings and
-# the `x-piper-voice` response header, which names whatever actually spoke.
+# the `x-elvenspeak-voice` response header, which names whatever actually spoke.
 
 [elevenlabs]
 # The nine voices from ElevenLabs' original default set, the ones most likely

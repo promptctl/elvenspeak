@@ -42,7 +42,7 @@ from .formats import OutputFormat
 if TYPE_CHECKING:  # pragma: no cover
     from piper import PiperVoice
 
-_LOGGER = logging.getLogger("piper_server.speech")
+_LOGGER = logging.getLogger("elvenspeak.speech")
 
 #: How much encoded audio to hand upward at a time. Small enough that the first
 #: sound leaves promptly, large enough not to spend a syscall per few samples.

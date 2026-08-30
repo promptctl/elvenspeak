@@ -1,4 +1,4 @@
-# piper-server
+# elvenspeak
 
 Text-to-speech that speaks ElevenLabs' HTTP API, backed by
 [Piper](https://github.com/rhasspy/piper) voices running on the machine you
@@ -19,7 +19,7 @@ checked by a test:
    changes the speech rate.
 2. **A parameter that cannot be honoured is named back to you.** Piper has no
    equivalent of `stability` or `seed`, so those are dropped — and the response
-   carries `x-piper-ignored: model_id, seed, voice_settings.stability` so you
+   carries `x-elvenspeak-ignored: model_id, seed, voice_settings.stability` so you
    learn it from the response instead of from the audio.
 3. **A request that cannot be served is refused.** An unknown `output_format` is
    a `422` quoting the value you sent, not a quiet substitution.
@@ -57,7 +57,7 @@ of them replaces nothing. `aliases.toml` maps the nine original ElevenLabs
 voices onto comparable Piper ones — comparable in register, **not** in likeness.
 
 Substitution is never invisible: every synthesis response carries
-`x-piper-voice` naming what actually spoke, and `x-piper-voice-requested` when
+`x-elvenspeak-voice` naming what actually spoke, and `x-elvenspeak-voice-requested` when
 that differs from what you asked for. `GET /v1/voices/{id}` does **not**
 substitute — discovery must only report what is really installed.
 
@@ -74,7 +74,7 @@ its resolution:
 - When the phonemizer's word count disagrees with the text's — an expanded
   number, an abbreviation — no correspondence exists, and the whole utterance is
   spread evenly instead. That is much worse, so it is reported:
-  `x-piper-alignment: word-exact | interpolated`.
+  `x-elvenspeak-alignment: word-exact | interpolated`.
 
 ## Running it
 
@@ -95,8 +95,8 @@ PIPER_FALLBACK_VOICE=…             # default: the first of PIPER_VOICES.
                                    # Empty string turns substitution off (404s).
 PIPER_MODELS_DIR=./models
 PIPER_ALLOW_DOWNLOAD=1             # 0 to require models be present already
-PIPER_API_KEY=                     # unset accepts every request
-PIPER_TIMESTAMPS=1                 # 0 saves memory; timestamp endpoints 501
+ELVENSPEAK_API_KEY=                     # unset accepts every request
+ELVENSPEAK_TIMESTAMPS=1                 # 0 saves memory; timestamp endpoints 501
 PORT=5001
 HOST=0.0.0.0
 ```
@@ -108,8 +108,8 @@ several, and `GET /v1/voices` lists exactly what loaded.
 ### With Docker
 
 ```
-docker build -t piper-server --build-arg PIPER_VOICES=en_US-lessac-medium .
-docker run -p 5001:5001 piper-server
+docker build -t elvenspeak --build-arg PIPER_VOICES=en_US-lessac-medium .
+docker run -p 5001:5001 elvenspeak
 ```
 
 Voices are baked into the image, and `PIPER_ALLOW_DOWNLOAD` is off inside it: a
@@ -162,4 +162,4 @@ endpoints manage a hosted account's voices. There is no account here, and a
 stub that pretended to accept them would be a lie in the shape of an API.
 
 **No `model_id`.** A Piper voice *is* its model. Sending one is reported in
-`x-piper-ignored` rather than silently accepted.
+`x-elvenspeak-ignored` rather than silently accepted.

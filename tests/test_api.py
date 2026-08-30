@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from piper_server import create_app
-from piper_server.settings import Settings
+from elvenspeak import create_app
+from elvenspeak.settings import Settings
 
 VOICE = "en_US-lessac-medium"
 MODELS = Path(os.environ.get("PIPER_MODELS_DIR", Path(__file__).parent.parent / "models"))
@@ -101,8 +101,8 @@ async def test_pcm_length_matches_its_declared_rate():
     buffer encoded several ways holds everything constant but the thing under
     test.
     """
-    from piper_server.formats import OutputFormat
-    from piper_server.speech import encode
+    from elvenspeak.formats import OutputFormat
+    from elvenspeak.speech import encode
 
     native_rate = 22050
     one_second = b"\x00\x01" * native_rate
@@ -128,14 +128,14 @@ def test_unknown_voice_substitutes_and_says_so(client):
         f"/v1/text-to-speech/{FOREIGN_ID}/stream", json={"text": "hello"}
     )
     assert response.status_code == 200
-    assert response.headers["x-piper-voice"] == VOICE
-    assert response.headers["x-piper-voice-requested"] == FOREIGN_ID
+    assert response.headers["x-elvenspeak-voice"] == VOICE
+    assert response.headers["x-elvenspeak-voice-requested"] == FOREIGN_ID
 
 
 def test_known_voice_reports_no_substitution(client):
     response = speak(client, "/stream")
-    assert response.headers["x-piper-voice"] == VOICE
-    assert "x-piper-voice-requested" not in response.headers
+    assert response.headers["x-elvenspeak-voice"] == VOICE
+    assert "x-elvenspeak-voice-requested" not in response.headers
 
 
 def test_unhonourable_parameters_are_named_back(client):
@@ -149,7 +149,7 @@ def test_unhonourable_parameters_are_named_back(client):
             "voice_settings": {"stability": 0.3, "speed": 1.5},
         },
     )
-    ignored = response.headers["x-piper-ignored"]
+    ignored = response.headers["x-elvenspeak-ignored"]
     assert "model_id" in ignored
     assert "seed" in ignored
     assert "voice_settings.stability" in ignored
@@ -189,7 +189,7 @@ def test_timestamps_cover_the_input_text(client):
         json={"text": "Hello there, friend."},
     )
     assert response.status_code == 200
-    assert response.headers["x-piper-alignment"] == "word-exact"
+    assert response.headers["x-elvenspeak-alignment"] == "word-exact"
     body = response.json()
     assert base64.b64decode(body["audio_base64"])
     alignment = body["alignment"]

@@ -44,7 +44,7 @@ d = pathlib.Path(os.environ['PIPER_MODELS_DIR']); d.mkdir(parents=True, exist_ok
 
 ENV PIPER_VOICES=${PIPER_VOICES} \
     PIPER_ALLOW_DOWNLOAD=0 \
-    PIPER_TIMESTAMPS=1 \
+    ELVENSPEAK_TIMESTAMPS=1 \
     PORT=5001
 
 EXPOSE 5001

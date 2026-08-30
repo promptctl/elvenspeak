@@ -86,8 +86,8 @@ class Settings:
                 env.get("PIPER_MODELS_DIR", str(Path(__file__).parent.parent / "models"))
             ),
             allow_download=_flag(env, "PIPER_ALLOW_DOWNLOAD", default=True),
-            api_key=env.get("PIPER_API_KEY") or None,
-            timestamps=_flag(env, "PIPER_TIMESTAMPS", default=True),
+            api_key=env.get("ELVENSPEAK_API_KEY") or None,
+            timestamps=_flag(env, "ELVENSPEAK_TIMESTAMPS", default=True),
             host=env.get("HOST", "0.0.0.0"),
             port=port,
         )

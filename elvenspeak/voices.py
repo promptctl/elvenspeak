@@ -18,7 +18,7 @@ of its own.
 [LAW:no-silent-failure] Substituting is therefore contractual, not a swallowed
 error — but it is still a case where the caller did not get what it named, so it
 does not happen invisibly. [`Resolution.substituted`] says whether a swap
-occurred, and every synthesis response carries an `x-piper-voice` header naming
+occurred, and every synthesis response carries an `x-elvenspeak-voice` header naming
 what actually spoke. The behaviour a client depends on is preserved; the fact it
 happened is not hidden.
 
@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover - import cost is real, the symbol is not
     from piper import PiperVoice
 
-_LOGGER = logging.getLogger("piper_server.voices")
+_LOGGER = logging.getLogger("elvenspeak.voices")
 
 _ALIASES_FILE = Path(__file__).parent / "aliases.toml"
 

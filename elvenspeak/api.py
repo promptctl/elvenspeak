@@ -15,7 +15,7 @@ because the previous version of this service broke it:
 1. A parameter that *can* be honoured is honoured. `output_format` selects from
    all thirty published formats; `voice_id` selects a real voice; `speed`
    changes the speech rate.
-2. A parameter that *cannot* be honoured is named in the `x-piper-ignored`
+2. A parameter that *cannot* be honoured is named in the `x-elvenspeak-ignored`
    response header. Piper has no equivalent for `stability` or `seed`, so those
    are dropped — but a caller is told which of the things it asked for did not
    happen, instead of having to infer it from the audio.
@@ -27,8 +27,8 @@ because the previous version of this service broke it:
 An unrecognised `voice_id` still answers, in the fallback voice, because clients
 hold ElevenLabs voice ids and a server that 404s all of them replaces nothing.
 That is a documented contract rather than a swallowed failure, and the
-`x-piper-voice` header names whatever actually spoke — see
-[`piper_server.voices`].
+`x-elvenspeak-voice` header names whatever actually spoke — see
+[`elvenspeak.voices`].
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ from . import speech, voices
 from .formats import SUPPORTED_OUTPUT_FORMATS, OutputFormat, UnknownOutputFormat
 from .settings import Settings
 
-_LOGGER = logging.getLogger("piper_server.api")
+_LOGGER = logging.getLogger("elvenspeak.api")
 
 #: Body fields ElevenLabs accepts that describe a generative model's sampling,
 #: cross-request conditioning, or a pronunciation database — none of which a
@@ -161,7 +161,7 @@ def create_app(settings: Settings) -> FastAPI:
         yield
 
     app = FastAPI(
-        title="piper-server",
+        title="elvenspeak",
         summary="ElevenLabs-compatible text-to-speech, served from local Piper voices",
         version="1.0.0",
         lifespan=lifespan,
@@ -210,12 +210,12 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(error)) from None
 
     def headers(resolution: voices.Resolution, body: SpeechRequest) -> dict[str, str]:
-        out = {"x-piper-voice": resolution.voice.key}
+        out = {"x-elvenspeak-voice": resolution.voice.key}
         if resolution.substituted:
-            out["x-piper-voice-requested"] = resolution.requested
+            out["x-elvenspeak-voice-requested"] = resolution.requested
         ignored = body.ignored()
         if ignored:
-            out["x-piper-ignored"] = ", ".join(ignored)
+            out["x-elvenspeak-ignored"] = ", ".join(ignored)
         return out
 
     # ----------------------------------------------------------------- health
@@ -293,7 +293,7 @@ def create_app(settings: Settings) -> FastAPI:
             body.text, timed.phonemes, timed.durations, timed.sample_rate
         )
         response_headers = headers(resolution, body)
-        response_headers["x-piper-alignment"] = aligned.fidelity.value
+        response_headers["x-elvenspeak-alignment"] = aligned.fidelity.value
         return JSONResponse(
             content=_timestamped(audio, aligned),
             headers=response_headers,
@@ -394,7 +394,7 @@ def _require_timestamps(request: Request) -> None:
         raise HTTPException(
             status_code=501,
             detail=(
-                "timestamps are disabled; set PIPER_TIMESTAMPS=1 and restart so "
+                "timestamps are disabled; set ELVENSPEAK_TIMESTAMPS=1 and restart so "
                 "voices load with alignment support"
             ),
         )

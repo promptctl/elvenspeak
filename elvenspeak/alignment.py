@@ -26,7 +26,7 @@ all, and pretending otherwise would put every later word's timing off by a
 compounding drift. That case falls back to distributing the whole utterance
 across the whole text, which is markedly worse, so it does not happen quietly:
 the result carries its [`Fidelity`] and the endpoints report it in an
-`x-piper-alignment` header.
+`x-elvenspeak-alignment` header.
 
 # Why the fidelity travels with the data
 

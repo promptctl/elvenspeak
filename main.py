@@ -10,8 +10,8 @@ from __future__ import annotations
 import logging
 import sys
 
-from piper_server import create_app
-from piper_server.settings import ConfigError, Settings
+from elvenspeak import create_app
+from elvenspeak.settings import ConfigError, Settings
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
