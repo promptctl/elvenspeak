@@ -98,6 +98,7 @@ def align(
     durations: list[int],
     sample_rate: int,
     offset: float = 0.0,
+    measured: bool = True,
 ) -> Alignment:
     """Places every character of `text` on the timeline of its synthesis.
 
@@ -105,6 +106,12 @@ def align(
     count of samples. `offset` shifts the whole result, so a caller synthesizing
     a reply in several chunks can lay them end to end without re-deriving
     anything.
+
+    `measured` is the synthesizer's own report of whether every sample it
+    returned was attributed to a phoneme. False forces [`Fidelity.INTERPOLATED`]
+    even when the word counts line up: the timeline still covers the audio, but
+    some of its spans stand for samples nothing explained, and a caller must not
+    be told those boundaries were measured.
     """
     characters = list(text)
     if not characters:
@@ -155,7 +162,12 @@ def align(
             time_cursor + offset,
             total + offset,
         )
-    return Alignment(characters, starts, ends, Fidelity.WORD_EXACT)
+    return Alignment(
+        characters,
+        starts,
+        ends,
+        Fidelity.WORD_EXACT if measured else Fidelity.INTERPOLATED,
+    )
 
 
 def _distribute(
