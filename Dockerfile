@@ -15,7 +15,10 @@ RUN apt-get update \
  && ffmpeg -hide_banner -encoders | grep -q libmp3lame \
  && ffmpeg -hide_banner -encoders | grep -q libopus
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# [LAW:no-ambient-temporal-coupling] Pinned, not `:latest`. An unpinned tag makes
+# two builds of this same commit different artifacts, and a breaking uv release
+# then surfaces as a build failure at a time nobody chose.
+COPY --from=ghcr.io/astral-sh/uv:0.9.10 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
@@ -25,7 +28,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev
 
-COPY piper_server/ ./piper_server/
+COPY elvenspeak/ ./elvenspeak/
 COPY main.py ./
 RUN uv sync --frozen --no-dev
 
@@ -35,26 +38,40 @@ RUN uv sync --frozen --no-dev
 # serve offline. PIPER_ALLOW_DOWNLOAD stays off for the same reason: a missing
 # model should fail the deploy, not quietly re-download.
 ARG PIPER_VOICES=en_US-lessac-medium
-ENV PIPER_MODELS_DIR=/app/models
-RUN uv run python -c "\
-import os, pathlib; \
-from piper.download_voices import download_voice; \
-d = pathlib.Path(os.environ['PIPER_MODELS_DIR']); d.mkdir(parents=True, exist_ok=True); \
-[download_voice(v, d) for v in '${PIPER_VOICES}'.split(',')]"
-
-ENV PIPER_VOICES=${PIPER_VOICES} \
+ENV PIPER_MODELS_DIR=/app/models \
+    PIPER_VOICES=${PIPER_VOICES} \
     PIPER_ALLOW_DOWNLOAD=0 \
     ELVENSPEAK_TIMESTAMPS=1 \
     PORT=5001
 
+# The build arg reaches Python through the environment, never spliced into the
+# source text. Interpolating it as `'${PIPER_VOICES}'.split(',')` put a
+# caller-supplied string inside a Python literal inside a shell command, so a
+# single quote in a --build-arg escaped into executable code at build time.
+# Entries are stripped exactly as `Settings.from_env` strips them, so the same
+# list means the same thing at build time and at run time.
+RUN uv run python -c "\
+import os, pathlib; \
+from piper.download_voices import download_voice; \
+d = pathlib.Path(os.environ['PIPER_MODELS_DIR']); d.mkdir(parents=True, exist_ok=True); \
+[download_voice(v.strip(), d) for v in os.environ['PIPER_VOICES'].split(',') if v.strip()]"
+
+# [LAW:effects-at-boundaries] Nothing after this point needs root. ffmpeg and the
+# ONNX runtime both process caller-influenced input, so a compromise anywhere in
+# that path lands in an unprivileged account rather than owning the container.
+RUN useradd --system --create-home --home-dir /home/elvenspeak elvenspeak \
+ && chown -R elvenspeak:elvenspeak /app
+USER elvenspeak
+
 EXPOSE 5001
 
-# Exercises a real synthesis path rather than just process liveness: the
-# endpoint reports which voices actually loaded, so a container whose models
-# failed to load reads as unhealthy instead of as up.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
-  CMD python -c "import urllib.request,json,sys; \
-b=json.load(urllib.request.urlopen('http://127.0.0.1:5001/health')); \
+# Voices are loaded during startup, so a successful /health means their ONNX
+# sessions were built — not merely that the process is alive. It does not
+# synthesize: inference every 30s would compete with real requests for the CPU
+# this service is bound by.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s \
+  CMD python -c "import urllib.request,json,os,sys; \
+b=json.load(urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PORT','5001'))); \
 sys.exit(0 if b['voices'] else 1)"
 
 CMD ["uv", "run", "--no-dev", "main.py"]
