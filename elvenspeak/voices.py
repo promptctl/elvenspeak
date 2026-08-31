@@ -36,7 +36,6 @@ from __future__ import annotations
 import logging
 import tomllib
 from dataclasses import dataclass
-from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -154,36 +153,27 @@ class Catalog:
         voices: dict[str, Voice],
         fallback: str | None,
         include_alignments: bool,
+        aliases: dict[str, str] | None = None,
     ) -> None:
+        # [LAW:parse-dont-validate] Checked here, where the catalog is made,
+        # rather than by whichever caller remembers to. `resolve()` indexes
+        # `_voices[_fallback]` on its last branch, so a fallback naming no
+        # installed voice turns every unrecognised id — the case the fallback
+        # exists for — into a bare KeyError from inside synthesis. Enforcing it
+        # at construction means no Catalog that exists can reach that state.
+        if fallback is not None and fallback not in voices:
+            raise ValueError(
+                f"fallback voice {fallback!r} is not among the installed voices: "
+                f"{', '.join(sorted(voices)) or '(none)'}"
+            )
         self._voices = voices
         self._fallback = fallback
         self._include_alignments = include_alignments
+        # Taken as a value, not read from disk. Resolution is pure once it holds
+        # its table, so a test can supply one and `load_aliases` can fail at
+        # startup where a malformed file is an operator's problem to see.
+        self._aliases = {} if aliases is None else aliases
         self._loaded: dict[str, "PiperVoice"] = {}
-
-    @cached_property
-    def _aliases(self) -> dict[str, str]:
-        """Foreign voice ids mapped onto installed Piper keys.
-
-        Entries naming a voice that is not installed are dropped rather than
-        kept and failed later: the table's job is to answer "which voice is
-        this", and an answer that cannot be spoken is not an answer.
-        """
-        if not _ALIASES_FILE.exists():
-            return {}
-        with _ALIASES_FILE.open("rb") as handle:
-            table = tomllib.load(handle)
-        mapped = {
-            foreign: local
-            for foreign, local in table.get("elevenlabs", {}).items()
-            if local in self._voices
-        }
-        dropped = len(table.get("elevenlabs", {})) - len(mapped)
-        if dropped:
-            _LOGGER.info(
-                "%d alias(es) point at voices that are not installed; ignoring them",
-                dropped,
-            )
-        return mapped
 
     @property
     def installed(self) -> tuple[Voice, ...]:
@@ -284,26 +274,49 @@ def install(
             download_voice(key, models_dir)
         voices[key] = _describe(key, model_path)
 
-    if fallback is not None and fallback not in voices:
-        # Caught here rather than at the first unmapped request, because a
-        # fallback that cannot speak turns every unknown voice id into a 500
-        # that looks like a bug in synthesis.
-        raise ValueError(
-            f"fallback voice {fallback!r} is not among the installed voices: "
-            f"{', '.join(sorted(voices)) or '(none)'}"
-        )
-
-    catalog = Catalog(
-        voices=voices, fallback=fallback, include_alignments=include_alignments
+    # Read before the catalog is built, so `aliases.toml` is parsed during
+    # startup rather than on whichever request first needs an alias. The file is
+    # documented as operator-editable, so a malformed edit is a realistic event;
+    # reached lazily it surfaced as an uncaught TOMLDecodeError on a synthesis
+    # call, which is the opposite of this module's "one clean failure to boot"
+    # rule and is invisible to a healthcheck that never touches resolution.
+    #
+    # The fallback's membership in `voices` is Catalog's own precondition and is
+    # enforced in its constructor, so this call is also where that is checked.
+    return Catalog(
+        voices=voices,
+        fallback=fallback,
+        include_alignments=include_alignments,
+        aliases=load_aliases(voices),
     )
-    # Touched here so `aliases.toml` is parsed during startup rather than on
-    # whichever request first needs an alias. The file is documented as
-    # operator-editable, so a malformed edit is a realistic event; parsed lazily
-    # it surfaces as an uncaught TOMLDecodeError on a synthesis call, which is
-    # the opposite of this module's "one clean failure to boot" rule and is
-    # invisible to a healthcheck that never touches resolution.
-    _ = catalog._aliases  # noqa: SLF001 - same module; forces the cached_property
-    return catalog
+
+
+def load_aliases(voices: dict[str, Voice]) -> dict[str, str]:
+    """Foreign voice ids mapped onto the installed Piper keys they reach.
+
+    [LAW:effects-at-boundaries] The one place `aliases.toml` is read. Resolution
+    itself takes the finished table, so it stays a pure function of its inputs
+    and a test can hand it a fixture instead of depending on the shipped file.
+
+    Entries naming a voice that is not installed are dropped rather than kept and
+    failed later: the table's job is to answer "which voice is this", and an
+    answer that cannot be spoken is not an answer.
+    """
+    if not _ALIASES_FILE.exists():
+        return {}
+    with _ALIASES_FILE.open("rb") as handle:
+        table = tomllib.load(handle)
+    published = table.get("elevenlabs", {})
+    mapped = {
+        foreign: local for foreign, local in published.items() if local in voices
+    }
+    dropped = len(published) - len(mapped)
+    if dropped:
+        _LOGGER.info(
+            "%d alias(es) point at voices that are not installed; ignoring them",
+            dropped,
+        )
+    return mapped
 
 
 def _describe(key: str, model_path: Path) -> Voice:

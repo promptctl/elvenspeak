@@ -28,11 +28,27 @@ def voice(key: str) -> Voice:
     )
 
 
-def catalog(*keys: str, fallback: str | None = None) -> Catalog:
+#: A fixed stand-in for `aliases.toml`, so these tests describe resolution rather
+#: than the shipped table's current contents. That file is documented as
+#: operator-editable — retargeting a voice without a release is the point of it —
+#: and reading the live one meant a correct edit to it failed tests about
+#: `Catalog`, which has no opinion about which ids map where.
+ALIASES = {"21m00Tcm4TlvDq8ikWAM": "en_US-hfc_female-medium"}
+
+
+def catalog(
+    *keys: str,
+    fallback: str | None = None,
+    aliases: dict[str, str] | None = None,
+) -> Catalog:
+    table = ALIASES if aliases is None else aliases
     return Catalog(
         voices={k: voice(k) for k in keys},
         fallback=fallback,
         include_alignments=False,
+        # Filtered as `load_aliases` filters it, since an alias whose target is
+        # not installed is dropped at load rather than carried into resolution.
+        aliases={f: local for f, local in table.items() if local in keys},
     )
 
 
@@ -55,7 +71,7 @@ def test_unknown_id_falls_back_and_is_marked_substituted():
 
 
 def test_alias_resolves_when_its_target_is_installed():
-    """`21m00Tcm4TlvDq8ikWAM` is Rachel in aliases.toml, mapped to hfc_female."""
+    """An aliased id reaches its target, and still reports the swap."""
     cat = catalog(
         "en_US-lessac-medium", "en_US-hfc_female-medium", fallback="en_US-lessac-medium"
     )
@@ -100,3 +116,20 @@ def test_get_does_not_substitute():
 def test_installed_is_stable_order():
     cat = catalog("en_US-zzz-medium", "en_US-aaa-medium", fallback="en_US-aaa-medium")
     assert [v.key for v in cat.installed] == ["en_US-aaa-medium", "en_US-zzz-medium"]
+
+
+def test_a_fallback_that_is_not_installed_is_refused_at_construction():
+    """[LAW:parse-dont-validate] The bad state stops being constructible.
+
+    `resolve()` reaches `self._voices[self._fallback]` on its last branch, so a
+    fallback naming no installed voice turned every unrecognised id — precisely
+    what the fallback is for — into a bare KeyError raised from inside synthesis,
+    far from the configuration that caused it. Checked at construction, no
+    Catalog anywhere can be in that state, so no caller has to ask.
+    """
+    with pytest.raises(ValueError, match="not among the installed voices"):
+        Catalog(
+            voices={"en_US-lessac-medium": voice("en_US-lessac-medium")},
+            fallback="en_US-not-installed",
+            include_alignments=False,
+        )
