@@ -186,6 +186,26 @@ def test_the_baked_default_voice_is_the_projects_default_voice():
     assert declared.group(1) == DEFAULT_VOICE
 
 
+def test_the_baked_default_engine_is_the_registrys_default_engine():
+    """The same tie, for the setting that decides which engine gets baked.
+
+    Compared against the registry's *order* rather than the string "piper",
+    because the order is what actually decides the default — a maintainer who
+    puts a new engine first has moved the default everywhere except this ARG,
+    which keeps naming a real engine and so keeps building.
+
+    Worth more than the voice version it mirrors: the image bakes one engine's
+    assets and boots one engine, and this ARG is what makes those the same one.
+    """
+    from elvenspeak.engines import ENGINES
+
+    declared = re.search(
+        r"^\s*ARG\s+ELVENSPEAK_ENGINE=(\S+)", DOCKERFILE.read_text(), re.MULTILINE
+    )
+    assert declared, "no ARG ELVENSPEAK_ENGINE found"
+    assert declared.group(1) == next(iter(ENGINES))
+
+
 def test_substituted_env_values_are_quoted():
     """ENV splits on unescaped whitespace after substitution.
 

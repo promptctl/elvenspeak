@@ -201,6 +201,20 @@ def test_switching_substitution_off_does_not_quietly_pick_a_voice():
         cat.resolve("some-elevenlabs-id")
 
 
+def test_the_resolved_fallback_cannot_be_reassigned():
+    """[LAW:types-are-the-program] The constructor check runs once, so it has to hold.
+
+    `resolve()` indexes `_voices` with the fallback on its last branch, and the
+    membership check that makes that safe happens at construction. A writable
+    attribute would let later code put back the bare-KeyError-inside-synthesis
+    state that check exists to make unreachable — and the constructor's comment
+    would go on claiming no Catalog can reach it.
+    """
+    cat = catalog("en_US-lessac-medium", fallback="en_US-lessac-medium")
+    with pytest.raises(AttributeError):
+        cat.fallback = "en_US-not-installed"
+
+
 def test_an_engine_offering_nothing_leaves_nothing_to_substitute_with():
     """The one case where "the first voice" has no answer.
 

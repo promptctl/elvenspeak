@@ -42,7 +42,7 @@ import logging
 
 from . import engine
 from .engines import ENGINES
-from .settings import Settings
+from .settings import Settings, reported_or_exit
 
 _LOGGER = logging.getLogger("elvenspeak.bake")
 
@@ -63,7 +63,8 @@ def bake(settings: Settings) -> tuple[engine.Voice, ...]:
 def main() -> None:
     """`python -m elvenspeak.bake`: the environment in, voices on disk, or exit."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    settings = Settings.from_env_or_exit(ENGINES)
+    with reported_or_exit():
+        settings = Settings.from_env(ENGINES)
     for voice in bake(settings):
         _LOGGER.info("baked %s", voice.id)
 

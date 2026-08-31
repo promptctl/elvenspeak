@@ -38,6 +38,7 @@ from enum import Enum
 from pathlib import Path
 
 from . import engine
+from .provisioning import ConfigError
 
 _LOGGER = logging.getLogger("elvenspeak.voices")
 
@@ -135,21 +136,28 @@ class Catalog:
     ) -> None:
         # [LAW:parse-dont-validate] Checked here, where the catalog is made,
         # rather than by whichever caller remembers to. `resolve()` indexes
-        # `_voices[fallback]` on its last branch, so a fallback naming no
+        # `_voices[_fallback]` on its last branch, so a fallback naming no
         # available voice turns every unrecognised id — the case the fallback
         # exists for — into a bare KeyError from inside synthesis. Enforcing it
         # at construction means no Catalog that exists can reach that state.
+        #
+        # A [`ConfigError`] rather than a bare `ValueError`, because what is
+        # wrong is the operator's environment and it should be reported the way
+        # every other bad setting is. Raised from here it reaches
+        # `settings.reported_or_exit`, which the entry points wrap around the
+        # whole startup — a plain ValueError came out as an unhandled traceback,
+        # since this is the one configuration check that cannot run until an
+        # engine is open. It subclasses ValueError, so a caller catching that
+        # still does.
         if fallback is not None and fallback not in voices:
-            raise ValueError(
-                f"fallback voice {fallback!r} is not among the installed voices: "
-                f"{', '.join(sorted(voices)) or '(none)'}"
+            raise ConfigError(
+                [
+                    f"fallback voice {fallback!r} is not among the installed "
+                    f"voices: {', '.join(sorted(voices)) or '(none)'}"
+                ]
             )
         self._voices = voices
-        #: The id that actually answers for unknown ones, or `None` for none.
-        #: Read rather than [`Settings.fallback`] by anything reporting to an
-        #: operator: the setting may only say "whichever comes first", and this
-        #: is the one place that knows which one that turned out to be.
-        self.fallback = fallback
+        self._fallback = fallback
         # Taken as a value, not read from disk. Resolution is pure once it holds
         # its table, so a test can supply one and `load_aliases` can fail at
         # startup where a malformed file is an operator's problem to see.
@@ -163,11 +171,29 @@ class Catalog:
         # nothing at all.
         dangling = sorted(set(table.values()) - set(voices))
         if dangling:
-            raise ValueError(
-                f"alias targets are not among the installed voices: "
-                f"{', '.join(dangling)}"
+            raise ConfigError(
+                [
+                    f"alias targets are not among the installed voices: "
+                    f"{', '.join(dangling)}"
+                ]
             )
         self._aliases = table
+
+    @property
+    def fallback(self) -> str | None:
+        """The id that actually answers for unknown ones, or `None` for none.
+
+        Read rather than [`Settings.fallback`] by anything reporting to an
+        operator: the setting may only say "whichever comes first", and this is
+        the one place that knows which one that turned out to be.
+
+        Read-only, like [`installed`]. [`resolve`] indexes `_voices` with this on
+        its last branch, so a settable attribute would let later code put back
+        the state the constructor check above exists to make unreachable — and
+        that check runs once, at construction, which is the whole basis on which
+        that comment claims no `Catalog` can reach it.
+        """
+        return self._fallback
 
     @staticmethod
     def for_engine(source: engine.Engine, fallback: Fallback) -> "Catalog":
@@ -226,11 +252,11 @@ class Catalog:
                 voice=self._voices[aliased], requested=requested, substituted=True
             )
 
-        if self.fallback is None:
+        if self._fallback is None:
             raise VoiceNotInstalled(requested, tuple(sorted(self._voices)))
 
         return Resolution(
-            voice=self._voices[self.fallback], requested=requested, substituted=True
+            voice=self._voices[self._fallback], requested=requested, substituted=True
         )
 
 

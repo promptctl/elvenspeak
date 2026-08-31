@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from .provisioning import ConfigError, Prepared, Registry
@@ -105,27 +106,35 @@ class Settings:
             port=port,
         )
 
-    @staticmethod
-    def from_env_or_exit(engines: Registry) -> "Settings":
-        """The environment, or a process already stopped over what is wrong with it.
+@contextmanager
+def reported_or_exit() -> Iterator[None]:
+    """Runs a startup, turning any configuration problem into a clean exit 2.
 
-        [LAW:single-enforcer] Every entry point comes through here — `uv run
-        main.py`, the factory behind `uvicorn main:build --factory`, and the
-        image's `python -m elvenspeak.bake` step — so a misconfiguration is
-        reported one way whichever one is running. This was `main.py`'s private
-        helper, which is the shape that lets the next entry point answer a bad
-        environment with a raw traceback: the divergence gets written by
-        omission, in the module that never knew the helper existed.
-        """
-        try:
-            return Settings.from_env(engines)
-        except ConfigError as error:
-            # Every problem at once, on stderr, with a non-zero exit: an operator
-            # bringing this up for the first time should not discover their
-            # configuration one restart at a time.
-            for problem in error.problems:
-                print(f"config error: {problem}", file=sys.stderr)
-            raise SystemExit(2) from None
+    [LAW:single-enforcer] Every entry point comes through here — `uv run
+    main.py`, the factory behind `uvicorn main:build --factory`, and the image's
+    `python -m elvenspeak.bake` step — so a misconfiguration is reported one way
+    whichever one is running. This was `main.py`'s private helper, which is the
+    shape that lets the next entry point answer a bad environment with a raw
+    traceback: the divergence gets written by omission, in the module that never
+    knew the helper existed.
+
+    A block rather than a wrapper around the parse, because not every
+    configuration problem is discoverable while parsing. Whether the fallback
+    voice names one the engine offers cannot be answered until the engine is
+    open, so [`Catalog`] is where that check lives — and a reporter that spanned
+    only [`Settings.from_env`] left exactly that problem coming out as an
+    unhandled traceback, which is the one failure mode this whole module exists
+    to prevent. The span is the startup, not the parse.
+    """
+    try:
+        yield
+    except ConfigError as error:
+        # Every problem at once, on stderr, with a non-zero exit: an operator
+        # bringing this up for the first time should not discover their
+        # configuration one restart at a time.
+        for problem in error.problems:
+            print(f"config error: {problem}", file=sys.stderr)
+        raise SystemExit(2) from None
 
 
 def _prepare(engines: Registry, env: Mapping[str, str]) -> Prepared:
@@ -139,8 +148,18 @@ def _prepare(engines: Registry, env: Mapping[str, str]) -> Prepared:
     An unnamed engine is the registry's first entry rather than a literal here.
     A default spelled in this module is a second answer to "which engines exist",
     free to name one that does not ([LAW:one-source-of-truth]).
+
+    Named-but-blank is not unnamed. `ELVENSPEAK_ENGINE=` is a present key, which
+    an operator reaches by interpolating an unset variable into a compose file —
+    and taking it for "no preference" would boot the default engine, silently,
+    for someone whose whole intent was to run a different one.
     """
-    chosen = env.get("ELVENSPEAK_ENGINE", "").strip() or next(iter(engines))
+    named = env.get("ELVENSPEAK_ENGINE", "").strip()
+    if "ELVENSPEAK_ENGINE" in env and not named:
+        raise ConfigError(
+            ["ELVENSPEAK_ENGINE is empty; name an engine or unset it"]
+        )
+    chosen = named or next(iter(engines))
     configure = engines.get(chosen)
     if configure is None:
         raise ConfigError(

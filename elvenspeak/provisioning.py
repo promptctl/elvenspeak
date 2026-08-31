@@ -121,6 +121,5 @@ Configure = Callable[[Mapping[str, str]], Prepared]
 #:
 #: Order is meaning. The first entry is the default, so "the default is one of
 #: the engines" is true by construction rather than by a second setting that
-#: could name a missing one — the same convention [`Settings.voices`] already
-#: uses for the fallback voice.
+#: could name a missing one.
 Registry = Mapping[str, Configure]

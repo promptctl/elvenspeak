@@ -21,7 +21,7 @@ from elvenspeak import piper
 from elvenspeak.engines import ENGINES
 from elvenspeak.piper import DEFAULT_VOICE
 from elvenspeak.provisioning import ConfigError, Registry
-from elvenspeak.settings import Settings
+from elvenspeak.settings import Settings, reported_or_exit
 from elvenspeak.voices import Substitution
 
 
@@ -55,6 +55,23 @@ def test_the_unnamed_engine_is_the_registry_s_first_entry():
         "second": lambda _: pytest.fail("the second entry is not the default"),
     }
     assert isinstance(Settings.from_env(registry, {}).engine, DeclaredPrepared)
+
+
+def test_a_blank_engine_name_is_refused_rather_than_taken_as_no_preference():
+    """`ELVENSPEAK_ENGINE=` is a present key, not an absent one.
+
+    An unset variable interpolated into a compose file is the ordinary way to
+    arrive at one, and the operator who got there was trying to select an engine.
+    Reading it as "no preference" boots the default instead — which, once a
+    second engine exists, is the wrong engine, silently, with nothing reported.
+
+    The same distinction `PIPER_MODELS_DIR` already makes, made here for the same
+    reason ([LAW:no-silent-failure]).
+    """
+    with pytest.raises(ConfigError, match="ELVENSPEAK_ENGINE is empty"):
+        from_env(ELVENSPEAK_ENGINE="")
+    with pytest.raises(ConfigError, match="ELVENSPEAK_ENGINE is empty"):
+        from_env(ELVENSPEAK_ENGINE="   ")
 
 
 def test_an_unknown_engine_is_refused_and_says_what_there_is():
@@ -139,15 +156,15 @@ def test_a_bad_environment_exits_two_naming_every_problem(monkeypatch, capsys):
     stderr, not just that the exit code is right.
 
     Reads the real environment, unlike everything above it, because
-    `from_env_or_exit` is what the entry points call with only a registry — it is
-    the process-facing half of this module, and stubbing the environment out of
-    it would leave the half that actually runs untested.
+    `reported_or_exit` is what the entry points wrap around a real startup — it
+    is the process-facing half of this module, and stubbing the environment out
+    of it would leave the half that actually runs untested.
     """
     monkeypatch.setenv("PORT", "99999")
     monkeypatch.setenv("ELVENSPEAK_TIMESTAMPS", "maybe")
 
-    with pytest.raises(SystemExit) as raised:
-        Settings.from_env_or_exit(ENGINES)
+    with pytest.raises(SystemExit) as raised, reported_or_exit():
+        Settings.from_env(ENGINES)
 
     assert raised.value.code == 2
     stderr = capsys.readouterr().err
@@ -162,10 +179,11 @@ def test_a_good_environment_comes_back_as_settings(clean_env):
     the documented defaults rather than whatever the shell running the tests
     happens to export.
     """
-    settings = Settings.from_env_or_exit(ENGINES)
+    with reported_or_exit():
+        settings = Settings.from_env(ENGINES)
     assert settings.fallback is Substitution.FIRST_OFFERED
     # The engine an empty environment produces, compared against the engine an
-    # empty environment produces — the point being that `from_env_or_exit` chose
-    # Piper and handed it the same environment, rather than that Piper's own
-    # defaults are what they are, which is `test_piper.py`'s business.
+    # empty environment produces — the point being that `from_env` chose Piper
+    # and handed it the same environment, rather than that Piper's own defaults
+    # are what they are, which is `test_piper.py`'s business.
     assert settings.engine == piper.configure({})

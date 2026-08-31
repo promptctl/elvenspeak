@@ -11,7 +11,7 @@ import logging
 
 from elvenspeak import create_app
 from elvenspeak.engines import ENGINES
-from elvenspeak.settings import Settings
+from elvenspeak.settings import Settings, reported_or_exit
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -35,11 +35,18 @@ def _app(settings: Settings):
 
 def build():
     """The ASGI application, for `uvicorn main:build --factory` and for tests."""
-    return _app(Settings.from_env_or_exit(ENGINES))
+    with reported_or_exit():
+        return _app(Settings.from_env(ENGINES))
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    settings = Settings.from_env_or_exit(ENGINES)
-    uvicorn.run(_app(settings), host=settings.host, port=settings.port)
+    # The block spans the build, not just the parse: a fallback voice that names
+    # nothing the engine offers is only discoverable once the engine is open, and
+    # it is as much a misconfiguration as a bad port.
+    with reported_or_exit():
+        settings = Settings.from_env(ENGINES)
+        app = _app(settings)
+
+    uvicorn.run(app, host=settings.host, port=settings.port)
