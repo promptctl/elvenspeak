@@ -52,7 +52,7 @@ from conftest import (
     INSTALLED_VOICE,
     MODELS_DIR,
     DeclaredEngine,
-    needs_installed_model,
+    kokoro_prepared,
     piper_prepared,
 )
 
@@ -67,6 +67,13 @@ LONG = (
 )
 
 
+#: [LAW:composability] The real engines fetch what they need by opening with
+#: downloading on, rather than the `subject` fixture depending on an
+#: asset-installing one. A fixture would have gated every parametrization on
+#: every engine's assets — so `declares-everything` and `declares-nothing`, which
+#: need no model, no network and no espeak-ng, would have waited on ~200 MB of
+#: downloads to make a noise in memory. Provisioning is something an engine that
+#: has assets does for itself, which is also what `Prepared.open` means.
 def piper_engine() -> Engine:
     """The real thing, opened exactly as `main.build` opens it.
 
@@ -74,7 +81,20 @@ def piper_engine() -> Engine:
     conformance suite's most interesting property with it — and what an operator
     can turn off is not what the interface is being tested about.
     """
-    return piper_prepared(MODELS_DIR, voices=(INSTALLED_VOICE,), timings=True).open()
+    return piper_prepared(
+        MODELS_DIR, voices=(INSTALLED_VOICE,), timings=True, allow_download=True
+    ).open()
+
+
+def kokoro_engine() -> Engine:
+    """The second real engine, opened exactly as `main.build` opens it.
+
+    The default export, which reports durations. The export that does not is the
+    subject of `test_kokoro.py`, because what it demonstrates is a capability
+    being withheld — and this suite is about engines living up to what they
+    declared, whichever set that is.
+    """
+    return kokoro_prepared(MODELS_DIR, allow_download=True).open()
 
 
 #: Every engine this project can put behind the API surface, and the suite below
@@ -90,7 +110,8 @@ ENGINES = [
         lambda: DeclaredEngine(frozenset(Capability)), id="declares-everything"
     ),
     pytest.param(lambda: DeclaredEngine(frozenset()), id="declares-nothing"),
-    pytest.param(piper_engine, id="piper", marks=needs_installed_model),
+    pytest.param(piper_engine, id="piper"),
+    pytest.param(kokoro_engine, id="kokoro"),
 ]
 
 
@@ -99,8 +120,9 @@ def subject(request) -> Engine:
     """One engine under test, built once for the whole module.
 
     Building is the expensive part for a real one — Piper opens a 60 MB ONNX
-    session — and it is also the part the interface promises happens before
-    anything is served, so paying it once here is faithful as well as cheap.
+    session, Kokoro a 114 MB one — and it is also the part the interface
+    promises happens before anything is served, so paying it once here is
+    faithful as well as cheap.
     """
     return request.param()
 
@@ -119,12 +141,6 @@ def measuring(subject: Engine) -> Engine:
     return _declaring(subject, Capability.TIMESTAMPS)
 
 
-@pytest.fixture
-def varying(subject: Engine) -> Engine:
-    """`subject`, but only for the engines that claim to vary their pace."""
-    return _declaring(subject, Capability.SPEED)
-
-
 def _declaring(subject: Engine, capability: Capability) -> Engine:
     if capability not in subject.capabilities():
         pytest.skip(f"engine does not declare {capability.name}")
@@ -138,15 +154,16 @@ def samples_of(subject: Engine, voice: Voice, text: str, speed: float = 1.0) -> 
 
 
 def first_voice(subject: Engine) -> Voice:
-    """The voice the tests that need only one speak in.
+    """The voice the tests that need only one speak in, and the default voice.
 
-    An engine is entitled to offer none — `/health` reports that rather than
-    failing — so this skips instead of erroring, leaving the tests that iterate
-    over the enumeration to say something true about an empty one.
+    Asserted rather than skipped. An engine offering nothing is a thing
+    `/health` reports rather than a crash, but no engine this project registers
+    is entitled to it — and a skip here would have quietly withdrawn every test
+    below from an engine whose voice list had silently emptied, which is the one
+    failure they exist to catch.
     """
     voices = subject.voices()
-    if not voices:
-        pytest.skip("engine offers no voices")
+    assert voices, "engine offers no voices"
     return voices[0]
 
 
@@ -233,19 +250,29 @@ def test_a_longer_text_makes_more_audio(subject: Engine):
 # ---------------------------------------------- what it claims it can also do
 
 
-def test_a_declared_speed_really_changes_the_pace(varying: Engine):
-    """[`Capability.SPEED`] declared, so 2.0 has to be audibly faster than 0.5.
+def test_the_pace_varies_exactly_when_speed_is_declared(subject: Engine):
+    """[`Capability.SPEED`] is honest in both directions, and both are checked here.
 
     This is the honesty check the ignored header cannot make. The header reports
     `voice_settings.speed` as honoured on the strength of the declaration alone;
     if the declaration is decorative, the caller is told the speed was applied
     and the audio says otherwise — rule 2 broken in the one mechanism whose whole
     job is to stop that.
+
+    Stated as an equivalence rather than as "if declared, it varies", so the
+    engine that varies its pace *without* declaring it fails too. That one is
+    the more insidious of the pair: the server neutralises `speed` to 1.0 for an
+    engine that did not declare it, so such an engine is never caught in
+    production — it is simply an engine whose fixed rate is a fiction, and the
+    day it declares the capability the header starts telling the truth about
+    audio that was already varying. Unconditional for the same reason: a skip
+    for the engines that declare nothing would leave exactly that case untested.
     """
-    voice = first_voice(varying)
-    assert samples_of(varying, voice, LONG, speed=2.0) < samples_of(
-        varying, voice, LONG, speed=0.5
+    voice = first_voice(subject)
+    varies = samples_of(subject, voice, LONG, speed=2.0) < samples_of(
+        subject, voice, LONG, speed=0.5
     )
+    assert varies == (Capability.SPEED in subject.capabilities())
 
 
 def test_a_declared_measurement_accounts_for_every_sample(measuring: Engine):

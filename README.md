@@ -1,8 +1,9 @@
 # elvenspeak
 
 Text-to-speech that speaks ElevenLabs' HTTP API, backed by
-[Piper](https://github.com/rhasspy/piper) voices running on the machine you
-start it on. Point a client's base URL at this instead of `api.elevenlabs.io`
+[Piper](https://github.com/rhasspy/piper) or
+[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) voices running on the
+machine you start it on. Point a client's base URL at this instead of `api.elevenlabs.io`
 and it keeps working — no account, no key, no network after the first start.
 
 It exists because the alternative failed in the way third-party dependencies
@@ -98,11 +99,46 @@ its resolution:
   `/stream/with-timestamps` reports it per object as `alignment_fidelity`, since
   fidelity is decided per sentence.
 
+Whether Kokoro can answer the timestamp endpoints at all depends on the export
+file it opened, not on the engine: the library reports support by checking
+whether the ONNX graph has a `duration` output. The published
+`model-files-v1.1` exports have it — including the default — so timings come
+back. The older `model-files-v1.0` exports do not, and a deployment running one
+of those gets a `501` from the timestamp endpoints instead of invented numbers.
+The engine reads this off the session it opened, so it can never claim timings
+it has no way to produce.
+
 ## Running it
 
 Needs **ffmpeg** on `PATH` — it is an executable, so `pyproject.toml` cannot
 declare it. `brew install ffmpeg` or `apt install ffmpeg`; the Dockerfile
 installs it and fails the build if the codecs are missing.
+
+The kokoro engine phonemizes through **espeak-ng**, which is a native library
+and an executable and so cannot be declared either: `brew install espeak-ng` or
+`apt install espeak-ng`, and the Dockerfile installs it and fails the build if
+it is missing. It has to be the system one — the `espeakng-loader` wheel that
+`kokoro-onnx` would otherwise use ships a library that on macOS ignores the data
+path it is handed and aborts the process, so the Dockerfile points
+`PHONEMIZER_ESPEAK_LIBRARY` at the apt-installed one. A piper-only deployment
+needs none of this.
+
+Installing espeak-ng is not enough on its own, because the bundled library is
+the one tried first and it aborts before phonemizer's system-wide fallback can
+run. Outside Docker, running the kokoro engine means naming the working library
+too:
+
+```
+PHONEMIZER_ESPEAK_LIBRARY=/opt/homebrew/lib/libespeak-ng.dylib          # macOS, arm64
+PHONEMIZER_ESPEAK_LIBRARY=/usr/local/lib/libespeak-ng.dylib             # macOS, x86_64
+PHONEMIZER_ESPEAK_LIBRARY=/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1   # Linux, x86_64
+PHONEMIZER_ESPEAK_LIBRARY=/usr/lib/aarch64-linux-gnu/libespeak-ng.so.1  # Linux, arm64
+```
+
+The engine does not go looking for one itself. A broken wheel on one platform is
+a fact about a development machine, and an engine that quietly hunted for a
+library that works would be a silent fallback inside the component whose job is
+to fail loudly.
 
 ```
 uv run main.py
@@ -113,7 +149,8 @@ nothing here touches the network.
 
 ```
 # The server's own, true whichever engine runs:
-ELVENSPEAK_ENGINE=piper            # the only one so far; any other name refuses to start
+ELVENSPEAK_ENGINE=piper            # or kokoro; any other name refuses to start,
+                                   # and says which names are real
 ELVENSPEAK_FALLBACK_VOICE=…        # default: the first voice the engine offers.
                                    # Empty string turns substitution off (404s).
 ELVENSPEAK_API_KEY=                # unset accepts every request
@@ -125,15 +162,37 @@ PIPER_VOICES=en_US-lessac-medium   # comma-separated; all installed at startup
 PIPER_MODELS_DIR=./models
 PIPER_ALLOW_DOWNLOAD=1             # 0 to require models be present already
 ELVENSPEAK_TIMESTAMPS=1            # 0 saves memory; timestamp endpoints 501
+
+# The Kokoro engine's own, read only when it is the engine:
+KOKORO_VOICES=af_heart,am_michael,bf_emma,bm_george
+                                   # comma-separated, and the order matters: the
+                                   # first is what ELVENSPEAK_FALLBACK_VOICE defaults to
+KOKORO_MODELS_DIR=./models
+KOKORO_MODEL=kokoro-v1.0.int8.onnx # which published ONNX export to open
+KOKORO_ALLOW_DOWNLOAD=1            # 0 to require assets be present already
 ```
 
-`ELVENSPEAK_TIMESTAMPS` is in the second group despite its name — the Piper
-engine is what reads it, and another engine would answer the timestamp
-endpoints on its own terms.
+`ELVENSPEAK_TIMESTAMPS` is in the Piper group despite its name — the Piper
+engine is what reads it, and another engine answers the timestamp endpoints on
+its own terms. Kokoro does not read it at all.
+
+Piper is the default because it is the first entry in the registry, and because
+of what it costs: it runs at an RTF of about 0.03, against Kokoro's 0.77 on the
+same class of machine — roughly twenty-five times the compute for the same
+second of speech. Kokoro sounds considerably better. That is a trade a
+deployment should make on purpose rather than inherit, so it is opt-in.
 
 Voices come from Piper's catalog of 175 — `en_US-amy-medium`,
 `en_GB-alba-medium`, `de_DE-thorsten-medium` and so on. Naming several installs
 several, and `GET /v1/voices` lists exactly what loaded.
+
+Kokoro's ids are an unrelated namespace: `af_heart`, `am_michael`, `bf_emma`,
+`zf_xiaoni`. The first character is the language — `a` American English, `b`
+British English, `e` Spanish, `f` French, `h` Hindi, `i` Italian, `j` Japanese,
+`p` Brazilian Portuguese, `z` Mandarin — and the second is the gender, `f` or
+`m`. All 54 voices ship in a single style pack of about 28 MB, so offering more
+of them costs no extra disk or memory; all 54 are selectable through
+`KOKORO_VOICES`, and four are offered by default.
 
 ### With Docker
 
@@ -142,9 +201,16 @@ docker build -t elvenspeak --build-arg PIPER_VOICES=en_US-lessac-medium .
 docker run -p 5001:5001 elvenspeak
 ```
 
-Voices are baked into the image, and `PIPER_ALLOW_DOWNLOAD` is off inside it: a
-missing model fails the deploy instead of quietly re-downloading 60 MB on every
-restart.
+```
+docker build -t elvenspeak-kokoro \
+  --build-arg ELVENSPEAK_ENGINE=kokoro \
+  --build-arg KOKORO_VOICES=af_heart,am_michael \
+  --build-arg KOKORO_MODEL=kokoro-v1.0.int8.onnx .
+```
+
+The bake step installs the assets of whichever engine `ELVENSPEAK_ENGINE` names,
+and that engine's `*_ALLOW_DOWNLOAD` is off inside the image: a missing model
+fails the deploy instead of quietly re-downloading 60 MB on every restart.
 
 ### Pointing openconv at it
 
@@ -161,8 +227,12 @@ client against whatever that URL names and has no opinion about what answers.
 uv run --extra dev pytest
 ```
 
-Only the API tests need a voice in `models/`, and they skip without one.
-Everything else runs anywhere.
+The tests that need real models fetch them instead of skipping, so the first run
+downloads the Piper voice and the Kokoro assets into `models/` — a few hundred
+MB, once, and nothing after that — and needs espeak-ng installed. The skip
+markers came out because a skip is indistinguishable from a pass in a summary,
+which meant the suite's most expensive claims silently stopped being made on
+exactly the machines least likely to have run them.
 
 Two of them are worth knowing about, because they encode findings rather than
 expectations. `test_pcm_length_matches_its_declared_rate` runs against the
@@ -175,11 +245,18 @@ pins the alignment fallback's honesty, not its numbers.
 
 ## Voice licensing
 
+The two engines differ in whether this needs checking per voice.
+
 Piper's code is MIT; its voices are licensed individually. The default,
 `en_US-lessac-medium`, ships from the `rhasspy/piper-voices` Hugging Face
 repository, tagged MIT at the repository level. Check a voice's own licence
 before switching — some are CC-BY or otherwise restricted, which matters if this
 ends up somewhere with commercial terms attached.
+
+Kokoro is uniform, so there is no per-voice check to do: the model
+(`hexgrad/Kokoro-82M`) is Apache-2.0, and all 54 voices ship inside that one
+release's single style pack under the same terms. The `kokoro-onnx` wrapper the
+exports come from is MIT.
 
 ## What this deliberately does not do
 

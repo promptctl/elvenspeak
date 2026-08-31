@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import engine
-from .provisioning import ConfigError
+from .provisioning import ConfigError, flag
 
 if TYPE_CHECKING:  # pragma: no cover - import cost is real, the symbol is not
     from collections.abc import Iterator, Mapping
@@ -307,7 +307,7 @@ def configure(env: "Mapping[str, str]") -> _Prepared:
         ("ELVENSPEAK_TIMESTAMPS", True),
     ):
         try:
-            flags[name] = _flag(env, name, default=default)
+            flags[name] = flag(env, name, default=default)
         except ValueError as error:
             problems.append(str(error))
             flags[name] = default
@@ -320,33 +320,6 @@ def configure(env: "Mapping[str, str]") -> _Prepared:
         models_dir=models_dir,
         allow_download=flags["PIPER_ALLOW_DOWNLOAD"],
         timings=flags["ELVENSPEAK_TIMESTAMPS"],
-    )
-
-
-_TRUE = frozenset({"1", "true", "yes", "on"})
-_FALSE = frozenset({"0", "false", "no", "off"})
-
-
-def _flag(env: "Mapping[str, str]", name: str, default: bool) -> bool:
-    """Reads a boolean setting, refusing anything that is not clearly one.
-
-    [LAW:no-silent-failure] The obvious implementation — true if the value is in
-    a true-set, false otherwise — makes `PIPER_ALLOW_DOWNLOAD=tru` mean "off",
-    silently, in the one function whose stated job is catching configuration
-    mistakes at startup. A typo in a boolean is exactly as much a mistake as a
-    typo in a port, and is reported the same way.
-    """
-    raw = env.get(name)
-    if raw is None:
-        return default
-    value = raw.strip().lower()
-    if value in _TRUE:
-        return True
-    if value in _FALSE:
-        return False
-    raise ValueError(
-        f"{name}={raw!r} is not a boolean; "
-        f"use one of {', '.join(sorted(_TRUE))} or {', '.join(sorted(_FALSE))}"
     )
 
 

@@ -5,9 +5,10 @@ voice on disk that no real download produced, and a second copy of "what a
 `.onnx.json` has to contain" would be free to drift from the first — leaving one
 file testing against a sidecar shape the other has stopped believing in.
 
-`DeclaredEngine` and `needs_installed_model` are here for the same reason from
-the two other directions a test reaches an engine: the fake one every capability
-test drives, and where the real one's model is kept.
+`DeclaredEngine` and the per-engine asset fixtures — `piper_installed`,
+`kokoro_installed`, `kokoro_timeless_installed` — are here for the same reason
+from the two other directions a test reaches an engine: the fake one every
+capability test drives, and where the real ones' models are kept.
 """
 
 from __future__ import annotations
@@ -42,9 +43,46 @@ _ENVIRONMENT = (
     "PIPER_VOICES",
     "PIPER_MODELS_DIR",
     "PIPER_ALLOW_DOWNLOAD",
+    "KOKORO_VOICES",
+    "KOKORO_MODELS_DIR",
+    "KOKORO_MODEL",
+    "KOKORO_ALLOW_DOWNLOAD",
     "HOST",
     "PORT",
 )
+
+
+def _use_a_working_espeak() -> None:
+    """Points the phonemizer at a system espeak-ng where the bundled one is broken.
+
+    Kokoro phonemizes through `espeakng-loader`, whose macOS wheel (0.2.4, the
+    latest) ships a dylib that ignores the data path it is initialized with and
+    aborts the process on a path from the machine it was built on. Verified
+    against the library directly, so it is the wheel rather than anything above
+    it — and it aborts rather than failing to load, so the fallback to a
+    system-wide espeak that phonemizer already has never fires.
+
+    `PHONEMIZER_ESPEAK_LIBRARY` is phonemizer's own documented override and is
+    read by Kokoro, so this needs nothing from the engine: a developer with
+    espeak-ng installed gets working tests, and an environment that already set
+    the variable keeps its own answer. The container installs espeak-ng from
+    apt and sets this in the Dockerfile, so nothing here is load-bearing for a
+    deployment.
+    """
+    if os.environ.get("PHONEMIZER_ESPEAK_LIBRARY"):
+        return
+    for candidate in (
+        "/opt/homebrew/lib/libespeak-ng.dylib",
+        "/usr/local/lib/libespeak-ng.dylib",
+        "/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1",
+        "/usr/lib/aarch64-linux-gnu/libespeak-ng.so.1",
+    ):
+        if Path(candidate).exists():
+            os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = candidate
+            return
+
+
+_use_a_working_espeak()
 
 
 #: The voice that a test wanting real audio needs installed, and where the image
@@ -57,14 +95,99 @@ MODELS_DIR = Path(
     os.environ.get("PIPER_MODELS_DIR", Path(__file__).parent.parent / "models")
 )
 
-#: Applied by the tests that synthesize for real. Skipped rather than mocked: a
-#: mocked Piper proves the caller calls something, and what these tests are for
-#: is what a real model actually produces.
-needs_installed_model = pytest.mark.skipif(
-    not (MODELS_DIR / f"{INSTALLED_VOICE}.onnx").exists(),
-    reason=f"no {INSTALLED_VOICE} model in {MODELS_DIR}; "
-    "fetch it with `uv run python -m elvenspeak.bake`",
+#: The Kokoro export the suite synthesizes with, and the voices it offers.
+#: `KOKORO_TIMELESS_MODEL` is the published `model-files-v1.0` export, whose ONNX
+#: graph has no `duration` output — the real deployment in which Kokoro cannot
+#: place phonemes in time, and so the subject of the tests about refusing to.
+KOKORO_MODEL = "kokoro-v1.0.int8.onnx"
+KOKORO_TIMELESS_MODEL = "kokoro-v1.0-notimings.onnx"
+KOKORO_VOICES = ("af_heart", "am_michael")
+_KOKORO_TIMELESS_URL = (
+    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
+    "model-files-v1.0/kokoro-v1.0.int8.onnx"
 )
+
+
+#: [LAW:no-silent-failure] These replaced a `skipif` that removed the tests when
+#: the models were absent. A skip is indistinguishable from a pass in a summary,
+#: so the suite's most expensive claims — that a real engine satisfies the
+#: contract — silently stopped being made on exactly the machines least likely to
+#: have run them before. Provisioning is what the marker should always have done:
+#: the assets are obtainable, so a missing one is a thing to fetch rather than a
+#: reason to assert nothing.
+#:
+#: [LAW:composability] One fixture per engine, rather than one that installs
+#: everything. A module that exercises Piper should not need Kokoro's ~142 MB and
+#: a working espeak-ng, and with a single fixture its asset bill grew every time
+#: an engine was registered. Each is fetched through that engine's own `acquire`,
+#: which is the door the image build uses, so a change that broke provisioning
+#: breaks this too. Idempotent and session-scoped: a warm checkout fetches
+#: nothing.
+
+
+@pytest.fixture(scope="session")
+def piper_installed() -> Path:
+    """The Piper voice the tests that synthesize for real speak in."""
+    piper_prepared(allow_download=True).acquire()
+    return MODELS_DIR
+
+
+@pytest.fixture(scope="session")
+def kokoro_installed() -> Path:
+    """Kokoro's default export and its style pack."""
+    kokoro_prepared(allow_download=True).acquire()
+    return MODELS_DIR
+
+
+@pytest.fixture(scope="session")
+def kokoro_timeless_installed(kokoro_installed: Path) -> Path:
+    """The one asset no `acquire` installs: the export reporting no durations.
+
+    Its own fixture, so only the two tests that need this second ~92 MB export
+    pay for it. A deployment chooses one export, so no engine's provisioning has
+    cause to fetch a second — but the property under test is that the capability
+    follows the export rather than the engine's name, and that is unfalsifiable
+    with only the export that reports durations.
+
+    Downloaded through `kokoro._fetch` rather than by a copy of it here. This was
+    a hand-rolled duplicate that had already lost the empty-body check and the
+    partial-file cleanup its original grew, which is the drift a second copy is
+    always free to do — and it would have poisoned the shared `models/` cache
+    with a file every later run treated as installed. Reaching for a private is
+    the smaller evil: there is one implementation of download-verify-rename, and
+    the release this asset comes from is the caller's business, which is why
+    `_fetch` takes the URL.
+    """
+    from elvenspeak import kokoro
+
+    kokoro._fetch(MODELS_DIR / KOKORO_TIMELESS_MODEL, _KOKORO_TIMELESS_URL, True)
+    return MODELS_DIR
+
+
+def kokoro_prepared(
+    models_dir: Path = MODELS_DIR,
+    *,
+    voices: tuple[str, ...] = KOKORO_VOICES,
+    model: str = KOKORO_MODEL,
+    allow_download: bool = False,
+):
+    """Kokoro configured for a test, through the door a deployment uses.
+
+    [LAW:behavior-not-structure] Like `piper_prepared`, it goes through
+    `kokoro.configure` rather than reaching past it. A test that built the engine
+    some other way would keep passing after the parse it skipped stopped being
+    able to produce that value.
+    """
+    from elvenspeak import kokoro
+
+    return kokoro.configure(
+        {
+            "KOKORO_VOICES": ",".join(voices),
+            "KOKORO_MODELS_DIR": str(models_dir),
+            "KOKORO_MODEL": model,
+            "KOKORO_ALLOW_DOWNLOAD": "1" if allow_download else "0",
+        }
+    )
 
 
 def piper_prepared(

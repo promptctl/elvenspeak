@@ -19,7 +19,6 @@ from __future__ import annotations
 import pytest
 from conftest import INSTALLED_VOICE as VOICE
 from conftest import MODELS_DIR as MODELS
-from conftest import needs_installed_model
 from fastapi import FastAPI
 
 import main
@@ -36,7 +35,7 @@ def test_the_factory_entry_point_exits_the_same_way(monkeypatch, capsys):
     assert "PORT" in capsys.readouterr().err
 
 
-@needs_installed_model
+@pytest.mark.usefixtures("piper_installed")
 def test_a_fallback_naming_no_offered_voice_exits_the_same_way(monkeypatch, capsys):
     """The one configuration problem that cannot be found while parsing.
 
@@ -66,7 +65,7 @@ def test_a_fallback_naming_no_offered_voice_exits_the_same_way(monkeypatch, caps
     assert "en_GB-nonexistent-medium" in capsys.readouterr().err
 
 
-@needs_installed_model
+@pytest.mark.usefixtures("piper_installed")
 def test_a_good_environment_builds_an_application(monkeypatch):
     """The success path, so the failure tests are not the only thing exercised.
 
