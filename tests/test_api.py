@@ -10,23 +10,17 @@ from __future__ import annotations
 
 import base64
 import json
-import os
-from pathlib import Path
 
 import pytest
+from conftest import INSTALLED_VOICE as VOICE
+from conftest import MODELS_DIR as MODELS
+from conftest import needs_installed_model
 from fastapi.testclient import TestClient
 
 from elvenspeak import create_app, piper
 from elvenspeak.settings import Settings
 
-VOICE = "en_US-lessac-medium"
-MODELS = Path(os.environ.get("PIPER_MODELS_DIR", Path(__file__).parent.parent / "models"))
-
-pytestmark = pytest.mark.skipif(
-    not (MODELS / f"{VOICE}.onnx").exists(),
-    reason=f"no {VOICE} model in {MODELS}; "
-    "fetch it with PIPER_ALLOW_DOWNLOAD=1 uv run main.py",
-)
+pytestmark = needs_installed_model
 
 #: An ElevenLabs voice id from aliases.toml. Used to prove substitution, which
 #: is the behaviour openconv depends on.
