@@ -1,6 +1,6 @@
 """Entry point: reads the environment, builds the app, serves it.
 
-Kept at the repository root, and kept this thin, because `uv run main.py` is
+Kept at the repository root, and kept this thin, because `uv run … main.py` is
 what the README has always told people to type and what the container image
 runs. Everything it does beyond wiring belongs in the package.
 """

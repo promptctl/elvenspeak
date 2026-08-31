@@ -3,18 +3,15 @@ name = "elvenspeak"
 version = "1.0.0"
 description = "Serves the ElevenLabs text-to-speech API from a local engine"
 requires-python = ">=3.12"
+# Everything the ElevenLabs surface itself needs, and nothing an engine needs.
+# [LAW:one-source-of-truth] `tests/test_encoding.py` proves statically that the
+# reusable half of this package cannot reach an engine library; this list is the
+# same claim written where an installer can read it, and the two have to agree.
+# A project that brings its own engine installs `elvenspeak` and gets the API
+# surface — not two ONNX runtimes, a phonemizer and an espeak wheel it will never
+# call, whose pins are also free to conflict with the ones its own engine needs.
 dependencies = [
     "fastapi>=0.141.1",
-    # The `alignment` extra pulls in `onnx`, which patches a voice model at load
-    # time to expose per-phoneme durations. Without it the /with-timestamps
-    # endpoints have nothing real to report, so it is a dependency rather than
-    # an option — see elvenspeak/alignment.py.
-    "piper-tts[alignment]>=1.7.0",
-    # The second engine. Pulls onnxruntime, numpy and phonemizer; it is a
-    # dependency rather than an extra because `elvenspeak.engines` lists it, and
-    # an engine a deployment can select by name but cannot import would turn a
-    # configuration choice into an ImportError at boot.
-    "kokoro-onnx>=0.6.1",
     "uvicorn[standard]>=0.52.4",
 ]
 
@@ -23,7 +20,26 @@ dependencies = [
 # MP3 and so made the whole service single-format. See elvenspeak/formats.py,
 # and the Dockerfile, which installs it.
 
+# [LAW:one-source-of-truth] Each engine's extra is named after the key that
+# selects that engine in `elvenspeak.engines.ENGINES`, so `ELVENSPEAK_ENGINE=x`
+# and `pip install elvenspeak[x]` are one word rather than two that can drift.
+# `tests/test_packaging.py` holds them together; the Dockerfile installs the
+# extra by interpolating the engine it was built for.
+#
+# Listing an engine here rather than above costs the registry nothing, because
+# neither engine module imports its library at module scope — `elvenspeak.engines`
+# is importable with both extras absent. An engine whose library is missing fails
+# when it is asked to `acquire` or `open`, which is the same boot-time refusal it
+# already gives for a missing model or a missing espeak-ng, and it reaches only
+# the deployment that selected it.
 [project.optional-dependencies]
+# The `alignment` extra pulls in `onnx`, which patches a voice model at load time
+# to expose per-phoneme durations. Without it Piper declares no TIMESTAMPS and
+# the /with-timestamps endpoints refuse — see elvenspeak/alignment.py.
+piper = ["piper-tts[alignment]>=1.7.0"]
+# Pulls onnxruntime, numpy and phonemizer. Also needs espeak-ng, which is a
+# native library no Python metadata can install; see the README.
+kokoro = ["kokoro-onnx>=0.6.1"]
 dev = [
     "httpx>=0.28",
     "pytest>=8.3",
