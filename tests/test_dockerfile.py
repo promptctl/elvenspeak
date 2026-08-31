@@ -218,19 +218,15 @@ def test_the_build_runs_no_python_source_of_its_own():
 def test_the_voice_bake_runs_a_module_that_exists_and_refuses_a_bad_environment():
     """[LAW:verifiable-goals] The exact invocation, executed rather than grepped.
 
-    A module name in a RUN is still a reference this repository has to honour,
-    and the previous version of that reference broke when `install` moved. This
-    resolves it the only way that cannot share an assumption with the thing it
-    checks: by running it.
+    A bad `PORT` rather than a bad voice, so this needs no network and no model.
+    Exit 2 with the problem on stderr proves the module the Dockerfile names is
+    importable, that `python -m` reaches an entry point rather than importing
+    something inert, and that it reports a bad environment the way every other
+    entry point does.
 
-    A bad `PORT` rather than a bad voice, so the check needs no network and no
-    model. Exit 2 with the problem on stderr proves three things at once — the
-    module the Dockerfile names is importable, `python -m` actually reaches its
-    entry point rather than importing a module that does nothing, and it reads
-    the environment through the same reporting path as every other entry point.
-
-    What the bake *guarantees* is `tests/test_bake.py`'s subject; it can call
-    `bake` directly, which is the whole reason this step was given a file.
+    It stops there, before `bake` is called: what the bake guarantees, and that
+    it still reaches `piper.install`, is `tests/test_bake.py`'s subject, which
+    calls it directly — the whole reason this step was given a file.
     """
     import subprocess
     import sys

@@ -181,23 +181,11 @@ def test_a_bad_environment_exits_two_naming_every_problem(monkeypatch, capsys):
         assert expected in stderr
 
 
-def test_a_good_environment_comes_back_as_settings(monkeypatch):
+def test_a_good_environment_comes_back_as_settings(clean_env):
     """The positive control: the exit is not the only way out of it.
 
-    Every variable this module reads is cleared first, so the result is the
-    documented defaults rather than whatever the shell running the tests
-    happens to export.
+    Against an environment holding none of what this module reads, so the
+    result is the documented defaults rather than whatever the shell running
+    the tests happens to export.
     """
-    for name in (
-        "PIPER_VOICES",
-        "PIPER_FALLBACK_VOICE",
-        "PIPER_MODELS_DIR",
-        "PIPER_ALLOW_DOWNLOAD",
-        "ELVENSPEAK_API_KEY",
-        "ELVENSPEAK_TIMESTAMPS",
-        "HOST",
-        "PORT",
-    ):
-        monkeypatch.delenv(name, raising=False)
-
     assert Settings.from_env_or_exit().voices == (DEFAULT_VOICE,)

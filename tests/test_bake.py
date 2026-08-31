@@ -117,19 +117,21 @@ def test_a_missing_voice_is_fetched_even_though_the_runtime_may_not_fetch(
     assert voice.id == KEY
 
 
-def test_the_baked_voices_are_the_ones_the_environment_names(tmp_path, monkeypatch):
+def test_the_baked_voices_are_the_ones_the_environment_names(tmp_path, clean_env):
     """[LAW:one-source-of-truth] The build reads voices the way the server does.
 
     This step once re-implemented `Settings.from_env`'s split-and-strip under a
     comment asserting the two agreed. Pinned end to end — the spacing a caller
     naturally writes in `--build-arg PIPER_VOICES="a, b"` is the spacing that
     parsing must survive.
+
+    The only test here that goes through the real environment, so it is also
+    the only one that has to start from an empty one.
     """
     make_voice(tmp_path, key="en_US-lessac-medium")
     make_voice(tmp_path, key="en_GB-alba-medium")
-    monkeypatch.setenv("PIPER_VOICES", "en_US-lessac-medium, en_GB-alba-medium")
-    monkeypatch.setenv("PIPER_MODELS_DIR", str(tmp_path))
-    monkeypatch.delenv("PIPER_FALLBACK_VOICE", raising=False)
+    clean_env.setenv("PIPER_VOICES", "en_US-lessac-medium, en_GB-alba-medium")
+    clean_env.setenv("PIPER_MODELS_DIR", str(tmp_path))
 
     baked = bake(Settings.from_env())
 
