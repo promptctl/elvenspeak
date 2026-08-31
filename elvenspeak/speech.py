@@ -220,6 +220,9 @@ async def encode_stream(
     pump = asyncio.create_task(_pump(process, pcm_chunks))
     errors = asyncio.create_task(process.stderr.read())
     failure: BaseException | None = None
+    #: Whether the SIGKILL below came from this function. An exit code cannot
+    #: carry that, and it is the only thing that makes -9 acceptable.
+    killed_here = False
 
     try:
         while True:
@@ -266,6 +269,7 @@ async def encode_stream(
         try:
             await asyncio.wait_for(process.wait(), timeout=_EXIT_TIMEOUT)
         except TimeoutError:
+            killed_here = True
             process.kill()
             await process.wait()
 
@@ -275,7 +279,14 @@ async def encode_stream(
         raise SynthesisFailed(
             f"synthesis failed before the {fmt.wire_name} audio was complete"
         ) from failure
-    if process.returncode not in (0, -9):
+    # -9 is tolerated only when the kill above is where it came from. Inferring
+    # that from the exit code instead accepts every other SIGKILL as success —
+    # and an ffmpeg killed mid-encode, the OOM killer being the realistic cause
+    # here, closes stdout as it dies. The read loop sees an ordinary EOF, exits
+    # without exception, and `wait()` returns -9 without the timeout branch ever
+    # running, so whatever was encoded before the kill ships as a complete 200.
+    tolerated = (0, -9) if killed_here else (0,)
+    if process.returncode not in tolerated:
         raise SynthesisFailed(
             f"ffmpeg exited {process.returncode} encoding {fmt.wire_name}: "
             f"{stderr.decode(errors='replace')[:500]}"
