@@ -286,29 +286,32 @@ def create_app(settings: Settings) -> FastAPI:
         body: SpeechRequest,
         extra: dict[str, str] | None = None,
     ) -> dict[str, str]:
-        out = {"x-elvenspeak-voice": resolution.voice.key}
+        # Every value is a list of parts, single-valued headers being lists of
+        # one. `x-elvenspeak-ignored` is genuinely a list and the rest are not,
+        # and giving them two shapes meant escaping ran in two places — the list
+        # escaped its separator before the join, everything else after it — so a
+        # value could be escaped twice and a backslash come out mangled. One
+        # shape means one pass, below, with nothing to sequence.
+        out: dict[str, tuple[str, ...]] = {
+            "x-elvenspeak-voice": (resolution.voice.key,)
+        }
         if resolution.substituted:
-            out["x-elvenspeak-voice-requested"] = resolution.requested
+            out["x-elvenspeak-voice-requested"] = (resolution.requested,)
         ignored = body.ignored()
         if ignored:
-            # Comma is the separator, and these names are arbitrary JSON keys —
-            # `extra="allow"` is what makes rule 2 hold for fields this server has
-            # never heard of, and it accepts a field literally named `a, b`. Left
-            # bare, that name arrives looking like two of them, so the header
-            # would misreport the thing it exists to report accurately. Escaped
-            # in the same form `_ascii_safe` produces, so there is one convention.
-            out["x-elvenspeak-ignored"] = ", ".join(
-                name.replace(",", "\\x2c") for name in ignored
-            )
+            out["x-elvenspeak-ignored"] = ignored
         # An endpoint with a header of its own passes it here rather than
         # assigning it onto the result, so there is no way to add one that skips
         # the escaping below — the guarantee is structural rather than a habit.
-        out.update(extra or {})
+        out.update({name: (value,) for name, value in (extra or {}).items()})
         # [LAW:single-enforcer] Every response header this service sends is built
         # here, so this is the one place the wire's encoding has to be satisfied.
         # Applied to all values rather than to the caller-controlled ones, so
         # adding a header later cannot reintroduce the problem by omission.
-        return {name: _ascii_safe(value) for name, value in out.items()}
+        return {
+            name: ", ".join(_ascii_safe(part) for part in parts)
+            for name, parts in out.items()
+        }
 
     # ----------------------------------------------------------------- health
 
@@ -540,11 +543,33 @@ def _ascii_safe(value: str) -> str:
     below would refuse that on the way out is not something this function should
     be leaning on unstated. Everything outside `\\x20`-`\\x7e` is escaped, which
     covers C0, DEL, and the non-ASCII case together.
+
+    Backslash and comma are escaped too, which is what makes the rendering
+    reversible. Backslash introduces every escape, so leaving it alone let a
+    caller send the literal text `\\x2c` and receive it back indistinguishable
+    from a comma this function escaped — the header could no longer say which
+    characters were really asked for. Comma separates the parts of a
+    multi-valued header, so a comma inside one part would read as two.
     """
     return "".join(
-        char if " " <= char <= "~" else char.encode("unicode_escape").decode("ascii")
+        char if " " <= char <= "~" and char not in "\\," else _escaped(char)
         for char in value
     )
+
+
+def _escaped(char: str) -> str:
+    """One character as a `\\xNN`, `\\uNNNN` or `\\UNNNNNNNN` escape.
+
+    Spelled here rather than via `unicode_escape`, which renders some characters
+    as short forms (`\\r`, `\\n`) and leaves printable ones like comma untouched —
+    two shapes and an exception, where the header wants one shape and none.
+    """
+    code = ord(char)
+    if code <= 0xFF:
+        return f"\\x{code:02x}"
+    if code <= 0xFFFF:
+        return f"\\u{code:04x}"
+    return f"\\U{code:08x}"
 
 
 def _require_timestamps(request: Request) -> None:

@@ -472,3 +472,42 @@ def test_the_alignment_header_goes_through_the_same_escaping(client):
     assert response.status_code == 200
     assert response.headers["x-elvenspeak-alignment"] in ("word-exact", "interpolated")
     assert response.headers["x-elvenspeak-voice"] == VOICE
+
+
+def test_the_escaping_is_reversible(client):
+    """A backslash the caller sent cannot pass as one the server produced.
+
+    Every escape this function emits starts with a backslash, so leaving an
+    input backslash alone let a caller send the literal text `\\x2c` and receive
+    it back identical to a comma the server had escaped. The header's whole
+    justification is telling a caller what it actually asked for, which it
+    cannot do if two different requests produce the same answer.
+    """
+    from elvenspeak.api import _ascii_safe
+
+    assert _ascii_safe("a, b") == "a\\x2c b"
+    # The literal text, sent by a caller, must not collide with the above.
+    assert _ascii_safe("a\\x2c b") != _ascii_safe("a, b")
+    assert _ascii_safe("a\\x2c b") == "a\\x5cx2c b"
+    # Still one shape for every escape, rather than unicode_escape's short forms.
+    assert _ascii_safe("\r\n") == "\\x0d\\x0a"
+
+
+def test_a_voice_id_with_a_backslash_round_trips_unambiguously(client):
+    response = client.post(
+        "/v1/text-to-speech/back%5Cslash/stream", json={"text": "hello"}
+    )
+    assert response.status_code == 200
+    assert response.headers["x-elvenspeak-voice-requested"] == "back\\x5cslash"
+
+
+def test_multi_speaker_voices_are_reported_in_the_listing(client):
+    """Read from the sidecar and now said out loud.
+
+    There is no ElevenLabs field to select a speaker with, so a multi-speaker
+    model always speaks as its default — better stated in the listing than
+    discovered by listening.
+    """
+    body = client.get("/v1/voices").json()
+    assert body["voices"]
+    assert all("speakers" in voice["labels"] for voice in body["voices"])
