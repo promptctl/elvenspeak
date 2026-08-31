@@ -164,3 +164,33 @@ def test_the_voice_list_is_not_parsed_a_second_time():
     text = DOCKERFILE.read_text()
     assert "Settings.from_env" in text
     assert "PIPER_VOICES'].split" not in text
+
+
+def test_the_baked_default_voice_is_the_projects_default_voice():
+    """[LAW:one-source-of-truth] The ARG default and DEFAULT_VOICE, tied together.
+
+    A Dockerfile ARG cannot read a Python constant at parse time, so the
+    duplication is not removable and is machine-checked instead — the same
+    approach the Python version pin takes, for the same reason.
+
+    Left to drift, "the default voice" means one thing for an image built with no
+    --build-arg and another for `uv run main.py`, and the way that gets noticed is
+    by listening to the wrong voice.
+    """
+    from elvenspeak.settings import DEFAULT_VOICE
+
+    declared = re.search(r"^\s*ARG\s+PIPER_VOICES=(\S+)", DOCKERFILE.read_text(), re.MULTILINE)
+    assert declared, "no ARG PIPER_VOICES found"
+    assert declared.group(1) == DEFAULT_VOICE
+
+
+def test_substituted_env_values_are_quoted():
+    """ENV splits on unescaped whitespace after substitution.
+
+    `--build-arg PIPER_VOICES="a, b"` — the natural way to write a list, and the
+    spacing `Settings.from_env` strips specifically to accept — produces a token
+    with no `=` and breaks the instruction before the value reaches Python.
+    """
+    for line in DOCKERFILE.read_text().splitlines():
+        for name, value in re.findall(r"(\w+)=(\$\{\w+\})", line):
+            assert False, f"unquoted substitution {name}={value}; wrap it in quotes"
