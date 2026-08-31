@@ -9,10 +9,13 @@ that an output format's name describes the bytes it returns.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 
+from elvenspeak.encoding import SynthesisFailed, encode, encode_stream
 from elvenspeak.formats import OutputFormat
-from elvenspeak.speech import SynthesisFailed, encode, encode_stream
 
 NATIVE_RATE = 22050
 #: One second of a cheap non-silent waveform. Non-silent because some encoders
@@ -103,3 +106,125 @@ async def test_a_failure_on_the_very_first_chunk_still_raises():
 
     with pytest.raises(SynthesisFailed):
         await encode_stream_to_bytes(failing_immediately())
+
+
+PACKAGE = Path(__file__).resolve().parent.parent / "elvenspeak"
+PACKAGE_NAME = PACKAGE.name
+
+
+def _imported_modules(module_file: Path) -> set[str]:
+    """Canonical dotted names of every module `module_file` imports.
+
+    Canonical because one module has four spellings — `import elvenspeak.speech`,
+    `from elvenspeak import speech`, `from .speech import Prosody`,
+    `from . import speech` — and a matcher that recognises only the spellings the
+    package happens to use today has a hole exactly the shape of the ones it
+    does not. Every form is resolved to `elvenspeak.speech` here, once, so that
+    neither the engine check nor the graph walk below has to know how an import
+    was written.
+
+    `ast.walk` rather than a scan of the top level, because this package imports
+    Piper exclusively from inside functions and `if TYPE_CHECKING` blocks — so a
+    check that only read module-scope imports would report every module in the
+    package as Piper-free, including the ones built entirely around it.
+    """
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(module_file.read_text())):
+        if isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            # A flat package has no `..` to resolve against, and guessing at one
+            # would silently mis-resolve rather than fail. [LAW:no-silent-failure]
+            assert node.level <= 1, f"{module_file}: unhandled relative import"
+            base = node.module or ""
+            if node.level:
+                base = f"{PACKAGE_NAME}.{base}" if base else PACKAGE_NAME
+            # Both, because `from x import y` names a module in `x` when y is a
+            # submodule and a class in `x` when it is not; the resolver below
+            # tells them apart by which one is backed by a file.
+            found.add(base)
+            found.update(f"{base}.{alias.name}" for alias in node.names)
+    return found
+
+
+def _followed_module_file(name: str) -> Path | None:
+    """The file to walk into for a dotted name, or None if this graph skips it.
+
+    The package root is skipped, and skipped deliberately: `__init__.py`
+    re-exports the package, so treating it as a dependency of one of its own
+    members makes the graph cyclic — every module reaches every other, and the
+    seam check reports coupling that no code has. `from . import formats` names
+    the root as well as the submodule, which is how a harmless sibling import
+    ends up looking like a route to the engine.
+
+    The cost is a literal `import elvenspeak` inside a package module, which
+    would go unfollowed. Nothing writes that, and following it would make this
+    check meaningless for every module in the package, so it is a limit taken on
+    purpose rather than an oversight.
+    """
+    if name == PACKAGE_NAME or not name.startswith(f"{PACKAGE_NAME}."):
+        return None
+    path = PACKAGE / (name[len(PACKAGE_NAME) + 1 :].replace(".", "/") + ".py")
+    return path if path.exists() else None
+
+
+def _modules_reaching_piper(root: str) -> set[str]:
+    """First-party modules reachable from `root` that name Piper."""
+    hits: set[str] = set()
+    seen: set[str] = set()
+    queue = [f"{PACKAGE_NAME}.{root}"]
+
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        source = _followed_module_file(name)
+        if source is None:
+            continue
+        for imported in _imported_modules(source):
+            if imported.split(".")[0] == "piper":
+                hits.add(name)
+            elif _followed_module_file(imported) is not None:
+                queue.append(imported)
+    return hits
+
+
+@pytest.mark.parametrize("root", ["encoding", "text"])
+def test_the_encoder_cannot_reach_the_engine(root: str):
+    """The seam, asserted rather than described.
+
+    Encoding is engine-agnostic for every engine that will ever exist — they all
+    emit PCM and ffmpeg does not care who produced it. That claim is what makes
+    the encoder the reusable half, and it is worth nothing as a sentence in a
+    docstring: one convenience import of a Piper type for an annotation would
+    quietly undo it, every other test would stay green, and the second engine
+    would discover the coupling instead of the reviewer.
+
+    Read statically off the import graph rather than observed at runtime. The
+    obvious runtime version — import the module and look for `piper` in
+    `sys.modules` — passes whether or not the seam holds, because nothing here
+    imports Piper at module scope; it was written, it went green, and it was
+    only caught by re-coupling the module on purpose to watch it stay green.
+
+    Transitive, because `from . import speech` inside `encoding` would satisfy a
+    direct-import check while dragging the whole engine in behind it.
+    """
+    assert not _modules_reaching_piper(root)
+
+
+@pytest.mark.parametrize("root", ["speech", "api"])
+def test_the_seam_check_can_actually_fail(root: str):
+    """Positive control: the detector still detects.
+
+    A test that cannot fail proves nothing, and this one has now been unable to
+    fail twice — first as a runtime `sys.modules` probe that saw nothing because
+    Piper is imported lazily, then as a matcher that followed relative imports
+    only and would have walked straight past `import elvenspeak.speech`. Both
+    were green, and both were caught by hand rather than by the suite.
+
+    `speech` and `api` genuinely do reach Piper, so they pin the detector from
+    the other side: any future edit to the resolver that quietly stops finding
+    things turns this red instead of turning the seam test vacuous.
+    """
+    assert _modules_reaching_piper(root)
