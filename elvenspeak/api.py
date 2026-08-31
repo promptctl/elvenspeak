@@ -281,13 +281,29 @@ def create_app(settings: Settings) -> FastAPI:
         except voices.VoiceNotInstalled as error:
             raise HTTPException(status_code=404, detail=str(error)) from None
 
-    def headers(resolution: voices.Resolution, body: SpeechRequest) -> dict[str, str]:
+    def headers(
+        resolution: voices.Resolution,
+        body: SpeechRequest,
+        extra: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         out = {"x-elvenspeak-voice": resolution.voice.key}
         if resolution.substituted:
             out["x-elvenspeak-voice-requested"] = resolution.requested
         ignored = body.ignored()
         if ignored:
-            out["x-elvenspeak-ignored"] = ", ".join(ignored)
+            # Comma is the separator, and these names are arbitrary JSON keys —
+            # `extra="allow"` is what makes rule 2 hold for fields this server has
+            # never heard of, and it accepts a field literally named `a, b`. Left
+            # bare, that name arrives looking like two of them, so the header
+            # would misreport the thing it exists to report accurately. Escaped
+            # in the same form `_ascii_safe` produces, so there is one convention.
+            out["x-elvenspeak-ignored"] = ", ".join(
+                name.replace(",", "\\x2c") for name in ignored
+            )
+        # An endpoint with a header of its own passes it here rather than
+        # assigning it onto the result, so there is no way to add one that skips
+        # the escaping below — the guarantee is structural rather than a habit.
+        out.update(extra or {})
         # [LAW:single-enforcer] Every response header this service sends is built
         # here, so this is the one place the wire's encoding has to be satisfied.
         # Applied to all values rather than to the caller-controlled ones, so
@@ -298,11 +314,13 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.get("/health")
     def health(request: Request) -> dict:
-        cat = request.app.state.catalog
-        return {
-            "status": "ok",
-            "voices": [voice.key for voice in cat.installed] if cat else [],
-        }
+        # No guard on the catalog: the lifespan sets it before the first request,
+        # and an empty `voices` list is the healthcheck's signal for "this server
+        # cannot speak". Reporting that for a catalog that failed to exist would
+        # answer the one question this endpoint is asked with a real-looking
+        # answer to a different one.
+        cat = catalog(request)
+        return {"status": "ok", "voices": [voice.key for voice in cat.installed]}
 
     # --------------------------------------------------------------- synthesis
 
@@ -382,11 +400,13 @@ def create_app(settings: Settings) -> FastAPI:
             timed.sample_rate,
             measured=timed.measured,
         )
-        response_headers = headers(resolution, body)
-        response_headers["x-elvenspeak-alignment"] = aligned.fidelity.value
         return JSONResponse(
             content=_timestamped(audio, aligned),
-            headers=response_headers,
+            headers=headers(
+                resolution,
+                body,
+                {"x-elvenspeak-alignment": aligned.fidelity.value},
+            ),
         )
 
     @app.post(
@@ -432,7 +452,13 @@ def create_app(settings: Settings) -> FastAPI:
                 # computed from summed phoneme durations — and the two drift the
                 # moment any sample is unattributed, silently sliding every later
                 # sentence against its own audio.
-                elapsed = aligned.ends[-1] if aligned.ends else elapsed
+                # Unguarded: `align` returns empty lists only for empty text, and
+                # `split_sentences` strips and filters, so no empty sentence
+                # reaches here. A guard would not protect anything — it would
+                # carry the previous sentence's `elapsed` forward and lay this
+                # one over audio already accounted for, which is the drift the
+                # line above was rewritten to stop.
+                elapsed = aligned.ends[-1]
                 yield json.dumps(_timestamped(audio, aligned)).encode() + b"\n"
 
         return StreamingResponse(

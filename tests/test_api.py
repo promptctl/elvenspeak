@@ -438,3 +438,37 @@ def test_one_voice_serves_concurrent_requests():
     # magnitude. A corrupted or truncated concurrent run shows up here.
     shortest, longest = min(map(len, results)), max(map(len, results))
     assert longest < shortest * 2
+
+
+def test_an_ignored_field_name_containing_a_comma_stays_one_name(client):
+    """The separator cannot be forged by a field name.
+
+    `extra="allow"` is what makes rule 2 hold for fields this server has never
+    heard of, and it accepts a field literally named `a, b`. Joined bare, that
+    name arrives looking like two ignored fields — the header misreporting the
+    one thing it exists to report accurately.
+    """
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}/stream",
+        json={"text": "hello", "a, b": 1},
+    )
+    assert response.status_code == 200
+    reported = response.headers["x-elvenspeak-ignored"]
+    assert "a\\x2cb" in reported.replace(" ", "")
+    # One name, so splitting on the separator yields one entry.
+    assert len([part for part in reported.split(", ") if part]) == 1
+
+
+def test_the_alignment_header_goes_through_the_same_escaping(client):
+    """Endpoint-specific headers are built by `headers()`, not assigned after it.
+
+    This one is a closed enum today, so the value is safe either way; what is
+    pinned is that it is routed through the single checkpoint, since a header
+    assigned onto the result afterwards is how the next one would skip it.
+    """
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}/with-timestamps", json={"text": "hello"}
+    )
+    assert response.status_code == 200
+    assert response.headers["x-elvenspeak-alignment"] in ("word-exact", "interpolated")
+    assert response.headers["x-elvenspeak-voice"] == VOICE
