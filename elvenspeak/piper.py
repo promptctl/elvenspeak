@@ -1,7 +1,8 @@
 """Piper, as one engine behind [`elvenspeak.engine`]'s interface.
 
 Everything Piper-shaped in this service lives here: ONNX sessions, `.onnx.json`
-sidecars, espeak's phoneme alphabet, `length_scale`, the voice download. Nothing
+sidecars, espeak's phoneme alphabet, `length_scale`, the voice download, and —
+since [`configure`] — the environment variables that name all of it. Nothing
 outside this module names any of it, which is what makes the ElevenLabs surface
 above reusable with a different engine under it.
 
@@ -9,14 +10,25 @@ This module is `elvenspeak.piper`; the library it wraps is the top-level `piper`
 Imports here are absolute, so `from piper import ...` reaches the library and
 never this file.
 
+# Why this module reads its own environment
+
+`PIPER_MODELS_DIR` and `PIPER_ALLOW_DOWNLOAD` describe a directory of ONNX files,
+which is a fact about Piper and meaningless to an engine that reaches a remote
+API. Parsed here, they are asked for by the one component that understands them;
+held in [`Settings`] instead, they would be fields every other engine is handed
+and ignores — and the first engine needing a credential would add a field to the
+server's configuration that Piper in turn ignores ([LAW:types-are-the-program]).
+[`configure`] raises the same [`ConfigError`] the server does, so a Piper problem
+and a port problem arrive in one list at one moment.
+
 # Why the voices are on disk and loaded before anything is served
 
 A Piper voice is a ~60 MB ONNX file, and building a session from one is seconds
 of work. Doing either inside a request charges an unbounded, silent delay to
 whichever caller happened to be first, on the event loop, stalling every other
-request including `/health`. [`load`] therefore fetches, describes and opens
-every voice before it returns, so a missing, truncated or corrupt model is one
-clean failure to boot — and so [`PiperEngine.voices`] can promise what the
+request including `/health`. [`_Prepared.open`] therefore fetches, describes and
+opens every voice before it returns, so a missing, truncated or corrupt model is
+one clean failure to boot — and so [`PiperEngine.voices`] can promise what the
 interface asks of it: these can be spoken *now*.
 
 # Why alignment support is decided once for the process
@@ -39,13 +51,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import engine
+from .provisioning import ConfigError
 
 if TYPE_CHECKING:  # pragma: no cover - import cost is real, the symbol is not
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
     from piper import PiperVoice
 
 _LOGGER = logging.getLogger("elvenspeak.piper")
+
+#: The voice installed when none is named. `en_US-lessac-medium` because it is
+#: the one Piper voice that is MIT at the repository level, so a default install
+#: carries no licence surprise — see README, "Voice licensing".
+DEFAULT_VOICE = "en_US-lessac-medium"
 
 #: Phonemes espeak emits that mark structure rather than sound — the run-up into
 #: an utterance, the run-out, a line break. They consume real time but belong to
@@ -67,7 +85,7 @@ _INHERENT = frozenset({engine.Capability.SPEED})
 class _Ready:
     """A voice whose files are present and whose sidecar has been read.
 
-    [LAW:parse-dont-validate] What [`install`] returns, and it exists because the
+    [LAW:parse-dont-validate] What [`_install`] returns, and it exists because the
     obvious return — the path it was handed — proves nothing. A path says two
     files have the right names; this says the voice can actually be described,
     which is what "installed" has to mean for the image build that depends on it.
@@ -96,9 +114,9 @@ class _Installed:
 class PiperEngine:
     """Speech from local Piper voices, opened and ready.
 
-    Constructed by [`load`] rather than directly, because an instance holding a
-    voice it cannot speak in would be the state this whole module is arranged to
-    make unreachable.
+    Constructed by [`_Prepared.open`] rather than directly, because an instance
+    holding a voice it cannot speak in would be the state this whole module is
+    arranged to make unreachable.
     """
 
     def __init__(
@@ -110,11 +128,26 @@ class PiperEngine:
         self._capabilities = capabilities
 
     def voices(self) -> tuple[engine.Voice, ...]:
-        return tuple(self._installed[key].voice for key in sorted(self._installed))
+        """Every configured voice, in the order the operator named them.
+
+        Configured order rather than sorted, because the interface makes this
+        order mean something: the first voice offered is what answers for an
+        unknown id when the deployment named no fallback. Sorted, that default
+        was whichever id happened to come first alphabetically — so an operator
+        who listed their preferred voice first in `PIPER_VOICES` and left the
+        fallback unset silently got a different one. Stable across calls either
+        way, which is all [`engine.Engine.voices`] asks; this order is also
+        true.
+
+        `GET /v1/voices` is unaffected: [`elvenspeak.voices.Catalog.installed`]
+        sorts for display on its own.
+        """
+        return tuple(installed.voice for installed in self._installed.values())
 
     def capabilities(self) -> frozenset[engine.Capability]:
-        # Settled by `load` from the flag the sessions were really opened under,
-        # not recomputed from the setting that produced it: `include_alignments`
+        # Settled by `_Prepared.open` from the flag the sessions were really
+        # opened under, not recomputed from the setting that produced it:
+        # `include_alignments`
         # patches the graph at load time, so these particular sessions are the
         # only thing that knows whether durations can be reported.
         return self._capabilities
@@ -174,53 +207,164 @@ class PiperEngine:
         )
 
 
-def load(
-    keys: tuple[str, ...],
-    models_dir: Path,
-    allow_download: bool,
-    timings: bool,
-) -> PiperEngine:
-    """Puts every named voice on disk, opens it, and returns the engine.
+@dataclass(frozen=True)
+class _Prepared:
+    """Piper as this deployment configured it, before anything was fetched.
 
-    Runs before the server accepts a request, so that a deployment problem is a
-    refusal to boot rather than an unbounded delay inside somebody's first call.
+    Satisfies [`elvenspeak.provisioning.Prepared`]. Every field came out of
+    [`configure`], so both methods take no arguments and there is no way to reach
+    either of them with a value the environment check has not already seen.
     """
-    from piper import PiperVoice
 
-    installed: dict[str, _Installed] = {}
-    for key, ready in install(keys, models_dir, allow_download).items():
-        _LOGGER.info("loading voice %s", key)
-        installed[key] = _Installed(
-            voice=ready.voice,
-            sample_rate=ready.sample_rate,
-            model=PiperVoice.load(
-                str(ready.model_path), include_alignments=timings
-            ),
+    keys: tuple[str, ...]
+    models_dir: Path
+    #: Whether [`open`] may fetch a voice that is missing at boot. Not consulted
+    #: by [`acquire`], which fetches by definition — see its docstring.
+    allow_download: bool
+    timings: bool
+
+    def acquire(self) -> tuple[engine.Voice, ...]:
+        """Puts every configured voice on disk, and says what they turned out to be.
+
+        Downloading is unconditional here, and that is the whole difference
+        between this method and [`open`]. It used to be a flag both paths read,
+        which left the build overriding the deployment's own setting to `True`
+        from a constant beside the call — a fact stated twice, in opposite
+        directions, that only agreed because one caller remembered to disagree.
+        The lifecycle moment is carried by which method the caller reached for.
+        """
+        return tuple(
+            ready.voice
+            for ready in _install(
+                self.keys, self.models_dir, allow_download=True
+            ).values()
         )
 
-    # Decided here, beside the loop that opened the sessions, rather than stored
-    # as a flag the engine re-reads later: this is the only line that can see
-    # both what was asked for and what the voices were actually opened with, and
-    # an engine holding the setting instead would keep answering for the setting
-    # if those two ever came apart.
-    return PiperEngine(
-        installed,
-        capabilities=_INHERENT | ({engine.Capability.TIMESTAMPS} if timings else set()),
+    def open(self) -> PiperEngine:
+        """Opens every configured voice and returns the engine that speaks them."""
+        from piper import PiperVoice
+
+        installed: dict[str, _Installed] = {}
+        for key, ready in _install(
+            self.keys, self.models_dir, self.allow_download
+        ).items():
+            _LOGGER.info("loading voice %s", key)
+            installed[key] = _Installed(
+                voice=ready.voice,
+                sample_rate=ready.sample_rate,
+                model=PiperVoice.load(
+                    str(ready.model_path), include_alignments=self.timings
+                ),
+            )
+
+        # Decided here, beside the loop that opened the sessions, rather than
+        # stored as a flag the engine re-reads later: this is the only line that
+        # can see both what was asked for and what the voices were actually
+        # opened with, and an engine holding the setting instead would keep
+        # answering for the setting if those two ever came apart.
+        return PiperEngine(
+            installed,
+            capabilities=_INHERENT
+            | ({engine.Capability.TIMESTAMPS} if self.timings else set()),
+        )
+
+
+def configure(env: "Mapping[str, str]") -> _Prepared:
+    """Reads Piper's own environment, or says everything wrong with it at once.
+
+    [LAW:parse-dont-validate] The checkpoint for this engine. Nothing below holds
+    a string out of `env`, and nothing above holds a `models_dir`: what crosses
+    is a [`_Prepared`] that could not have been built before these checks ran.
+
+    Every problem is collected rather than raised at the first, because this list
+    is spliced into the server's own — an operator bringing the service up should
+    not discover a bad voice name and then, one restart later, a bad port.
+    """
+    problems: list[str] = []
+
+    keys = tuple(
+        name.strip()
+        for name in env.get("PIPER_VOICES", DEFAULT_VOICE).split(",")
+        if name.strip()
+    )
+    if not keys:
+        problems.append("PIPER_VOICES is empty; name at least one voice")
+
+    # Stripped and checked like everything else here. `PIPER_MODELS_DIR=` is a
+    # present key, so `get` returns "" rather than the default, `Path("")` is the
+    # working directory, and `mkdir` on it succeeds — the server then reads and
+    # writes 60 MB models wherever it happened to be launched from, having
+    # reported nothing. An unset variable interpolated into a compose file is an
+    # ordinary way to arrive there.
+    models_text = env.get("PIPER_MODELS_DIR", "").strip()
+    if "PIPER_MODELS_DIR" in env and not models_text:
+        problems.append("PIPER_MODELS_DIR is empty; name a directory or unset it")
+    models_dir = Path(models_text or str(Path(__file__).parent.parent / "models"))
+
+    flags = {}
+    for name, default in (
+        ("PIPER_ALLOW_DOWNLOAD", True),
+        ("ELVENSPEAK_TIMESTAMPS", True),
+    ):
+        try:
+            flags[name] = _flag(env, name, default=default)
+        except ValueError as error:
+            problems.append(str(error))
+            flags[name] = default
+
+    if problems:
+        raise ConfigError(problems)
+
+    return _Prepared(
+        keys=keys,
+        models_dir=models_dir,
+        allow_download=flags["PIPER_ALLOW_DOWNLOAD"],
+        timings=flags["ELVENSPEAK_TIMESTAMPS"],
     )
 
 
-def install(
+_TRUE = frozenset({"1", "true", "yes", "on"})
+_FALSE = frozenset({"0", "false", "no", "off"})
+
+
+def _flag(env: "Mapping[str, str]", name: str, default: bool) -> bool:
+    """Reads a boolean setting, refusing anything that is not clearly one.
+
+    [LAW:no-silent-failure] The obvious implementation — true if the value is in
+    a true-set, false otherwise — makes `PIPER_ALLOW_DOWNLOAD=tru` mean "off",
+    silently, in the one function whose stated job is catching configuration
+    mistakes at startup. A typo in a boolean is exactly as much a mistake as a
+    typo in a port, and is reported the same way.
+    """
+    raw = env.get(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in _TRUE:
+        return True
+    if value in _FALSE:
+        return False
+    raise ValueError(
+        f"{name}={raw!r} is not a boolean; "
+        f"use one of {', '.join(sorted(_TRUE))} or {', '.join(sorted(_FALSE))}"
+    )
+
+
+def _install(
     keys: tuple[str, ...], models_dir: Path, allow_download: bool
 ) -> dict[str, _Ready]:
     """Makes every named voice present and readable, and says what they are.
 
-    Separate from [`load`] because the container image bakes voices in at build
-    time and wants exactly this and no more — opening an ONNX session per voice
-    only to discard it costs a minute and a gigabyte for nothing. A second caller
-    that wants only half of a function is what a real joint looks like
-    ([LAW:decomposition]).
+    [LAW:decomposition] The joint between [`_Prepared.acquire`] and
+    [`_Prepared.open`], and a real one: the image bakes voices at build time and
+    wants exactly this and no more, because opening an ONNX session per voice
+    only to discard it costs a minute and a gigabyte for nothing. Both callers
+    want this whole function and differ only in what they do afterwards — and in
+    whether a missing voice may be fetched, which is the one thing they are
+    allowed to disagree about.
 
-    The sidecar is read here rather than only by [`load`]. An earlier cut stopped
+    The sidecar is read here rather than only by the caller that opens sessions.
+    An earlier cut stopped
     at "both files exist", which let a truncated or malformed `.onnx.json` — the
     interrupted-write case the checks below already exist for — produce a green
     image that failed at container startup instead. The bake is the last moment

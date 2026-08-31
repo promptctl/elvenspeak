@@ -20,53 +20,53 @@ catches the first shape and can never catch the second, because a function that
 still exists and still takes those arguments can always mean less than it did.
 As an ordinary module none of that is special: a test calls [`bake`] directly.
 
-[LAW:one-way-deps] Names Piper, as `main` does, and for the same reason —
-choosing an engine is what an entry point is for. Nothing in the ElevenLabs
-surface imports this module, so the seam `elvenspeak.engine` draws is untouched
-and `test_encoding.py`'s import-graph check has nothing new to say about it.
+# Why it names no engine
+
+[LAW:one-source-of-truth] It used to name Piper, as `main` did, and that was two
+answers to "which engine does this deployment run" with nothing keeping them the
+same — an image whose bake step and whose boot chose differently was one edit
+away, and nothing in the repository could have noticed. Both entry points read
+the same [`Settings.engine`] now, so for any one environment the question has one
+answer.
+
+The build fetches and the runtime does not, which used to be a constant here
+overriding the deployment's own `PIPER_ALLOW_DOWNLOAD`. It is
+[`Prepared.acquire`] rather than [`Prepared.open`] now: the lifecycle moment is
+carried by which method this module calls, so there is no setting to override
+and no second statement of the rule to keep in step.
 """
 
 from __future__ import annotations
 
 import logging
 
-from . import engine, piper
-from .settings import Settings
+from . import engine
+from .engines import ENGINES
+from .settings import Settings, reported_or_exit
 
 _LOGGER = logging.getLogger("elvenspeak.bake")
 
-#: The build fetches; the runtime does not. `PIPER_ALLOW_DOWNLOAD` is off in the
-#: image so a missing model at boot fails the deploy instead of quietly
-#: re-downloading, which leaves this step as the one moment a fetch is the right
-#: answer. [LAW:one-source-of-truth] Stated here rather than passed in by the
-#: Dockerfile, because a fact spelled in the Dockerfile is a fact no test reads.
-_ALLOW_DOWNLOAD = True
-
 
 def bake(settings: Settings) -> tuple[engine.Voice, ...]:
-    """Installs every voice `settings` names, and says what they turned out to be.
+    """Installs every voice the chosen engine needs, and says what they are.
 
     [LAW:parse-dont-validate] Returns the described voices rather than nothing,
-    because that return is the guarantee worth having: `install` cannot report a
-    voice whose `.onnx.json` it failed to read, so a value here is proof the
-    image can describe what it serves. A truncated sidecar therefore fails the
-    build, which is the last moment that failure is cheap — the alternative is
-    a green image that dies at every container start.
+    because that return is the guarantee worth having: an engine cannot report a
+    voice it failed to describe, so a value here is proof the image can describe
+    what it serves. A truncated sidecar therefore fails the build, which is the
+    last moment that failure is cheap — the alternative is a green image that
+    dies at every container start.
     """
-    ready = piper.install(
-        keys=settings.voices,
-        models_dir=settings.models_dir,
-        allow_download=_ALLOW_DOWNLOAD,
-    )
-    return tuple(ready[key].voice for key in settings.voices)
+    return settings.engine.acquire()
 
 
 def main() -> None:
     """`python -m elvenspeak.bake`: the environment in, voices on disk, or exit."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    settings = Settings.from_env_or_exit()
+    with reported_or_exit():
+        settings = Settings.from_env(ENGINES)
     for voice in bake(settings):
-        _LOGGER.info("baked %s into %s", voice.id, settings.models_dir)
+        _LOGGER.info("baked %s", voice.id)
 
 
 if __name__ == "__main__":

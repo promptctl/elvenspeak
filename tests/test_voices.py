@@ -13,7 +13,8 @@ import pytest
 
 from elvenspeak.engine import Voice
 from elvenspeak import voices as voices_mod
-from elvenspeak.voices import Catalog, VoiceNotInstalled, load_aliases
+from elvenspeak.provisioning import ConfigError
+from elvenspeak.voices import Catalog, Substitution, VoiceNotInstalled, load_aliases
 
 
 def voice(key: str) -> Voice:
@@ -117,7 +118,7 @@ def test_installed_is_stable_order():
 def test_a_fallback_that_is_not_installed_is_refused_at_construction():
     """[LAW:parse-dont-validate] The bad state stops being constructible.
 
-    `resolve()` reaches `self._voices[self._fallback]` on its last branch, so a
+    `resolve()` reaches `self._voices[self.fallback]` on its last branch, so a
     fallback naming no installed voice turned every unrecognised id — precisely
     what the fallback is for — into a bare KeyError raised from inside synthesis,
     far from the configuration that caused it. Checked at construction, no
@@ -128,6 +129,27 @@ def test_a_fallback_that_is_not_installed_is_refused_at_construction():
             voices={"en_US-lessac-medium": voice("en_US-lessac-medium")},
             fallback="en_US-not-installed",
         )
+
+
+def test_both_catalog_problems_are_reported_together():
+    """One restart, the whole list — the promise `ConfigError` carries.
+
+    This module was the last one raising on the first problem it found, which
+    only became a contradiction when these checks started raising the type whose
+    docstring promises the opposite. An operator with a bad fallback and a
+    dangling alias would fix one, restart, and meet the other.
+    """
+    with pytest.raises(ConfigError) as raised:
+        Catalog(
+            voices={"en_US-lessac-medium": voice("en_US-lessac-medium")},
+            fallback="en_US-not-installed",
+            aliases={"dead": "en_US-also-not-installed"},
+        )
+    problems = raised.value.problems
+    assert len(problems) == 2
+    joined = " ".join(problems)
+    assert "en_US-not-installed" in joined
+    assert "en_US-also-not-installed" in joined
 
 
 def test_an_alias_pointing_at_no_installed_voice_is_refused_at_construction():
@@ -165,8 +187,73 @@ class _Engine:
 
 
 def test_a_catalog_is_built_from_whatever_the_engine_offers():
-    cat = Catalog.for_engine(_Engine("en_US-lessac-medium"), fallback=None)
+    cat = Catalog.for_engine(_Engine("en_US-lessac-medium"), fallback=Substitution.OFF)
     assert [v.id for v in cat.installed] == ["en_US-lessac-medium"]
+
+
+def test_an_unnamed_fallback_becomes_the_first_voice_the_engine_offers():
+    """Where "whichever one you have" is finally answerable.
+
+    The setting cannot name a voice on its own any more: the list belongs to the
+    engine, so the operator who named none is asking a question only a loaded
+    engine can answer. Answered here, once, and stored as an ordinary id — so
+    everything downstream, the operator log included, reads a voice rather than
+    an instruction.
+
+    Offered first, not sorted first. The engine here lists its voices in an
+    order that is deliberately *not* alphabetical, because with an already-sorted
+    fixture this test passes whether the fallback follows the engine's order or
+    quietly re-sorts — and a re-sort is precisely the bug that shipped: it hands
+    the deployment a default voice its operator never chose.
+    """
+    cat = Catalog.for_engine(
+        _Engine("en_US-zzz-medium", "en_US-aaa-medium"),
+        fallback=Substitution.FIRST_OFFERED,
+    )
+    assert cat.fallback == "en_US-zzz-medium"
+    assert cat.resolve("some-elevenlabs-id").substituted
+
+
+def test_switching_substitution_off_does_not_quietly_pick_a_voice():
+    """[LAW:types-are-the-program] The two answers must not collapse again.
+
+    While both were spelled `None`, "I named no voice" and "I want no
+    substitution" were one value, and the only reason the closed deployment got
+    what it asked for was that parsing resolved the first case early. It cannot
+    now, so an enum carries the difference this far — and this is the test that
+    goes red if either member is ever mapped onto the other.
+    """
+    cat = Catalog.for_engine(_Engine("en_US-aaa-medium"), fallback=Substitution.OFF)
+    assert cat.fallback is None
+    with pytest.raises(VoiceNotInstalled):
+        cat.resolve("some-elevenlabs-id")
+
+
+def test_the_resolved_fallback_cannot_be_reassigned():
+    """[LAW:types-are-the-program] The constructor check runs once, so it has to hold.
+
+    `resolve()` indexes `_voices` with the fallback on its last branch, and the
+    membership check that makes that safe happens at construction. A writable
+    attribute would let later code put back the bare-KeyError-inside-synthesis
+    state that check exists to make unreachable — and the constructor's comment
+    would go on claiming no Catalog can reach it.
+    """
+    cat = catalog("en_US-lessac-medium", fallback="en_US-lessac-medium")
+    with pytest.raises(AttributeError):
+        cat.fallback = "en_US-not-installed"
+
+
+def test_an_engine_offering_nothing_leaves_nothing_to_substitute_with():
+    """The one case where "the first voice" has no answer.
+
+    Not an error this function could report more usefully than the catalog
+    already does: every id is refused by name, which is what an empty engine
+    means whichever way the fallback was configured.
+    """
+    cat = Catalog.for_engine(_Engine(), fallback=Substitution.FIRST_OFFERED)
+    assert cat.fallback is None
+    with pytest.raises(VoiceNotInstalled):
+        cat.resolve("anything")
 
 
 def test_a_malformed_alias_table_refuses_to_boot(tmp_path, monkeypatch):
@@ -183,7 +270,7 @@ def test_a_malformed_alias_table_refuses_to_boot(tmp_path, monkeypatch):
     monkeypatch.setattr(voices_mod, "_ALIASES_FILE", broken)
 
     with pytest.raises(Exception) as raised:
-        Catalog.for_engine(_Engine("en_US-lessac-medium"), fallback=None)
+        Catalog.for_engine(_Engine("en_US-lessac-medium"), fallback=Substitution.OFF)
     assert "toml" in type(raised.value).__module__.lower()
 
 

@@ -53,6 +53,7 @@ from conftest import (
     MODELS_DIR,
     DeclaredEngine,
     needs_installed_model,
+    piper_prepared,
 )
 
 from elvenspeak.engine import Capability, Engine, Prosody, Voice
@@ -73,14 +74,7 @@ def piper_engine() -> Engine:
     conformance suite's most interesting property with it — and what an operator
     can turn off is not what the interface is being tested about.
     """
-    from elvenspeak import piper
-
-    return piper.load(
-        keys=(INSTALLED_VOICE,),
-        models_dir=MODELS_DIR,
-        allow_download=False,
-        timings=True,
-    )
+    return piper_prepared(MODELS_DIR, voices=(INSTALLED_VOICE,), timings=True).open()
 
 
 #: Every engine this project can put behind the API surface, and the suite below

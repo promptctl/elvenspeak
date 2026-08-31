@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -28,17 +29,19 @@ from elvenspeak.engine import (
     Voice,
 )
 
-#: Every variable `elvenspeak.settings.Settings.from_env` reads. One copy,
-#: because a second one is free to drift: the next setting added to `from_env`
-#: would be remembered in one test's clearing list and forgotten in the other,
-#: and the test that forgot goes flaky later with nothing pointing at the cause.
+#: Every variable a startup reads — the server's own and the engines' — since
+#: `Settings.from_env` now splices an engine's parse into its own. One copy,
+#: because a second one is free to drift: the next setting added would be
+#: remembered in one test's clearing list and forgotten in the other, and the
+#: test that forgot goes flaky later with nothing pointing at the cause.
 _ENVIRONMENT = (
-    "PIPER_VOICES",
-    "PIPER_FALLBACK_VOICE",
-    "PIPER_MODELS_DIR",
-    "PIPER_ALLOW_DOWNLOAD",
+    "ELVENSPEAK_ENGINE",
+    "ELVENSPEAK_FALLBACK_VOICE",
     "ELVENSPEAK_API_KEY",
     "ELVENSPEAK_TIMESTAMPS",
+    "PIPER_VOICES",
+    "PIPER_MODELS_DIR",
+    "PIPER_ALLOW_DOWNLOAD",
     "HOST",
     "PORT",
 )
@@ -60,8 +63,35 @@ MODELS_DIR = Path(
 needs_installed_model = pytest.mark.skipif(
     not (MODELS_DIR / f"{INSTALLED_VOICE}.onnx").exists(),
     reason=f"no {INSTALLED_VOICE} model in {MODELS_DIR}; "
-    "fetch it with PIPER_ALLOW_DOWNLOAD=1 uv run main.py",
+    "fetch it with `uv run python -m elvenspeak.bake`",
 )
+
+
+def piper_prepared(
+    models_dir: Path = MODELS_DIR,
+    *,
+    voices: tuple[str, ...] = (INSTALLED_VOICE,),
+    allow_download: bool = False,
+    timings: bool = False,
+):
+    """Piper configured for a test, through the door a deployment uses.
+
+    [LAW:behavior-not-structure] Four files want a Piper engine over a chosen
+    directory, and every one of them goes through `piper.configure` rather than
+    reaching past it. A test that built the engine some other way would keep
+    passing after the parse it skipped stopped being able to produce that value —
+    which is the whole guarantee the parse exists to give.
+    """
+    from elvenspeak import piper
+
+    return piper.configure(
+        {
+            "PIPER_VOICES": ",".join(voices),
+            "PIPER_MODELS_DIR": str(models_dir),
+            "PIPER_ALLOW_DOWNLOAD": "1" if allow_download else "0",
+            "ELVENSPEAK_TIMESTAMPS": "1" if timings else "0",
+        }
+    )
 
 #: Two, so that "every voice the engine offers" is a claim about more than one.
 DECLARED_VOICES = (
@@ -142,6 +172,34 @@ class DeclaredEngine:
         return int(len(text) * _SAMPLES_PER_CHARACTER / speed)
 
 
+@dataclass(frozen=True)
+class DeclaredPrepared:
+    """[`DeclaredEngine`] as something a deployment could have chosen.
+
+    Satisfies `elvenspeak.provisioning.Prepared` in the smallest honest way: a
+    `Settings` needs one, and a test that is about the API surface should not
+    have to own a models directory to get it. It is also the worked example of
+    the second half of what supplying an engine costs — nothing beyond the two
+    methods, no configuration, no assets to install.
+    """
+
+    capabilities: frozenset[Capability] = frozenset(Capability)
+
+    def acquire(self) -> tuple[Voice, ...]:
+        """Nothing to install, which an engine with no assets says by saying so.
+
+        No voices rather than the two it will serve: this engine makes its noise
+        in memory, so a build has nothing to put on disk for it and nothing to
+        prove it put there. That is the case `provisioning.Prepared.acquire`
+        describes for a remote API, and returning the served voices here would
+        leave the only worked example of the assetless path modelling it wrongly.
+        """
+        return ()
+
+    def open(self) -> DeclaredEngine:
+        return DeclaredEngine(self.capabilities)
+
+
 def _silence(samples: int) -> Iterator[bytes]:
     """`samples` of quiet, in more than one piece.
 
@@ -171,7 +229,7 @@ def clean_env(monkeypatch):
 def make_voice(
     models_dir: Path, key: str = "en_US-lessac-medium", sample_rate: int = 22050
 ) -> None:
-    """A voice as far as `install` and `load` can tell: both halves present.
+    """A voice as far as installing and opening can tell: both halves present.
 
     No real Piper model is needed. `_describe` reads only the `.onnx.json`
     sidecar and never opens the weights, so the `.onnx` here is a placeholder
