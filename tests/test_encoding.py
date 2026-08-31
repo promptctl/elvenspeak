@@ -13,6 +13,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from conftest import ENGINE_LIBRARIES
 
 from elvenspeak.encoding import EncodingFailed, encode, encode_stream
 from elvenspeak.formats import OutputFormat
@@ -168,12 +169,6 @@ def _followed_module_file(name: str) -> Path | None:
     return path if path.exists() else None
 
 
-#: Third-party libraries that make a module a concrete engine. One entry per
-#: engine, and the only line a new engine has to add here — reaching an engine's
-#: *module* is caught by the same walk, since that module reaches its library.
-_ENGINE_LIBRARIES = frozenset({"piper", "kokoro_onnx"})
-
-
 def _modules_reaching_an_engine(root: str) -> set[str]:
     """First-party modules reachable from `root` that name an engine library."""
     hits: set[str] = set()
@@ -189,7 +184,7 @@ def _modules_reaching_an_engine(root: str) -> set[str]:
         if source is None:
             continue
         for imported in _imported_modules(source):
-            if imported.split(".")[0] in _ENGINE_LIBRARIES:
+            if imported.split(".")[0] in ENGINE_LIBRARIES:
                 hits.add(name)
             elif _followed_module_file(imported) is not None:
                 queue.append(imported)
@@ -252,6 +247,6 @@ def test_the_seam_check_can_actually_fail(root: str):
     `piper` genuinely does reach an engine library, so it pins the detector from
     the other side: any future edit to the resolver that quietly stops finding
     things turns this red instead of turning the seam test vacuous. Every engine
-    added to `_ENGINE_LIBRARIES` belongs in this parametrize list too.
+    added to `conftest.ENGINE_LIBRARIES` belongs in this parametrize list too.
     """
     assert _modules_reaching_an_engine(root)

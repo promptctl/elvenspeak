@@ -210,7 +210,10 @@ docker build -t elvenspeak-kokoro \
 
 The bake step installs the assets of whichever engine `ELVENSPEAK_ENGINE` names,
 and that engine's `*_ALLOW_DOWNLOAD` is off inside the image: a missing model
-fails the deploy instead of quietly re-downloading 60 MB on every restart.
+fails the deploy instead of quietly re-downloading 60 MB on every restart. It
+also decides which engine's libraries get installed, so the piper image carries
+no Kokoro and the kokoro image carries no piper-tts — one word, `ELVENSPEAK_ENGINE`,
+picks the dependencies, the baked assets and the running engine together.
 
 ### Pointing openconv at it
 
@@ -221,11 +224,102 @@ OPENCONV_TTS_URL=http://127.0.0.1:5001
 No code change on that side — `crates/openconv-agent/src/tts.rs` is an HTTP
 client against whatever that URL names and has no opinion about what answers.
 
+## Supplying your own engine
+
+There are two ways to consume this. Run it as a service and point a base URL at
+it, which is what openconv does above. Or install it as a library, register an
+engine of your own, and get the whole ElevenLabs surface over it — 28 output
+formats, four synthesis endpoints, voice discovery, aliases, character timings,
+the ignored-parameter reporting. That is a few thousand lines of compatibility
+work you do not have to write badly for the fourth time, and there is nothing to
+fork: the registry of engines is an argument, not an import.
+
+```
+pip install elvenspeak            # the API surface, and no engine at all
+pip install elvenspeak[piper]     # plus the engine that ships here
+pip install elvenspeak[kokoro]    # plus the other one
+```
+
+The engines are extras because they are not the reusable part. A bare install is
+about 21 MB; adding both engines takes it to about 277 MB of ONNX runtimes,
+phonemizers and model tooling that your engine will never call and whose pins
+are free to conflict with your own. Each extra is named after the value
+`ELVENSPEAK_ENGINE` takes, so `elvenspeak[kokoro]` and `ELVENSPEAK_ENGINE=kokoro`
+are one word rather than two that can drift.
+
+### What you implement
+
+Two protocols, both in `elvenspeak`, and everything you need is exported from the
+package root — you should never have to import a submodule of this package.
+
+`Engine` is four methods: `voices()`, `capabilities()`, `speak()` and
+`speak_timed()`. Implement that and construct it yourself, and `create_app` gives
+you the server. `Prepared` and `Configure` are the second, optional half: a
+`Configure` turns an environment into a `Prepared`, and a `Prepared` has
+`acquire()` to install assets at build time and `open()` to build the engine at
+boot. Implement those too and a deployment can select your engine by name.
+
+Registration is a dict:
+
+```python
+from elvenspeak import Settings, create_app
+
+settings = Settings.from_env({"tone": configure})   # your engine, your name
+settings.engine.acquire()                           # your image's bake step
+app = create_app(settings, settings.engine.open())
+```
+
+`tests/test_supplied_engine.py` is a complete, working, executed-on-every-test-run
+example of everything on this page: an engine unlike either of the ones that ship
+here, its own configuration, its own installable assets, and the real API driven
+over it. Read that rather than this. Its last test asserts that the whole file
+was written against `import elvenspeak` alone, so if the example compiles, the
+public surface is sufficient.
+
+### What the protocols cannot tell you
+
+**Your engine owns its native dependencies, and must fail loudly.** `pip install`
+is not necessarily the whole obligation: the kokoro engine here needs espeak-ng
+present as a system library and needs `PHONEMIZER_ESPEAK_LIBRARY` pointing at a
+working copy, and it does not go hunting for one. An engine that quietly probed
+for a library that works, or skipped the voices it could not load, would be a
+silent fallback inside the component whose whole job is to fail loudly. Raise
+from `acquire()` or `open()`. Those are the build and the boot — the two moments
+where failing is cheap and visible. A request is neither.
+
+**Capabilities may be a fact about the deployment, not about your engine.** They
+are read once at startup and must be constant for the process, but they need not
+be constant for the code: the kokoro engine reads `TIMESTAMPS` off the ONNX
+session it actually opened, because one published export has a duration output
+and another does not. So answer `capabilities()` from what you really opened,
+never from the configuration that asked for it. Getting this wrong is
+undetectable rather than obviously wrong — the server will report a capability as
+honoured and the audio will disagree.
+
+**`Capability` is a closed enum, and stays one.** An engine cannot declare
+something the enum does not name, which reads like a limit on outside engines and
+is not one. A capability is not a description of what your engine can do; it is
+the list of things *this server behaves differently about* — refuse an endpoint,
+name a parameter in the `x-elvenspeak-ignored` header. An engine that does
+something no endpoint asks for has nothing to declare it to, because no answer
+the server gives would change. Widening the enum to strings would let an engine
+declare a capability with no consequence, which is a lie shaped like a feature,
+and it would make the reported vocabulary engine-supplied — an engine learning
+the name of a request body field, which is the coupling the whole seam exists to
+prevent. If an endpoint should start honouring something new, that is a change to
+the ElevenLabs surface, and adding an enum member is part of making it, not a tax
+on having made it.
+
 ## Tests
 
 ```
-uv run --extra dev pytest
+uv run --all-extras pytest
 ```
+
+`--all-extras` rather than the engines named one by one, because the suite runs
+the conformance contract against every registered engine and so needs all of
+them — and a list of extras spelled here would be one more copy free to forget
+the next engine.
 
 The tests that need real models fetch them instead of skipping, so the first run
 downloads the Piper voice and the Kokoro assets into `models/` — a few hundred

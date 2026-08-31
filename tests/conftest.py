@@ -52,6 +52,20 @@ _ENVIRONMENT = (
 )
 
 
+#: Third-party libraries that make a module a concrete engine, by the name an
+#: `import` statement spells. One entry per engine, and the only line a new
+#: engine has to add — reaching an engine's *module* is caught by the same walk,
+#: since that module reaches its library.
+#:
+#: Shared because two files read it from opposite ends of one fact. The seam
+#: check in `test_encoding.py` proves the ElevenLabs surface cannot reach any of
+#: these; `test_packaging.py` proves the same libraries are installable only
+#: through their own engine's extra. A second copy would let a third engine be
+#: added to one list and forgotten in the other, and the file that forgot goes
+#: quietly vacuous rather than red.
+ENGINE_LIBRARIES = frozenset({"piper", "kokoro_onnx"})
+
+
 def _use_a_working_espeak() -> None:
     """Points the phonemizer at a system espeak-ng where the bundled one is broken.
 

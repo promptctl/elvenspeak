@@ -206,6 +206,31 @@ def test_the_baked_default_engine_is_the_registrys_default_engine():
     assert declared.group(1) == next(iter(ENGINES))
 
 
+#: `uv sync`, however many flags it carries. Every one of them installs this
+#: image's Python environment.
+_SYNC = re.compile(r"^\s*RUN\s+uv\s+sync\s+(.*)$", re.MULTILINE)
+
+
+def test_the_image_installs_the_engine_it_was_built_for():
+    """[LAW:one-source-of-truth] The engine's name picks the libraries too.
+
+    Each engine's dependencies live in an extra named after its registry key —
+    `tests/test_packaging.py` is what keeps those two lists the same — so the
+    build arg that decides which assets get baked and which engine boots can
+    also decide what gets installed, and an image cannot carry one engine's
+    libraries while running another's.
+
+    Asserted against the interpolation rather than against a literal name,
+    because a literal is where this goes wrong: `--extra piper --extra kokoro`
+    builds and boots and passes every other check in this file, and quietly puts
+    both engines in every image again.
+    """
+    syncs = _SYNC.findall(instructions())
+    assert syncs, "no uv sync found"
+    for flags in syncs:
+        assert '--extra "${ELVENSPEAK_ENGINE}"' in flags, flags
+
+
 def test_substituted_env_values_are_quoted():
     """ENV splits on unescaped whitespace after substitution.
 
