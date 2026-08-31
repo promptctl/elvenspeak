@@ -248,12 +248,18 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     guarded = [Depends(require_key)]
 
     def require_timestamps() -> None:
-        """Refuses the timestamp endpoints when voices loaded without timings.
+        """Refuses the timestamp endpoints when the engine cannot measure.
 
         [LAW:no-silent-failure] The alternative is answering with plausible
         timings derived from nothing, which a caption renderer would trust.
+
+        [LAW:one-source-of-truth] Asked of the engine, not of `settings`. The
+        setting is what an operator wants; whether these sessions can actually
+        report durations is a fact only the engine holds, and reading the setting
+        instead let a server built from one and an engine built from the other
+        disagree — a 200 carrying invented timings, which is the failure above.
         """
-        if not settings.timestamps:
+        if not engine.can_time():
             raise HTTPException(
                 status_code=501,
                 detail=(

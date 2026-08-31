@@ -63,7 +63,8 @@ def test_the_factory_entry_point_exits_the_same_way(monkeypatch, capsys):
 
 @pytest.mark.skipif(
     not (MODELS / f"{VOICE}.onnx").exists(),
-    reason=f"no {VOICE} model in {MODELS}; run scripts/fetch-voice.sh",
+    reason=f"no {VOICE} model in {MODELS}; "
+    "fetch it with PIPER_ALLOW_DOWNLOAD=1 uv run main.py",
 )
 def test_a_good_environment_builds_an_application(monkeypatch):
     """The success path, so the failure tests are not the only thing exercised.

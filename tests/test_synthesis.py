@@ -51,7 +51,8 @@ def engine_over(*chunks: FakeChunk) -> piper.PiperEngine:
             VOICE.id: piper._Installed(
                 voice=VOICE, sample_rate=RATE, model=FakeSession(list(chunks))
             )
-        }
+        },
+        timings=True,
     )
 
 
