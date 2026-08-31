@@ -72,6 +72,14 @@ def stub_sessions(monkeypatch):
     monkeypatch.setattr("piper.PiperVoice", _StubVoice)
 
 
+def _write_sidecar(models_dir: Path, sidecar: dict) -> None:
+    models_dir.mkdir(parents=True, exist_ok=True)
+    (models_dir / f"{KEY}.onnx").write_bytes(b"not a real model")
+    (models_dir / f"{KEY}.onnx.json").write_text(
+        json.dumps(sidecar), encoding="utf-8"
+    )
+
+
 def load(models_dir: Path, allow_download: bool = False) -> piper.PiperEngine:
     return piper.load(
         keys=(KEY,),
@@ -211,13 +219,31 @@ def test_a_voice_with_no_usable_sample_rate_refuses_to_boot(tmp_path, rate):
     time, on the timestamp endpoints, far from the sidecar that caused it. There
     is no safe default either: a guessed rate plays perfectly at the wrong pitch.
     """
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    (tmp_path / f"{KEY}.onnx").write_bytes(b"not a real model")
-    (tmp_path / f"{KEY}.onnx.json").write_text(
-        json.dumps({"audio": {"sample_rate": rate}}), encoding="utf-8"
-    )
+    _write_sidecar(tmp_path, {"audio": {"sample_rate": rate}})
     with pytest.raises(ValueError, match="sample_rate"):
         load(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "sidecar", ['{"audio": {"sample_rate": 0}}', "{not json at all", "{}"]
+)
+def test_a_sidecar_that_cannot_be_read_fails_the_bake(tmp_path, sidecar):
+    """The image build is the last moment this failure is cheap.
+
+    `install` is what the Dockerfile calls, and a version of it that checked only
+    that both files existed let a truncated or malformed `.onnx.json` bake into a
+    green image that then failed at every container start — the interrupted-write
+    case the existence checks are already there for, surviving them because the
+    second file was present but unreadable.
+
+    Asserted against `install` rather than `load`, because `load` calls `install`
+    and inherits this, while the Dockerfile only ever reaches the former.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / f"{KEY}.onnx").write_bytes(b"not a real model")
+    (tmp_path / f"{KEY}.onnx.json").write_text(sidecar, encoding="utf-8")
+    with pytest.raises((ValueError, KeyError)):
+        piper.install(keys=(KEY,), models_dir=tmp_path, allow_download=False)
 
 
 @pytest.mark.parametrize("timings", [True, False])
@@ -252,6 +278,9 @@ def test_installing_does_not_open_any_session(tmp_path, monkeypatch):
             "install opened an ONNX session"
         ))}),
     )
-    assert piper.install(
-        keys=(KEY,), models_dir=tmp_path, allow_download=False
-    ) == {KEY: tmp_path / f"{KEY}.onnx"}
+    ready = piper.install(keys=(KEY,), models_dir=tmp_path, allow_download=False)
+    assert ready[KEY].model_path == tmp_path / f"{KEY}.onnx"
+    # Described, not merely located: the path alone would prove nothing, which is
+    # what let a malformed sidecar bake into a green image.
+    assert ready[KEY].voice.id == KEY
+    assert ready[KEY].sample_rate == 22050
