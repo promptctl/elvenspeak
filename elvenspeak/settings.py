@@ -77,6 +77,17 @@ class Settings:
                 f"({', '.join(voices)})"
             )
 
+        # Stripped and checked like everything else here. `PIPER_MODELS_DIR=` is
+        # a present key, so `get` returns "" rather than the default, `Path("")`
+        # is the working directory, and `mkdir` on it succeeds — the server then
+        # reads and writes 60 MB models wherever it happened to be launched from,
+        # having reported nothing. An unset variable interpolated into a compose
+        # file is an ordinary way to arrive there.
+        models_text = env.get("PIPER_MODELS_DIR", "").strip()
+        if "PIPER_MODELS_DIR" in env and not models_text:
+            problems.append("PIPER_MODELS_DIR is empty; name a directory or unset it")
+        models_dir = Path(models_text or str(Path(__file__).parent.parent / "models"))
+
         port_text = env.get("PORT", "5001")
         try:
             port = int(port_text)
@@ -108,9 +119,7 @@ class Settings:
         return Settings(
             voices=voices,
             fallback=fallback,
-            models_dir=Path(
-                env.get("PIPER_MODELS_DIR", str(Path(__file__).parent.parent / "models"))
-            ),
+            models_dir=models_dir,
             allow_download=flags["PIPER_ALLOW_DOWNLOAD"],
             api_key=env.get("ELVENSPEAK_API_KEY") or None,
             timestamps=flags["ELVENSPEAK_TIMESTAMPS"],

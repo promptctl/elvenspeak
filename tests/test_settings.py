@@ -129,3 +129,26 @@ def test_an_empty_voice_list_does_not_hide_a_bad_fallback():
     joined = " ".join(problems)
     assert "PIPER_VOICES is empty" in joined
     assert "PIPER_FALLBACK_VOICE" in joined
+
+
+def test_an_empty_models_dir_is_refused_not_taken_as_the_working_directory():
+    """The one setting here that was not validated.
+
+    `PIPER_MODELS_DIR=` is a present key, so `get` returns "" rather than the
+    default, `Path("")` is `Path(".")`, and `mkdir` on it succeeds. Nothing
+    fails — the server just reads and writes 60 MB models into whatever
+    directory it was launched from, which is the silent wrong thing rather than
+    the clean refusal this module produces for every other misconfiguration.
+    """
+    with pytest.raises(ConfigError) as raised:
+        Settings.from_env({
+            "PIPER_VOICES": "en_US-lessac-medium",
+            "PIPER_MODELS_DIR": "   ",
+        })
+    assert any("PIPER_MODELS_DIR" in problem for problem in raised.value.problems)
+
+
+def test_an_absent_models_dir_still_gets_the_default():
+    """Unset is not the same as set-to-empty, and only one of them is a problem."""
+    settings = Settings.from_env({"PIPER_VOICES": "en_US-lessac-medium"})
+    assert settings.models_dir.name == "models"

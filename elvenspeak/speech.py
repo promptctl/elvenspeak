@@ -81,16 +81,18 @@ class Prosody:
     #: Inverse of speed: Piper's `length_scale` stretches audio, so a caller
     #: asking for speed 2.0 wants each phoneme to last half as long.
     speed: float = 1.0
-    #: Piper's per-voice speaker index, for the multi-speaker models.
-    speaker_id: int | None = None
 
     def as_piper(self):
+        # No speaker_id. Piper's multi-speaker models take an index, and there is
+        # no ElevenLabs body field to source one from — so the knob was declared,
+        # forwarded, and set by nothing, which claims a capability this API does
+        # not have. Reaching it would mean inventing a request field only this
+        # server understands, and a field no ElevenLabs client will ever send is
+        # the opposite of what this service is for. A multi-speaker voice speaks
+        # as its default, which is what Piper does with no id.
         from piper.config import SynthesisConfig
 
-        return SynthesisConfig(
-            speaker_id=self.speaker_id,
-            length_scale=1.0 / self.speed if self.speed else 1.0,
-        )
+        return SynthesisConfig(length_scale=1.0 / self.speed if self.speed else 1.0)
 
 
 @dataclass

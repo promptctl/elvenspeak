@@ -86,6 +86,11 @@ class Voice:
                 "language": self.language,
                 "quality": self.quality,
                 "engine": "piper",
+                # Reported rather than only recorded. There is no ElevenLabs
+                # field to select a speaker with, so a multi-speaker model always
+                # speaks as its default — a caller choosing a voice is better off
+                # knowing that than discovering it by listening.
+                "speakers": str(self.num_speakers),
             },
             "description": f"Piper {self.name} ({self.language}, {self.quality})",
             "preview_url": None,
@@ -374,11 +379,16 @@ def _describe(key: str, model_path: Path) -> Voice:
     # perfectly — the silent wrong answer this service refuses elsewhere — so a
     # sidecar that does not state it is a voice that cannot be served, named
     # here rather than as a bare KeyError from inside a dict lookup.
+    # Falsy as well as absent: a sidecar carrying `"sample_rate": 0` passed an
+    # `is None` check and stored a zero, which does not fail here at all — it
+    # fails as a ZeroDivisionError inside `align`'s seconds-per-sample, at
+    # request time on the timestamp endpoints, which is the deferred and
+    # misplaced failure this check exists to replace.
     rate = audio.get("sample_rate")
-    if rate is None:
+    if not rate or int(rate) <= 0:
         raise ValueError(
-            f"voice {key!r} has no audio.sample_rate in its .onnx.json; "
-            f"the rate its samples will have cannot be inferred"
+            f"voice {key!r} has no positive audio.sample_rate in its .onnx.json "
+            f"(found {rate!r}); the rate its samples will have cannot be inferred"
         )
 
     return Voice(

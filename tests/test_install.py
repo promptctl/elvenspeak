@@ -227,3 +227,24 @@ def test_a_download_that_produces_nothing_refuses_to_boot(tmp_path, monkeypatch)
             keys=(KEY,), models_dir=tmp_path, fallback=None,
             include_alignments=False, allow_download=True,
         )
+
+
+@pytest.mark.parametrize("rate", [0, -1, None])
+def test_a_voice_with_no_usable_sample_rate_refuses_to_boot(tmp_path, rate):
+    """Falsy counts as missing, because a zero is worse than an absent key.
+
+    `sample_rate=0` passed an `is None` check and was stored, then failed as a
+    ZeroDivisionError inside the alignment's seconds-per-sample — at request
+    time, on the timestamp endpoints, far from the sidecar that caused it. There
+    is no safe default either: a guessed rate plays perfectly at the wrong pitch.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / f"{KEY}.onnx").write_bytes(b"not a real model")
+    (tmp_path / f"{KEY}.onnx.json").write_text(
+        json.dumps({"audio": {"sample_rate": rate}}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="sample_rate"):
+        install(
+            keys=(KEY,), models_dir=tmp_path, fallback=None,
+            include_alignments=False, allow_download=False,
+        )
