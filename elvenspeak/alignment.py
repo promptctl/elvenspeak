@@ -1,11 +1,12 @@
-"""Turning Piper's phoneme durations into the character timings clients expect.
+"""Turning an engine's measured stretches into the character timings clients expect.
 
-ElevenLabs' `/with-timestamps` endpoints return, for every character of the
-input text, the second it starts and the second it ends. Piper reports something
-adjacent but not the same: how many samples each *phoneme* took. These do not
-correspond one-to-one — "Hello" is five characters and six phonemes
-(`h ə l ˈ o ʊ`), and espeak may expand a token into several words that share no
-characters with the source at all.
+ElevenLabs' `/with-timestamps` endpoints return, for every character of the input
+text, the second it starts and the second it ends. An engine reports something
+adjacent but not the same: how long each stretch of the audio lasted, and which
+of those stretches fall between words ([`elvenspeak.engine.Timing`]). These do
+not correspond one-to-one — "Hello" is five characters and six phonemes
+(`h ə l ˈ o ʊ`) — and a phonemizer may expand a token into several words that
+share no characters with the source at all.
 
 # What is measured and what is interpolated
 
@@ -13,19 +14,20 @@ characters with the source at all.
 resolution, because a timing that claims to be measured and is not will be
 trusted by a caption renderer to the millisecond.
 
-Word boundaries are *measured*. espeak emits a space phoneme between words, so
-the sample offset where each word begins and ends comes straight from the model
-and is exact. Character boundaries *within* a word are *interpolated*: the
-word's measured span is divided across its characters in proportion to their
-count. So a caption that highlights whole words is exact; one that highlights
-individual letters is approximate inside the word and exact at its edges.
+Word boundaries are *measured*. The engine marks the stretches that separate
+words, so the sample offset where each word begins and ends comes straight from
+the synthesis and is exact. Character boundaries *within* a word are
+*interpolated*: the word's measured span is divided across its characters in
+proportion to their count. So a caption that highlights whole words is exact; one
+that highlights individual letters is approximate inside the word and exact at
+its edges.
 
-When the phonemizer's word count disagrees with the text's — an expanded number,
-an abbreviation, a symbol read aloud — no word-level correspondence exists at
-all, and pretending otherwise would put every later word's timing off by a
-compounding drift. That case falls back to distributing the whole utterance
-across the whole text, which is markedly worse, so it does not happen quietly:
-the result carries its [`Fidelity`].
+When the engine's word count disagrees with the text's — an expanded number, an
+abbreviation, a symbol read aloud — no word-level correspondence exists at all,
+and pretending otherwise would put every later word's timing off by a compounding
+drift. That case falls back to distributing the whole utterance across the whole
+text, which is markedly worse, so it does not happen quietly: the result carries
+its [`Fidelity`].
 
 # Why the fidelity travels with the data
 
@@ -41,11 +43,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
-# Phonemes espeak emits that mark structure rather than sound. They consume real
-# time — the leading one is the model's run-up into the utterance — but they
-# belong to no character, so their duration lands in the gaps between words
-# rather than being charged to a letter.
-_BOUNDARY_PHONEMES = frozenset({"^", "$", "\n"})
+from . import engine
 
 _WORD = re.compile(r"\S+")
 
@@ -92,22 +90,21 @@ class _Span:
 
 
 def align(
-    text: str,
-    phonemes: list[str],
-    durations: list[int],
-    sample_rate: int,
-    offset: float = 0.0,
-    measured: bool = True,
+    text: str, spoken: engine.TimedSpeech, offset: float = 0.0
 ) -> Alignment:
     """Places every character of `text` on the timeline of its synthesis.
 
-    `phonemes` and `durations` are parallel: the nth phoneme lasted the nth
-    count of samples. `offset` shifts the whole result, so a caller synthesizing
-    a reply in several chunks can lay them end to end without re-deriving
-    anything.
+    [LAW:types-are-the-program] The whole synthesis rather than its parts. The
+    timings, the rate they are counted at and the engine's report of whether it
+    accounted for every sample are three facts about one utterance, and passing
+    them separately admitted the combination where they describe different ones —
+    a rate from one voice over another's durations places every character wrong
+    and looks entirely plausible doing it.
 
-    `measured` is the synthesizer's own report of whether every sample it
-    returned was attributed to a phoneme. False forces [`Fidelity.INTERPOLATED`]
+    `offset` shifts the whole result, so a caller synthesizing a reply in several
+    pieces can lay them end to end without re-deriving anything.
+
+    [`engine.TimedSpeech.measured`] being false forces [`Fidelity.INTERPOLATED`]
     even when the word counts line up: the timeline still covers the audio, but
     some of its spans stand for samples nothing explained, and a caller must not
     be told those boundaries were measured.
@@ -116,8 +113,9 @@ def align(
     if not characters:
         return Alignment([], [], [], Fidelity.WORD_EXACT)
 
-    total = _seconds(sum(durations), sample_rate)
-    word_spans = _word_spans(phonemes, durations, sample_rate)
+    rate = spoken.sample_rate
+    total = _seconds(sum(timing.samples for timing in spoken.timings), rate)
+    word_spans = _word_spans(spoken.timings, rate)
     text_words = list(_WORD.finditer(text))
 
     if len(word_spans) != len(text_words) or not text_words:
@@ -173,7 +171,7 @@ def align(
         characters,
         starts,
         ends,
-        Fidelity.WORD_EXACT if measured else Fidelity.INTERPOLATED,
+        Fidelity.WORD_EXACT if spoken.measured else Fidelity.INTERPOLATED,
     )
 
 
@@ -203,20 +201,19 @@ def _spread(characters: list[str], span: _Span, fidelity: Fidelity) -> Alignment
 
 
 def _word_spans(
-    phonemes: list[str], durations: list[int], sample_rate: int
+    timings: "tuple[engine.Timing, ...]", sample_rate: int
 ) -> list[_Span]:
     """The measured start and end of each spoken word, in seconds.
 
-    A word is a run of phonemes between separators. Separator duration is not
+    A word is a run of stretches between separators. Separator duration is not
     charged to either neighbour — it is the silence the gap-filling above spans.
     """
     spans: list[_Span] = []
     elapsed = 0
     run_start: int | None = None
 
-    for phoneme, samples in zip(phonemes, durations, strict=True):
-        separator = phoneme.isspace() or phoneme in _BOUNDARY_PHONEMES
-        if separator:
+    for timing in timings:
+        if timing.separates_words:
             if run_start is not None:
                 spans.append(
                     _Span(_seconds(run_start, sample_rate), _seconds(elapsed, sample_rate))
@@ -224,7 +221,7 @@ def _word_spans(
                 run_start = None
         elif run_start is None:
             run_start = elapsed
-        elapsed += samples
+        elapsed += timing.samples
 
     if run_start is not None:
         spans.append(

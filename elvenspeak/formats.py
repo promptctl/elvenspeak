@@ -24,8 +24,8 @@ someone could forget to look.
 
 [LAW:composability] Six codec families could be six encode functions and a
 dispatch, which makes the codec a *name* — `encode_mp3`, `encode_opus` — and
-every new format a new function. Instead the codec is a *value*: Piper always
-emits signed 16-bit PCM at its voice's native rate, and ffmpeg turns that into
+every new format a new function. Instead the codec is a *value*: an engine
+always emits signed 16-bit PCM at some native rate, and ffmpeg turns that into
 any of them in a single pass that resamples and encodes together. A new format
 is a row in [`_FORMATS`], not code.
 
