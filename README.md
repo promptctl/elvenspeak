@@ -163,6 +163,10 @@ ELVENSPEAK_ENGINE=piper            # or kokoro; any other name refuses to start,
 ELVENSPEAK_FALLBACK_VOICE=…        # default: the first voice the engine offers.
                                    # Empty string turns substitution off (404s).
 ELVENSPEAK_API_KEY=                # unset accepts every request
+ELVENSPEAK_WITHHOLD=               # comma-separated capabilities to switch off:
+                                   # timestamps, speed. Naming one the engine
+                                   # never had is fine; a name that is not a
+                                   # capability refuses to start.
 PORT=5001
 HOST=0.0.0.0
 
@@ -170,7 +174,6 @@ HOST=0.0.0.0
 PIPER_VOICES=en_US-lessac-medium   # comma-separated; all installed at startup
 PIPER_MODELS_DIR=./models
 PIPER_ALLOW_DOWNLOAD=1             # 0 to require models be present already
-ELVENSPEAK_TIMESTAMPS=1            # 0 saves memory; timestamp endpoints 501
 
 # The Kokoro engine's own, read only when it is the engine:
 KOKORO_VOICES=af_heart,am_michael,bf_emma,bm_george
@@ -181,9 +184,22 @@ KOKORO_MODEL=kokoro-v1.0.int8.onnx # which published ONNX export to open
 KOKORO_ALLOW_DOWNLOAD=1            # 0 to require assets be present already
 ```
 
-`ELVENSPEAK_TIMESTAMPS` is in the Piper group despite its name — the Piper
-engine is what reads it, and another engine answers the timestamp endpoints on
-its own terms. Kokoro does not read it at all.
+`ELVENSPEAK_WITHHOLD` is in the server's group and stays there whichever engine
+runs. It names capabilities rather than features — the same closed vocabulary the
+engines declare against — so `ELVENSPEAK_WITHHOLD=timestamps` means the timestamp
+endpoints answer 501 whether Piper, Kokoro or something you wrote is behind them.
+The server subtracts what you withheld from whatever the engine declared, so no
+engine can disagree with you by forgetting to read a setting.
+
+An engine is also *told* what you withheld, which is where the saving comes from:
+Piper patches its ONNX graph at load time to expose durations, and withholding
+`timestamps` means it never opens a patched session at all. An engine with no
+such economy to make ignores the message and costs you nothing.
+
+It was `ELVENSPEAK_TIMESTAMPS`, and only Piper read it — so switching timestamps
+off and then running Kokoro got you timestamps anyway, silently, having used the
+documented name. The old name is refused at startup rather than ignored, with the
+new spelling in the message.
 
 Piper is the default because it is the first entry in the registry, and because
 of what it costs: it runs at an RTF of about 0.03, against Kokoro's 0.77 on the
@@ -264,9 +280,19 @@ package root — you should never have to import a submodule of this package.
 `Engine` is four methods: `voices()`, `capabilities()`, `speak()` and
 `speak_timed()`. Implement that and construct it yourself, and `create_app` gives
 you the server. `Prepared` and `Configure` are the second, optional half: a
-`Configure` turns an environment into a `Prepared`, and a `Prepared` has
-`acquire()` to install assets at build time and `open()` to build the engine at
-boot. Implement those too and a deployment can select your engine by name.
+`Configure` turns an environment and a set of withheld capabilities into a
+`Prepared`, and a `Prepared` has `acquire()` to install assets at build time and
+`open()` to build the engine at boot. Implement those too and a deployment can
+select your engine by name.
+
+The withheld set is the one thing your engine is told rather than left to read
+for itself, and it is `ELVENSPEAK_WITHHOLD` already parsed. Use it to skip work —
+build no aligner if `TIMESTAMPS` was withheld — and nothing more: the server
+subtracts the same set from whatever you declare, so ignoring it costs you an
+economy and never a wrong answer. Do not invent your own name for it. A setting
+in your engine's dialect means a deployment that switches something off gets it
+back the day it runs a different engine, which is the defect this argument exists
+to close.
 
 Registration is a dict:
 
