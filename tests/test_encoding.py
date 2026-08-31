@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from elvenspeak.formats import OutputFormat
-from elvenspeak.speech import encode
+from elvenspeak.speech import SynthesisFailed, encode, encode_stream
 
 NATIVE_RATE = 22050
 #: One second of a cheap non-silent waveform. Non-silent because some encoders
@@ -71,3 +71,35 @@ async def test_every_published_format_encodes():
     for name in SUPPORTED_OUTPUT_FORMATS:
         encoded = await encode(ONE_SECOND, NATIVE_RATE, OutputFormat.parse(name))
         assert encoded, f"{name} produced no bytes"
+
+
+async def test_a_producer_failure_is_raised_not_encoded_as_a_short_answer():
+    """[LAW:no-silent-failure] The failure this service was rebuilt to stop.
+
+    When synthesis dies partway, ffmpeg encodes whatever it received and exits 0
+    — a clean 200 carrying half an answer, indistinguishable from a short
+    sentence. The pump's outcome is awaited and re-raised precisely so the
+    encoder's exit status cannot speak for a producer it never saw.
+    """
+    def failing_chunks():
+        yield ONE_SECOND
+        raise RuntimeError("piper fell over mid-utterance")
+
+    with pytest.raises(SynthesisFailed):
+        await encode_stream_to_bytes(failing_chunks())
+
+
+async def encode_stream_to_bytes(chunks):
+    return b"".join(
+        [part async for part in encode_stream(chunks, NATIVE_RATE, OutputFormat.parse("pcm_22050"))]
+    )
+
+
+async def test_a_failure_on_the_very_first_chunk_still_raises():
+    """No output produced at all is the same lie, told with an empty body."""
+    def failing_immediately():
+        raise RuntimeError("piper never started")
+        yield  # pragma: no cover - generator marker
+
+    with pytest.raises(SynthesisFailed):
+        await encode_stream_to_bytes(failing_immediately())
