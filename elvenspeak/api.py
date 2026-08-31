@@ -258,7 +258,11 @@ def create_app(settings: Settings) -> FastAPI:
         ignored = body.ignored()
         if ignored:
             out["x-elvenspeak-ignored"] = ", ".join(ignored)
-        return out
+        # [LAW:single-enforcer] Every response header this service sends is built
+        # here, so this is the one place the wire's encoding has to be satisfied.
+        # Applied to all values rather than to the caller-controlled ones, so
+        # adding a header later cannot reintroduce the problem by omission.
+        return {name: _ascii_safe(value) for name, value in out.items()}
 
     # ----------------------------------------------------------------- health
 
@@ -458,6 +462,22 @@ def create_app(settings: Settings) -> FastAPI:
         return default_settings()
 
     return app
+
+
+def _ascii_safe(value: str) -> str:
+    """Renders a string so it can survive being sent as a header value.
+
+    Two of these values are the caller's own text — the `voice_id` from the URL
+    and the field names of the JSON body — and Starlette encodes header values as
+    latin-1. A voice id like `日本語` therefore raised `UnicodeEncodeError` while
+    building the response, turning the documented "unknown voice still gets
+    audio" substitution into a 500 that named nothing.
+
+    Escaped rather than dropped, because these headers exist to tell a caller
+    what it asked for: `\\u65e5` is still recognisably the id they sent, while a
+    stripped one would report a request nobody made.
+    """
+    return value.encode("ascii", "backslashreplace").decode("ascii")
 
 
 def _require_timestamps(request: Request) -> None:

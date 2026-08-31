@@ -288,3 +288,29 @@ def test_timestamps_disabled_refuses_rather_than_inventing(client):
             f"/v1/text-to-speech/{VOICE}/with-timestamps", json={"text": "hello"}
         )
         assert response.status_code == 501
+
+
+def test_a_non_latin1_voice_id_still_answers(client):
+    """The substitution contract, for an id that cannot be a header value.
+
+    Header values are latin-1 on the wire, so echoing the requested id verbatim
+    raised `UnicodeEncodeError` while building the response — turning the
+    documented "unknown voice still gets audio" path into a 500 for any caller
+    whose id happened to be non-Latin. The id is escaped rather than dropped, so
+    the header still reports what was asked for.
+    """
+    response = client.post(
+        "/v1/text-to-speech/日本語/stream", json={"text": "hello"}
+    )
+    assert response.status_code == 200
+    assert response.headers["x-elvenspeak-voice"] == VOICE
+    assert "65e5" in response.headers["x-elvenspeak-voice-requested"]
+
+
+def test_a_non_latin1_body_field_name_still_answers(client):
+    """The same wire limit, reached through `ignored()` rather than the URL."""
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}/stream", json={"text": "hello", "日": 1}
+    )
+    assert response.status_code == 200
+    assert "65e5" in response.headers["x-elvenspeak-ignored"]
