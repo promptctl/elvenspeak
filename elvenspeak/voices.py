@@ -140,12 +140,13 @@ class VoiceNotInstalled(LookupError):
 class Catalog:
     """The installed voices, and the one table that resolves an id onto them.
 
-    Models are loaded lazily and kept: an ONNX session is tens of megabytes of
-    weights and seconds of load time, so the first request for a voice pays for
-    it and every later one does not. Loading is not guarded by a lock — under
-    the ASGI worker model two concurrent first-requests would each build a
-    session and one would win, which wastes a load and is otherwise harmless;
-    a lock here would serialize every synthesis behind a dictionary lookup.
+    Models are cached once loaded: an ONNX session is tens of megabytes of
+    weights and seconds of load time. When that happens is not decided here —
+    api.py's lifespan loads every voice in the catalog before the server accepts
+    a request, so no request ever waits for one and [`model`]'s laziness is a
+    safety net rather than the load-time story. Deleting that warmup as a
+    redundant optimisation would put a multi-second load back inside whichever
+    request first named the voice, on the event loop.
     """
 
     def __init__(
@@ -357,20 +358,36 @@ def _describe(key: str, model_path: Path) -> Voice:
         config = json.load(handle)
 
     parts = key.split("-")
-    # `or {}` rather than a default argument: `.get(key, {})` substitutes only
-    # for an absent key, so an explicit null in a hand-edited or half-written
-    # sidecar returned None and the chained lookup raised AttributeError —
-    # instead of the key-derived fallback this expression already promises.
+    # `or {}` throughout rather than a default argument: `.get(name, {})`
+    # substitutes only for an absent key, so an explicit null in a hand-edited or
+    # half-written sidecar returned None and the chained lookup raised
+    # AttributeError — instead of the key-derived fallback these expressions
+    # already promise. Read into locals so each section is spelled once; the two
+    # spellings of `audio` were how they came to disagree.
+    audio = config.get("audio") or {}
     language = (config.get("language") or {}).get("code") or (
         parts[0] if len(parts) == _KEY_PARTS else key
     )
+
+    # The one field with no fallback. Everything else can be recovered from the
+    # voice key, but a guessed sample rate is a wrong-pitch answer that plays
+    # perfectly — the silent wrong answer this service refuses elsewhere — so a
+    # sidecar that does not state it is a voice that cannot be served, named
+    # here rather than as a bare KeyError from inside a dict lookup.
+    rate = audio.get("sample_rate")
+    if rate is None:
+        raise ValueError(
+            f"voice {key!r} has no audio.sample_rate in its .onnx.json; "
+            f"the rate its samples will have cannot be inferred"
+        )
+
     return Voice(
         key=key,
         name=config.get("dataset") or (parts[1] if len(parts) == _KEY_PARTS else key),
         language=language,
-        quality=(config.get("audio") or {}).get("quality")
+        quality=audio.get("quality")
         or (parts[2] if len(parts) == _KEY_PARTS else "medium"),
         model_path=model_path,
-        sample_rate=int(config["audio"]["sample_rate"]),
-        num_speakers=int(config.get("num_speakers", 1)),
+        sample_rate=int(rate),
+        num_speakers=int(config.get("num_speakers") or 1),
     )
