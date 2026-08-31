@@ -131,6 +131,36 @@ def test_trailing_characters_are_placed():
         assert result.ends[i] == pytest.approx(result.starts[i + 1])
 
 
+def test_trailing_duration_survives_when_no_character_is_left_to_hold_it():
+    """The timeline covers the audio even when the text ends on a word.
+
+    `\\S+` swallows final punctuation, so "friend." leaves no trailing character
+    for a closing separator's duration to be spread across — and `_word_spans`
+    charges separator time to no word. This is the ordinary shape of a sentence,
+    and it is what `synthesize_timed` produces whenever a chunk arrives with
+    audio it cannot attribute: a trailing `" "` carrying real samples.
+
+    Dropping that remainder is invisible per call — the timings look plausible,
+    just short — and the streaming endpoint takes `ends[-1]` as the next
+    sentence's start, so every sentence begins earlier than the audio it labels
+    and the error accumulates across the response.
+    """
+    phonemes = PHONEMES + [" "]
+    durations = DURATIONS + [4410]
+    result = align(TEXT, phonemes, durations, RATE)
+
+    assert len(result.characters) == len(TEXT)
+    assert result.ends[-1] == pytest.approx(sum(durations) / RATE)
+
+
+def test_trailing_duration_is_honoured_with_an_offset_too():
+    """The streaming path's actual call shape, since it always passes an offset."""
+    phonemes = PHONEMES + [" "]
+    durations = DURATIONS + [4410]
+    result = align(TEXT, phonemes, durations, RATE, offset=7.5)
+    assert result.ends[-1] == pytest.approx(7.5 + sum(durations) / RATE)
+
+
 def test_unmeasured_audio_forces_interpolated_even_when_words_line_up():
     """[LAW:no-silent-failure] `measured=False` is the synthesizer's own report.
 

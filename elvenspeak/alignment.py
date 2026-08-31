@@ -25,8 +25,7 @@ an abbreviation, a symbol read aloud — no word-level correspondence exists at
 all, and pretending otherwise would put every later word's timing off by a
 compounding drift. That case falls back to distributing the whole utterance
 across the whole text, which is markedly worse, so it does not happen quietly:
-the result carries its [`Fidelity`] and the endpoints report it in an
-`x-elvenspeak-alignment` header.
+the result carries its [`Fidelity`].
 
 # Why the fidelity travels with the data
 
@@ -154,14 +153,22 @@ def align(
         char_cursor = match.end()
         time_cursor = span.end
 
-    if char_cursor < len(characters):
-        _distribute(
-            starts,
-            ends,
-            range(char_cursor, len(characters)),
-            time_cursor + offset,
-            total + offset,
-        )
+    # [LAW:dataflow-not-control-flow] Unguarded: `_distribute` already returns on
+    # an empty range, so a check here would only decide whether an operation runs.
+    _distribute(
+        starts,
+        ends,
+        range(char_cursor, len(characters)),
+        time_cursor + offset,
+        total + offset,
+    )
+    # The timeline ends where the audio ends. Usually there is no trailing
+    # character to carry the last of it — `\S+` swallows final punctuation, so
+    # the run above is empty — and the remainder is a separator's duration, which
+    # `_word_spans` charges to no word. Left unassigned it makes `ends[-1]` report
+    # less audio than was synthesized, and the streaming endpoint lays the next
+    # sentence over the difference, sliding further with every sentence.
+    ends[-1] = total + offset
     return Alignment(
         characters,
         starts,
