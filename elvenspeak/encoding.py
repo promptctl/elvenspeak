@@ -53,13 +53,19 @@ _READ_SIZE = 16 * 1024
 _EXIT_TIMEOUT = 10.0
 
 
-class SynthesisFailed(RuntimeError):
-    """The encoder refused the audio, or synthesis died before it was complete.
+class EncodingFailed(RuntimeError):
+    """The encoded audio could not be completed.
+
+    Two causes, deliberately one exception: the source of samples raised before
+    it was done, or ffmpeg exited non-zero. This module is handed an iterator of
+    bytes and does not know who produced it — naming the failure after the
+    caller's domain, as `SynthesisFailed` did, put a fact from the other side of
+    the seam into the one module that must not hold one.
 
     Distinct from an empty result: this is a fault, not a quiet answer.
 
     Becomes a 500 only on the non-streaming endpoints. The streaming ones have
-    already committed a 200 by the time synthesis can fail, so all they can do is
+    already committed a 200 by the time it can be raised, so all they can do is
     abort the body — a streaming caller must treat a truncated response as a
     failure, because no status code is coming to say so.
     """
@@ -84,10 +90,10 @@ async def encode_stream(
     loop ends means a chatty failure can wedge ffmpeg before it has produced the
     output that would end that loop, and the request hangs rather than fails.
 
-    # Why a synthesis failure cannot pass as a short reply
+    # Why a broken sample source cannot pass as a short reply
 
     [LAW:no-silent-failure] Because that is the failure this whole service was
-    rebuilt to stop producing. If synthesis dies halfway, ffmpeg encodes what it
+    rebuilt to stop producing. If the source dies halfway, ffmpeg encodes what it
     received and exits 0 — a clean 200 carrying half an answer. So the pump's
     outcome is awaited and its exception raised, rather than the process's exit
     status being trusted to describe something it never saw.
@@ -173,8 +179,8 @@ async def encode_stream(
     # Only reached when the generator ran to completion — an abandoned response
     # exits through the `finally` above and never gets here.
     if failure is not None:
-        raise SynthesisFailed(
-            f"synthesis failed before the {fmt.wire_name} audio was complete"
+        raise EncodingFailed(
+            f"the sample source failed before the {fmt.wire_name} audio was complete"
         ) from failure
     # -9 is tolerated only when the kill above is where it came from. Inferring
     # that from the exit code instead accepts every other SIGKILL as success —
@@ -184,7 +190,7 @@ async def encode_stream(
     # running, so whatever was encoded before the kill ships as a complete 200.
     tolerated = (0, -9) if killed_here else (0,)
     if process.returncode not in tolerated:
-        raise SynthesisFailed(
+        raise EncodingFailed(
             f"ffmpeg exited {process.returncode} encoding {fmt.wire_name}: "
             f"{stderr.decode(errors='replace')[:500]}"
         )
