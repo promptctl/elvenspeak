@@ -171,7 +171,7 @@ def _followed_module_file(name: str) -> Path | None:
 #: Third-party libraries that make a module a concrete engine. One entry per
 #: engine, and the only line a new engine has to add here — reaching an engine's
 #: *module* is caught by the same walk, since that module reaches its library.
-_ENGINE_LIBRARIES = frozenset({"piper"})
+_ENGINE_LIBRARIES = frozenset({"piper", "kokoro_onnx"})
 
 
 def _modules_reaching_an_engine(root: str) -> set[str]:
@@ -239,7 +239,7 @@ def test_the_server_cannot_reach_a_concrete_engine(root: str):
     assert not _modules_reaching_an_engine(root)
 
 
-@pytest.mark.parametrize("root", ["piper"])
+@pytest.mark.parametrize("root", ["piper", "kokoro"])
 def test_the_seam_check_can_actually_fail(root: str):
     """Positive control: the detector still detects.
 

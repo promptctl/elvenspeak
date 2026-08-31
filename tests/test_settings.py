@@ -88,11 +88,23 @@ def test_an_empty_registry_is_a_config_error_not_a_stopiteration():
         Settings.from_env({}, {})
 
 
+#: A name no engine will ever have. It used to be `kokoro`, which stopped being
+#: unknown the day a second engine was added — and these tests then passed an
+#: engine that really existed and asserted it was refused, which is the shape of
+#: a test that goes green by agreeing with the bug.
+UNKNOWN_ENGINE = "not-an-engine"
+
+
 def test_an_unknown_engine_is_refused_and_says_what_there_is():
     with pytest.raises(ConfigError) as raised:
-        from_env(ELVENSPEAK_ENGINE="kokoro")
-    assert "kokoro" in str(raised.value)
-    assert "piper" in str(raised.value)
+        from_env(ELVENSPEAK_ENGINE=UNKNOWN_ENGINE)
+    message = str(raised.value)
+    assert UNKNOWN_ENGINE in message
+    # Every registered engine, read off the registry rather than listed here: a
+    # roster spelled in this file is a second map of `ENGINES` that goes stale
+    # exactly when a third engine is added and nobody looks at this test.
+    for name in ENGINES:
+        assert name in message
 
 
 def test_an_engine_s_problems_join_the_server_s_in_one_list():
@@ -122,9 +134,10 @@ def test_an_unknown_engine_reports_only_that():
     a second invented one).
     """
     with pytest.raises(ConfigError) as raised:
-        from_env(ELVENSPEAK_ENGINE="kokoro", PIPER_ALLOW_DOWNLOAD="tru")
+        from_env(ELVENSPEAK_ENGINE=UNKNOWN_ENGINE, PIPER_ALLOW_DOWNLOAD="tru")
     assert raised.value.problems == [
-        "ELVENSPEAK_ENGINE='kokoro' is not one of: piper"
+        f"ELVENSPEAK_ENGINE={UNKNOWN_ENGINE!r} is not one of: "
+        f"{', '.join(ENGINES)}"
     ]
 
 

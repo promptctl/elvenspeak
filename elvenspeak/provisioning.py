@@ -108,6 +108,40 @@ class Prepared(Protocol):
         ...
 
 
+_TRUE = frozenset({"1", "true", "yes", "on"})
+_FALSE = frozenset({"0", "false", "no", "off"})
+
+
+def flag(env: Mapping[str, str], name: str, default: bool) -> bool:
+    """Reads a boolean setting, refusing anything that is not clearly one.
+
+    [LAW:no-silent-failure] The obvious implementation — true if the value is in
+    a true-set, false otherwise — makes `KOKORO_ALLOW_DOWNLOAD=tru` mean "off",
+    silently, in the one place whose stated job is catching configuration
+    mistakes at startup. A typo in a boolean is exactly as much a mistake as a
+    typo in a port, and is reported the same way.
+
+    [LAW:one-source-of-truth] Here rather than inside an engine because every
+    engine parses its own environment and they all need this rule. It was
+    private to the Piper module until a second engine wanted it, and the choice
+    then was one shared rule or two copies free to drift — a deployment learning
+    that one engine rejects `tru` and another quietly reads it as "off" would be
+    learning it from the audio.
+    """
+    raw = env.get(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in _TRUE:
+        return True
+    if value in _FALSE:
+        return False
+    raise ValueError(
+        f"{name}={raw!r} is not a boolean; "
+        f"use one of {', '.join(sorted(_TRUE))} or {', '.join(sorted(_FALSE))}"
+    )
+
+
 #: Turns an environment into a [`Prepared`], or raises [`ConfigError`] naming
 #: every problem it found — all of them, not the first, so that an engine's
 #: complaints join the server's in the single list an operator reads at startup.

@@ -10,6 +10,11 @@ dependencies = [
     # endpoints have nothing real to report, so it is a dependency rather than
     # an option — see elvenspeak/alignment.py.
     "piper-tts[alignment]>=1.7.0",
+    # The second engine. Pulls onnxruntime, numpy and phonemizer; it is a
+    # dependency rather than an extra because `elvenspeak.engines` lists it, and
+    # an engine a deployment can select by name but cannot import would turn a
+    # configuration choice into an ImportError at boot.
+    "kokoro-onnx>=0.6.1",
     "uvicorn[standard]>=0.52.4",
 ]
 
