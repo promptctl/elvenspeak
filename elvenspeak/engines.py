@@ -20,14 +20,15 @@ line in that module's positive control.
 
 from __future__ import annotations
 
-from . import piper
+from . import kokoro, piper
 from .provisioning import Registry
 
 #: [LAW:one-source-of-truth] The key is the engine's name; no entry repeats it.
 #:
 #: The first entry is the default, so an unset `ELVENSPEAK_ENGINE` always names a
 #: real engine — a separate default setting could name one that is not here.
-#: Piper is first because it is roughly twenty times faster than the alternatives
-#: measured so far; a better-sounding engine is a deployment's choice to make,
-#: not one to inherit by being listed.
-ENGINES: Registry = {"piper": piper.configure}
+#: Piper is first because it is roughly twenty times faster: measured on this
+#: class of machine, Piper runs at RTF ~0.03 against Kokoro's ~0.77. Kokoro
+#: sounds considerably better, which is a deployment's choice to make and not one
+#: to inherit by being listed.
+ENGINES: Registry = {"piper": piper.configure, "kokoro": kokoro.configure}

@@ -14,13 +14,15 @@ import json
 import pytest
 from conftest import INSTALLED_VOICE as VOICE
 from conftest import MODELS_DIR as MODELS
-from conftest import needs_installed_model, piper_prepared
+from conftest import piper_prepared
 from fastapi.testclient import TestClient
 
 from elvenspeak import create_app
 from elvenspeak.settings import Settings
 
-pytestmark = needs_installed_model
+#: Every test here synthesizes with the real Piper voice, so the whole module
+#: depends on the assets being installed rather than skipping when they are not.
+pytestmark = pytest.mark.usefixtures("installed_assets")
 
 #: An ElevenLabs voice id from aliases.toml. Used to prove substitution, which
 #: is the behaviour openconv depends on.
