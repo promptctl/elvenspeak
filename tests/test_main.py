@@ -1,10 +1,11 @@
 """The entry point's one job: report a bad environment the same way, either way.
 
-`_settings()` exists because only the script path used to catch `ConfigError`,
-so `uvicorn main:build --factory` — a documented way to start this service —
-answered a bad environment with a raw traceback carrying every problem joined
-onto one line. Both paths now come through here, and nothing checked that they
-do.
+`Settings.from_env_or_exit` exists because only the script path used to catch
+`ConfigError`, so `uvicorn main:build --factory` — a documented way to start
+this service — answered a bad environment with a raw traceback carrying every
+problem joined onto one line. Every entry point now comes through it, and what
+that reporting looks like is `tests/test_settings.py`'s subject; what this file
+checks is that the factory path still goes through it.
 
 The success path does need a real voice, and that is the point of the design it
 covers: `build()` is the composition root, so it opens the engine before handing
@@ -26,28 +27,6 @@ VOICE = "en_US-lessac-medium"
 MODELS = Path(
     os.environ.get("PIPER_MODELS_DIR", Path(__file__).parent.parent / "models")
 )
-
-
-def test_a_bad_environment_exits_two_naming_every_problem(monkeypatch, capsys):
-    """One restart, the whole list — the contract settings.py accumulates for.
-
-    Reporting only the first problem would send an operator round the fix-restart
-    loop once per mistake, which is exactly what `ConfigError` carrying a list is
-    meant to prevent. So this asserts every problem reaches stderr, not just that
-    the exit code is right.
-    """
-    monkeypatch.setenv("PIPER_VOICES", "en_US-lessac-medium")
-    monkeypatch.setenv("PIPER_FALLBACK_VOICE", "not-installed")
-    monkeypatch.setenv("PORT", "99999")
-    monkeypatch.setenv("ELVENSPEAK_TIMESTAMPS", "maybe")
-
-    with pytest.raises(SystemExit) as raised:
-        main._settings()
-
-    assert raised.value.code == 2
-    stderr = capsys.readouterr().err
-    for expected in ("PIPER_FALLBACK_VOICE", "PORT", "ELVENSPEAK_TIMESTAMPS"):
-        assert expected in stderr
 
 
 def test_the_factory_entry_point_exits_the_same_way(monkeypatch, capsys):

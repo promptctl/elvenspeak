@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from elvenspeak.settings import ConfigError, Settings
+from elvenspeak.settings import DEFAULT_VOICE, ConfigError, Settings
 
 
 def env(**overrides) -> dict[str, str]:
@@ -152,3 +152,52 @@ def test_an_absent_models_dir_still_gets_the_default():
     """Unset is not the same as set-to-empty, and only one of them is a problem."""
     settings = Settings.from_env({"PIPER_VOICES": "en_US-lessac-medium"})
     assert settings.models_dir.name == "models"
+
+
+def test_a_bad_environment_exits_two_naming_every_problem(monkeypatch, capsys):
+    """One restart, the whole list — the contract `ConfigError` accumulates for.
+
+    Reporting only the first problem would send an operator round the
+    fix-restart loop once per mistake, which is exactly what a `ConfigError`
+    carrying a list is meant to prevent. So this asserts every problem reaches
+    stderr, not just that the exit code is right.
+
+    Reads the real environment, unlike everything above it, because
+    `from_env_or_exit` is what the entry points call with no argument — it is
+    the process-facing half of this module, and stubbing the environment out of
+    it would leave the half that actually runs untested.
+    """
+    monkeypatch.setenv("PIPER_VOICES", "en_US-lessac-medium")
+    monkeypatch.setenv("PIPER_FALLBACK_VOICE", "not-installed")
+    monkeypatch.setenv("PORT", "99999")
+    monkeypatch.setenv("ELVENSPEAK_TIMESTAMPS", "maybe")
+
+    with pytest.raises(SystemExit) as raised:
+        Settings.from_env_or_exit()
+
+    assert raised.value.code == 2
+    stderr = capsys.readouterr().err
+    for expected in ("PIPER_FALLBACK_VOICE", "PORT", "ELVENSPEAK_TIMESTAMPS"):
+        assert expected in stderr
+
+
+def test_a_good_environment_comes_back_as_settings(monkeypatch):
+    """The positive control: the exit is not the only way out of it.
+
+    Every variable this module reads is cleared first, so the result is the
+    documented defaults rather than whatever the shell running the tests
+    happens to export.
+    """
+    for name in (
+        "PIPER_VOICES",
+        "PIPER_FALLBACK_VOICE",
+        "PIPER_MODELS_DIR",
+        "PIPER_ALLOW_DOWNLOAD",
+        "ELVENSPEAK_API_KEY",
+        "ELVENSPEAK_TIMESTAMPS",
+        "HOST",
+        "PORT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert Settings.from_env_or_exit().voices == (DEFAULT_VOICE,)

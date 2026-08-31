@@ -8,32 +8,11 @@ runs. Everything it does beyond wiring belongs in the package.
 from __future__ import annotations
 
 import logging
-import sys
 
 from elvenspeak import create_app, piper
-from elvenspeak.settings import ConfigError, Settings
+from elvenspeak.settings import Settings
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-
-
-def _settings() -> Settings:
-    """Reads the environment, or exits naming every problem with it.
-
-    [LAW:single-enforcer] Both entry points come through here, so a
-    misconfiguration is reported the same way whichever one is used. Previously
-    only the script path caught `ConfigError`, and `uvicorn main:build --factory`
-    — a documented, supported way to start this service — answered a bad
-    environment with a raw traceback carrying every problem joined onto one line.
-    """
-    try:
-        return Settings.from_env()
-    except ConfigError as error:
-        # Every problem at once, on stderr, with a non-zero exit: an operator
-        # bringing this up for the first time should not discover their
-        # configuration one restart at a time.
-        for problem in error.problems:
-            print(f"config error: {problem}", file=sys.stderr)
-        raise SystemExit(2) from None
 
 
 def _app(settings: Settings):
@@ -62,11 +41,11 @@ def _app(settings: Settings):
 
 def build():
     """The ASGI application, for `uvicorn main:build --factory` and for tests."""
-    return _app(_settings())
+    return _app(Settings.from_env_or_exit())
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    settings = _settings()
+    settings = Settings.from_env_or_exit()
     uvicorn.run(_app(settings), host=settings.host, port=settings.port)

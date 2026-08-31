@@ -15,6 +15,7 @@ commit rather than on whoever remembers.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -96,6 +97,12 @@ def test_no_build_arg_is_spliced_into_source_text():
     required `os.environ['PIPER_VOICES']` to appear, which pinned one particular
     way of reading the value: routing the same read through `Settings.from_env`
     satisfied the contract and failed the test anyway.
+
+    Deliberately without a "parsed nothing" guard, unlike every other check here:
+    the only `python -c` left in this file is the HEALTHCHECK's stdlib one-liner,
+    and a Dockerfile carrying no Python source at all is the state where this
+    property is vacuously true because it has been made unreachable, not the
+    state where the regex has quietly stopped matching.
     """
     for block in re.findall(r'python -c "([\s\S]*?)"\s*$', instructions(), re.MULTILINE):
         assert "${" not in block, f"build arg interpolated into source: {block[:80]!r}"
@@ -153,19 +160,6 @@ def test_the_exposed_port_is_not_a_second_copy_of_the_configured_one():
     assert not re.search(r"127\.0\.0\.1:\d+", body), "HEALTHCHECK hardcodes a port"
 
 
-def test_the_voice_list_is_not_parsed_a_second_time():
-    """[LAW:one-source-of-truth] The build reads voices the way the server does.
-
-    This step used to re-implement the split-and-strip from `Settings.from_env`
-    and carry a comment asserting the two agreed — the shape that makes a
-    divergence hard to see rather than impossible, since the comment is what a
-    reader trusts instead of checking.
-    """
-    text = DOCKERFILE.read_text()
-    assert "Settings.from_env" in text
-    assert "PIPER_VOICES'].split" not in text
-
-
 def test_the_baked_default_voice_is_the_projects_default_voice():
     """[LAW:one-source-of-truth] The ARG default and DEFAULT_VOICE, tied together.
 
@@ -196,82 +190,64 @@ def test_substituted_env_values_are_quoted():
             assert False, f"unquoted substitution {name}={value}; wrap it in quotes"
 
 
-#: `RUN uv run python -c "<source>"`, with the shell's backslash continuations
-#: still in it. The image bakes voices in by calling into this package, so the
-#: Dockerfile holds Python that no import of this repo ever reaches.
-_RUN_PYTHON = re.compile(r'RUN\s+uv\s+run\s+python\s+-c\s+"(.*?)"', re.DOTALL)
+#: `RUN uv run python -m <module>`: how the image bakes its voices in. The step
+#: used to be `python -c "<source>"` — Python written into this file, which no
+#: import of this repo ever reached.
+_RUN_MODULE = re.compile(r"^\s*RUN\s+uv\s+run\s+python\s+-m\s+(\S+)\s*$", re.MULTILINE)
 
 
-def baked_python() -> str:
-    """The Python source the image build executes, ready to parse."""
-    joined = DOCKERFILE.read_text().replace("\\\n", "")
-    match = _RUN_PYTHON.search(joined)
-    assert match, "no `RUN uv run python -c` step found — the regex is wrong"
-    return "\n".join(part.strip() for part in match.group(1).split(";"))
+def test_the_build_runs_no_python_source_of_its_own():
+    """`piper-build-m8h`: the build's code lives in the package, not in this file.
 
+    Source text in a RUN is invisible to every tool that reads this repository —
+    not imported, not linted, not covered — and the only thing that executes it
+    is a real image build, which by this repo's rules happens in CI after the
+    merge. Two escaped defects in two consecutive pull requests came through
+    that gap, both past a green suite.
 
-def test_the_baked_voice_step_calls_functions_that_exist():
-    """The check that would have caught a deleted function, run automatically.
-
-    `piper-engine-axb.2` moved `install` out of `elvenspeak.voices`, and this
-    step went on importing it from there. Nothing failed: the test suite never
-    executes the Dockerfile, so the only thing that would have reported it was an
-    image build, which by this repo's rules happens in CI after the merge.
-
-    [LAW:verifiable-goals] Resolved against the real modules rather than grepped
-    for, because the failure has two shapes — a name that is gone, and a name
-    that survived with different parameters — and only one of them is visible as
-    text.
+    Asserted as the absence of the whole shape rather than as a check on the
+    snippet's contents. Its predecessor here parsed that snippet, resolved its
+    imports and bound its calls, and still could not catch the second defect: a
+    function that still exists and still takes those arguments can always mean
+    less than it used to. The snippet was the problem, so the snippet is gone.
     """
-    import ast
-    import importlib
-    import inspect
+    for step in re.findall(r"^\s*RUN\s+(.*)$", instructions(), re.MULTILINE):
+        assert "python -c" not in step, f"RUN executes Python source text: {step[:80]!r}"
 
-    tree = ast.parse(baked_python())
-    imported: dict[str, object] = {}
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            module = importlib.import_module(node.module)
-            for alias in node.names:
-                # `from x import y` names an attribute of `x` when y is a class
-                # or function, and a submodule when it is not — and a submodule
-                # is invisible to `hasattr` until something imports it. Both are
-                # valid imports, so both are resolved here; only a name that is
-                # neither is the failure this test is for.
-                found = getattr(module, alias.name, None)
-                if found is None:
-                    try:
-                        found = importlib.import_module(f"{node.module}.{alias.name}")
-                    except ImportError:
-                        pytest.fail(
-                            f"Dockerfile imports {alias.name!r} from {node.module}, "
-                            f"which has no such attribute or submodule"
-                        )
-                imported[alias.asname or alias.name] = found
+def test_the_voice_bake_runs_a_module_that_exists_and_refuses_a_bad_environment():
+    """[LAW:verifiable-goals] The exact invocation, executed rather than grepped.
 
-    assert imported, "parsed no imports — the extraction is wrong, not the file"
+    A module name in a RUN is still a reference this repository has to honour,
+    and the previous version of that reference broke when `install` moved. This
+    resolves it the only way that cannot share an assumption with the thing it
+    checks: by running it.
 
-    calls = 0
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-            target = getattr(imported.get(func.value.id), func.attr, None)
-        elif isinstance(func, ast.Name) and func.id in imported:
-            target = imported[func.id]
-        else:
-            continue
-        if target is None or not callable(target):
-            continue
-        calls += 1
-        # Binds the call the Dockerfile actually writes, so a kwarg that no
-        # longer exists, or a required one it stopped passing, is a failure here
-        # rather than at `docker build`.
-        inspect.signature(target).bind(
-            *(object() for _ in node.args),
-            **{kw.arg: object() for kw in node.keywords if kw.arg},
-        )
+    A bad `PORT` rather than a bad voice, so the check needs no network and no
+    model. Exit 2 with the problem on stderr proves three things at once — the
+    module the Dockerfile names is importable, `python -m` actually reaches its
+    entry point rather than importing a module that does nothing, and it reads
+    the environment through the same reporting path as every other entry point.
 
-    assert calls, "resolved no calls — the extraction is wrong, not the file"
+    What the bake *guarantees* is `tests/test_bake.py`'s subject; it can call
+    `bake` directly, which is the whole reason this step was given a file.
+    """
+    import subprocess
+    import sys
+
+    module = _RUN_MODULE.search(instructions())
+    assert module, "no `RUN uv run python -m <module>` bake step found"
+
+    result = subprocess.run(
+        [sys.executable, "-m", module.group(1)],
+        cwd=REPO,
+        env={"PATH": os.environ["PATH"], "PORT": "not-a-number"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2, (
+        f"`python -m {module.group(1)}` exited {result.returncode}, "
+        f"not 2\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "PORT" in result.stderr

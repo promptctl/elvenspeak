@@ -44,31 +44,16 @@ ENV PIPER_MODELS_DIR=/app/models \
     ELVENSPEAK_TIMESTAMPS=1 \
     PORT=5001
 
-# The build arg reaches Python through the environment, never spliced into the
-# source text. Interpolating it as `'${PIPER_VOICES}'.split(',')` put a
-# caller-supplied string inside a Python literal inside a shell command, so a
-# single quote in a --build-arg escaped into executable code at build time.
+# A module in the package, not Python written into this file. The build arg
+# reaches it through the environment above, which is also why it cannot be
+# injected into: interpolating `'${PIPER_VOICES}'.split(',')` once put a
+# caller-supplied string inside a Python literal inside a shell command.
 #
-# [LAW:one-source-of-truth] This calls the same `install` the server calls at
-# startup, rather than reimplementing it. It used to have its own download loop
-# and its own copy of the voice-list parsing, under a comment asserting the two
-# agreed — the shape that makes a divergence hard to see rather than impossible.
-# Reusing the function gets its completeness checks for free, which is what
-# matters here: `download_voice` reports success by returning, so a half-written
-# pair would otherwise leave the build green and the image broken at every
-# startup. `allow_download` is passed explicitly because the ENV above turns it
-# off for runtime, where a missing model must fail the deploy instead.
-#
-# `install` rather than `piper.load`: opening an ONNX session per voice only to
-# throw it away would cost the build a minute and a gigabyte for nothing. What
-# this step does need is the guarantee `install` returns — every voice present
-# AND describable — so a truncated `.onnx.json` fails the build here rather than
-# every container start.
-RUN uv run python -c "\
-from elvenspeak.settings import Settings; \
-from elvenspeak import piper; \
-s = Settings.from_env(); \
-piper.install(keys=s.voices, models_dir=s.models_dir, allow_download=True)"
+# What this step guarantees, and why the failure is worth having here, is
+# documented where the code is — `elvenspeak/bake.py`. A `python -c` string was
+# code no linter, type checker or test could see, and it shipped two escaped
+# defects in two consecutive pull requests before it was given a file.
+RUN uv run python -m elvenspeak.bake
 
 # [LAW:effects-at-boundaries] Nothing after this point needs root. ffmpeg and the
 # ONNX runtime both process caller-influenced input, so a compromise anywhere in

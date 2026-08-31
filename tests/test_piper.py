@@ -18,28 +18,12 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import make_voice
 
 from elvenspeak import piper
 from elvenspeak.engine import Prosody
 
 KEY = "en_US-lessac-medium"
-
-
-def make_voice(models_dir: Path, key: str = KEY, sample_rate: int = 22050) -> None:
-    """A voice as far as `load()` can tell: both halves present."""
-    models_dir.mkdir(parents=True, exist_ok=True)
-    (models_dir / f"{key}.onnx").write_bytes(b"not a real model")
-    (models_dir / f"{key}.onnx.json").write_text(
-        json.dumps(
-            {
-                "dataset": key.split("-")[1],
-                "language": {"code": "en_US"},
-                "audio": {"sample_rate": sample_rate, "quality": "medium"},
-                "num_speakers": 1,
-            }
-        ),
-        encoding="utf-8",
-    )
 
 
 class _StubVoice:
