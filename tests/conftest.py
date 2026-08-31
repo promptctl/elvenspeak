@@ -5,9 +5,10 @@ voice on disk that no real download produced, and a second copy of "what a
 `.onnx.json` has to contain" would be free to drift from the first — leaving one
 file testing against a sidecar shape the other has stopped believing in.
 
-`DeclaredEngine` and `installed_assets` are here for the same reason from the two
-other directions a test reaches an engine: the fake one every capability test
-drives, and where the real ones' models are kept.
+`DeclaredEngine` and the per-engine asset fixtures — `piper_installed`,
+`kokoro_installed`, `kokoro_timeless_installed` — are here for the same reason
+from the two other directions a test reaches an engine: the fake one every
+capability test drives, and where the real ones' models are kept.
 """
 
 from __future__ import annotations

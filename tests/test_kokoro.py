@@ -29,8 +29,6 @@ from elvenspeak import kokoro
 from elvenspeak.engine import Capability, Prosody
 from elvenspeak.provisioning import ConfigError
 
-pytestmark = pytest.mark.usefixtures("kokoro_installed")
-
 TEXT = "Compatibility is measurable, and this sentence is long enough to measure."
 
 
@@ -189,6 +187,40 @@ def test_a_voice_is_described_from_its_id(key, name, language, gender):
         "gender": gender,
         "engine": "kokoro",
     }
+
+
+def test_every_language_the_map_names_is_one_espeak_accepts():
+    """[LAW:verifiable-goals] The map is checked against the backend, not read back.
+
+    `_describe` only copies these values into a label, so every other test here
+    would pass just as well on a table of invented codes. Only the backend knows
+    which ones it accepts.
+    """
+    from phonemizer.backend import EspeakBackend
+
+    supported = EspeakBackend.supported_languages()
+
+    assert set(kokoro._VOICE_LANGUAGES.values()) <= set(supported)
+    assert "zh" not in supported
+
+
+def test_a_voice_outside_the_default_english_speaks_through_its_own_phonemizer(
+    kokoro_installed,
+):
+    """The language map, exercised end to end rather than through a label.
+
+    `bf_emma` is en-gb and ships in `DEFAULT_VOICES`, so a default deployment
+    speaks a voice that no test spoke while the suite only ever synthesized the
+    two `a`-prefixed ones. That left the whole non-`en-us` half of the map
+    resting on the description path, which never reaches the phonemizer at all.
+    """
+    speaking = kokoro_prepared(voices=("bf_emma",)).open()
+
+    spoken = speaking.speak(speaking.voices()[0], TEXT, Prosody())
+    audio = b"".join(spoken.audio)
+
+    assert spoken.sample_rate == 24000
+    assert len(audio) > 0
 
 
 def test_every_measurement_accounts_for_every_sample(engine):
