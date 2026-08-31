@@ -9,10 +9,13 @@ that an output format's name describes the bytes it returns.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 
 from elvenspeak.formats import OutputFormat
-from elvenspeak.speech import SynthesisFailed, encode, encode_stream
+from elvenspeak.encoding import SynthesisFailed, encode, encode_stream
 
 NATIVE_RATE = 22050
 #: One second of a cheap non-silent waveform. Non-silent because some encoders
@@ -103,3 +106,61 @@ async def test_a_failure_on_the_very_first_chunk_still_raises():
 
     with pytest.raises(SynthesisFailed):
         await encode_stream_to_bytes(failing_immediately())
+
+
+PACKAGE = Path(__file__).resolve().parent.parent / "elvenspeak"
+
+
+def _imported_names(module: str) -> set[str]:
+    """Every module `module` names in an import, at any nesting depth.
+
+    `ast.walk` rather than a scan of the top level, because this package imports
+    Piper exclusively from inside functions and `if TYPE_CHECKING` blocks — so a
+    check that only read module-scope imports would report every module in the
+    package as Piper-free, including the ones built entirely around it.
+    """
+    found: set[str] = set()
+    for node in ast.walk(ast.parse((PACKAGE / f"{module}.py").read_text())):
+        if isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            # `from .formats import X` names the module; `from . import speech`
+            # names it in the alias list instead.
+            found.update(
+                {node.module} if node.module else {a.name for a in node.names}
+            )
+    return found
+
+
+@pytest.mark.parametrize("root", ["encoding", "text"])
+def test_the_encoder_cannot_reach_the_engine(root: str):
+    """The seam, asserted rather than described.
+
+    Encoding is engine-agnostic for every engine that will ever exist — they all
+    emit PCM and ffmpeg does not care who produced it. That claim is what makes
+    the encoder the reusable half, and it is worth nothing as a sentence in a
+    docstring: one convenience import of a Piper type for an annotation would
+    quietly undo it, every other test would stay green, and the second engine
+    would discover the coupling instead of the reviewer.
+
+    Read statically off the import graph rather than observed at runtime. The
+    obvious runtime version — import the module and look for `piper` in
+    `sys.modules` — passes whether or not the seam holds, because nothing here
+    imports Piper at module scope; it was written, it went green, and it was
+    only caught by re-coupling the module on purpose to watch it stay green.
+
+    Transitive, because `from . import speech` inside `encoding` would satisfy a
+    direct-import check while dragging the whole engine in behind it.
+    """
+    first_party = {path.stem for path in PACKAGE.glob("*.py")}
+    seen: set[str] = set()
+    queue = [root]
+
+    while queue:
+        module = queue.pop()
+        seen.add(module)
+        for name in _imported_names(module):
+            top = name.split(".")[0]
+            assert top != "piper", f"{module} imports {name}; reached from {root}"
+            if top in first_party and top not in seen:
+                queue.append(top)

@@ -45,7 +45,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import alignment as align_mod
-from . import speech, voices
+from . import encoding, speech, text, voices
 from .formats import (
     DEFAULT_OUTPUT_FORMAT,
     SUPPORTED_OUTPUT_FORMATS,
@@ -342,11 +342,11 @@ def create_app(settings: Settings) -> FastAPI:
         # Off the loop. FastAPI does not thread-pool `async def` handlers, so
         # draining Piper's synchronous generator inline would stall every other
         # request for the whole synthesis — the exact thing speech.py's docstring
-        # claims this service does not do, and which was true only of /stream.
+        # claims every call site does not do, and which was true only of /stream.
         pcm = await asyncio.to_thread(
             lambda: b"".join(speech.stream_pcm(model, body.text, body.prosody()))
         )
-        audio = await speech.encode(pcm, resolution.voice.sample_rate, fmt)
+        audio = await encoding.encode(pcm, resolution.voice.sample_rate, fmt)
         return Response(
             content=audio,
             media_type=fmt.content_type,
@@ -370,7 +370,7 @@ def create_app(settings: Settings) -> FastAPI:
         # request and read costs nothing.
         chunks = speech.stream_pcm(model, body.text, body.prosody())
         return StreamingResponse(
-            speech.encode_stream(chunks, resolution.voice.sample_rate, fmt),
+            encoding.encode_stream(chunks, resolution.voice.sample_rate, fmt),
             media_type=fmt.content_type,
             headers=headers(resolution, body),
         )
@@ -395,7 +395,7 @@ def create_app(settings: Settings) -> FastAPI:
             body.prosody(),
             resolution.voice.sample_rate,
         )
-        audio = await speech.encode(timed.pcm, timed.sample_rate, fmt)
+        audio = await encoding.encode(timed.pcm, timed.sample_rate, fmt)
         aligned = align_mod.align(
             body.text,
             timed.phonemes,
@@ -435,11 +435,11 @@ def create_app(settings: Settings) -> FastAPI:
             # Piper's chunks do not say which words they came from. Owning the
             # split is what makes each emitted object's timings meaningful.
             elapsed = 0.0
-            for sentence in speech.split_sentences(body.text):
+            for sentence in text.split_sentences(body.text):
                 timed = await asyncio.to_thread(
                     speech.synthesize_timed, model, sentence, prosody, sample_rate
                 )
-                audio = await speech.encode(timed.pcm, sample_rate, fmt)
+                audio = await encoding.encode(timed.pcm, sample_rate, fmt)
                 aligned = align_mod.align(
                     sentence,
                     timed.phonemes,
