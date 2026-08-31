@@ -101,8 +101,6 @@ version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
-    { name = "kokoro-onnx" },
-    { name = "piper-tts", extra = ["alignment"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -112,18 +110,24 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
+kokoro = [
+    { name = "kokoro-onnx" },
+]
+piper = [
+    { name = "piper-tts", extra = ["alignment"] },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28" },
-    { name = "kokoro-onnx", specifier = ">=0.6.1" },
-    { name = "piper-tts", extras = ["alignment"], specifier = ">=1.7.0" },
+    { name = "kokoro-onnx", marker = "extra == 'kokoro'", specifier = ">=0.6.1" },
+    { name = "piper-tts", extras = ["alignment"], marker = "extra == 'piper'", specifier = ">=1.7.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.4" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["piper", "kokoro", "dev"]
 
 [[package]]
 name = "espeakng-loader"

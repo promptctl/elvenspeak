@@ -12,10 +12,10 @@ entry point, which is two answers to one question with nothing keeping them the
 same. It is a lookup in this table now, made once, and both entry points work
 from the result.
 
-Adding an engine is a line here — plus, in `tests/`, a line in
-`test_conformance.ENGINES` so it must pass the contract suite, a line in
-`test_encoding._ENGINE_LIBRARIES` so the seam check can see its library, and a
-line in that module's positive control.
+Adding an engine is a line here, a same-named extra in `pyproject.toml`
+(`tests/test_packaging.py` fails without it), and three in `tests/`:
+`test_conformance.ENGINES` for the contract suite, `conftest.ENGINE_LIBRARIES`
+for the seam check, and its library in `test_encoding`'s positive control.
 """
 
 from __future__ import annotations

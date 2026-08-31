@@ -38,15 +38,37 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.10 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
+# Declared here rather than beside the other build args, because the engine's
+# name now decides two things that must never disagree: which libraries go into
+# the image, and which engine boots out of it.
+#
+# [LAW:one-source-of-truth] `ELVENSPEAK_ENGINE=x` and the extra `elvenspeak[x]`
+# are one word — the engines each own an extra named after their registry key,
+# and `tests/test_packaging.py` holds the two lists together. So this image
+# carries exactly the engine it runs: the piper image has no ONNX runtime for
+# Kokoro, the kokoro image has no piper-tts, and neither inherits the other's
+# version pins. A name that is not an engine fails here, at the install, rather
+# than at the boot two hundred megabytes later.
+ARG ELVENSPEAK_ENGINE=piper
+
 # Dependencies before source, so editing a handler does not re-resolve the
 # environment. `--frozen` makes the lockfile authoritative: a build that would
 # need to change it fails instead of silently resolving something else.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project --no-dev
+RUN uv sync --frozen --no-install-project --no-dev --extra "${ELVENSPEAK_ENGINE}"
 
 COPY elvenspeak/ ./elvenspeak/
 COPY main.py ./
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra "${ELVENSPEAK_ENGINE}"
+
+# [LAW:no-ambient-temporal-coupling] The two syncs above are the only owners of
+# this environment. `uv run` syncs before running unless told not to, so the bake
+# step below and the CMD at the end would each be a second owner — and neither
+# names the extra, so a sync that pruned to the core dependencies would remove
+# the engine this image was built for, after it was installed and before it was
+# used. Today's uv does not prune, which is a fact about a version rather than a
+# guarantee, and this image should not rest on it.
+ENV UV_NO_SYNC=1
 
 # Voices are baked in rather than fetched at boot. A ~60 MB download on every
 # restart is a slow start that looks like a hang, and it makes the container
@@ -54,17 +76,17 @@ RUN uv sync --frozen --no-dev
 # serve offline. PIPER_ALLOW_DOWNLOAD stays off for the same reason: a missing
 # model should fail the deploy, not quietly re-download.
 #
-# [LAW:one-source-of-truth] ELVENSPEAK_ENGINE is set once, above the bake and
-# inherited by the runtime, so the image boots the engine whose assets it baked.
-# Naming it only on `docker run` would leave the two halves free to differ — and
-# an engine asked to open assets nobody installed fails at boot, which is loud
-# but is a worse way to learn it than not being able to say it.
+# [LAW:one-source-of-truth] ELVENSPEAK_ENGINE, declared once above the install
+# and read here, is now the whole of what makes an image internally consistent:
+# the libraries installed, the assets baked, and the engine that boots all come
+# from that one word. Naming it only on `docker run` would leave those free to
+# differ — and an engine asked to open assets nobody installed fails at boot,
+# which is loud but is a worse way to learn it than not being able to say it.
 # Each engine's own variables, set whichever engine is chosen. They are inert
 # for the engine that is not running — `piper.configure` has never heard of
 # `KOKORO_MODEL` and vice versa — which is the point of an engine parsing its own
 # environment: adding the second engine's settings here costs the first engine
 # nothing and changes no shared type.
-ARG ELVENSPEAK_ENGINE=piper
 ARG PIPER_VOICES=en_US-lessac-medium
 ARG KOKORO_VOICES=af_heart,am_michael,bf_emma,bm_george
 ARG KOKORO_MODEL=kokoro-v1.0.int8.onnx
