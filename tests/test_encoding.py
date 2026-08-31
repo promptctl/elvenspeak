@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from elvenspeak.formats import OutputFormat
 from elvenspeak.encoding import SynthesisFailed, encode, encode_stream
+from elvenspeak.formats import OutputFormat
 
 NATIVE_RATE = 22050
 #: One second of a cheap non-silent waveform. Non-silent because some encoders
@@ -147,11 +147,22 @@ def _imported_modules(module_file: Path) -> set[str]:
     return found
 
 
-def _module_file(name: str) -> Path | None:
-    """The file backing a first-party dotted name, or None if it has none."""
-    if name == PACKAGE_NAME:
-        return PACKAGE / "__init__.py"
-    if not name.startswith(f"{PACKAGE_NAME}."):
+def _followed_module_file(name: str) -> Path | None:
+    """The file to walk into for a dotted name, or None if this graph skips it.
+
+    The package root is skipped, and skipped deliberately: `__init__.py`
+    re-exports the package, so treating it as a dependency of one of its own
+    members makes the graph cyclic — every module reaches every other, and the
+    seam check reports coupling that no code has. `from . import formats` names
+    the root as well as the submodule, which is how a harmless sibling import
+    ends up looking like a route to the engine.
+
+    The cost is a literal `import elvenspeak` inside a package module, which
+    would go unfollowed. Nothing writes that, and following it would make this
+    check meaningless for every module in the package, so it is a limit taken on
+    purpose rather than an oversight.
+    """
+    if name == PACKAGE_NAME or not name.startswith(f"{PACKAGE_NAME}."):
         return None
     path = PACKAGE / (name[len(PACKAGE_NAME) + 1 :].replace(".", "/") + ".py")
     return path if path.exists() else None
@@ -168,13 +179,13 @@ def _modules_reaching_piper(root: str) -> set[str]:
         if name in seen:
             continue
         seen.add(name)
-        source = _module_file(name)
+        source = _followed_module_file(name)
         if source is None:
             continue
         for imported in _imported_modules(source):
             if imported.split(".")[0] == "piper":
                 hits.add(name)
-            elif _module_file(imported) is not None:
+            elif _followed_module_file(imported) is not None:
                 queue.append(imported)
     return hits
 
