@@ -6,11 +6,12 @@ that ignored the declaration entirely and hardcoded Piper's answers would pass
 the rest of this suite green. That is not hypothetical, it is what shipped, and
 this file exists to be the thing it fails.
 
-The engine below is not a mock of Piper. It declares an arbitrary capability set
-and makes an unconvincing noise, which is exactly the shape of the second engine
-this seam is for: the property under test is that `api.py` gets every answer it
-gives about capabilities from the engine's declaration, so an engine written
-somewhere else and never anticipated here is described accurately.
+The engine driven here is `conftest.DeclaredEngine`, which is not a mock of
+Piper: it declares an arbitrary capability set and makes an unconvincing noise,
+which is exactly the shape of the second engine this seam is for. The property
+under test is that `api.py` gets every answer it gives about capabilities from
+the engine's declaration, so an engine written somewhere else and never
+anticipated here is described accurately — and, below, asked accurately too.
 """
 
 from __future__ import annotations
@@ -18,76 +19,56 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import DECLARED_VOICES, DeclaredEngine
 from fastapi.testclient import TestClient
 
 from elvenspeak import api
-from elvenspeak.engine import (
-    Capability,
-    Prosody,
-    Speech,
-    TimedSpeech,
-    Timing,
-    Voice,
-)
+from elvenspeak.engine import Capability, Prosody, Speech, Voice
 from elvenspeak.settings import Settings
 
-VOICE = Voice(id="fake-voice", name="Fake", description="a test engine's voice")
+VOICE = DECLARED_VOICES[0]
 
-#: Enough samples that an encode has something to do, and short enough that the
-#: whole suite pays no attention to it. The content is silence: no test here
-#: listens, they read headers and status codes.
-_SAMPLES = 2000
-_PCM = b"\x00\x00" * _SAMPLES
+_SETTINGS = Settings(
+    voices=(VOICE.id,),
+    fallback=VOICE.id,
+    models_dir=Path("/nonexistent"),
+    allow_download=False,
+    api_key=None,
+    # Deliberately the opposite of what the engines here declare. The setting is
+    # what an operator asked of Piper; it must reach no decision this file makes,
+    # and a server that still consulted it would answer every question here
+    # backwards.
+    timestamps=True,
+    host="127.0.0.1",
+    port=0,
+)
 
 
-class DeclaredEngine:
-    """An engine that can do exactly what it was told to declare.
+class RecordingEngine(DeclaredEngine):
+    """A [`DeclaredEngine`] that keeps what it was asked to speak with.
 
-    [LAW:one-type-per-behavior] One type taking a capability set, rather than a
-    `SpeedlessEngine` and a `TimelessEngine` beside it. What differs between the
-    engines these tests need is a value, so it is passed as one — which is the
-    same argument the interface itself now makes, tested by being relied upon.
+    For the tests that are about what crosses the seam rather than what comes
+    back over the wire. The header says which parameters were dropped; only the
+    engine's own side can say whether they really were.
     """
 
     def __init__(self, capabilities: frozenset[Capability]) -> None:
-        self._capabilities = capabilities
-
-    def voices(self) -> tuple[Voice, ...]:
-        return (VOICE,)
-
-    def capabilities(self) -> frozenset[Capability]:
-        return self._capabilities
+        super().__init__(capabilities)
+        self.asked: list[Prosody] = []
 
     def speak(self, voice: Voice, text: str, prosody: Prosody) -> Speech:
-        return Speech(sample_rate=22050, audio=iter([_PCM]))
+        self.asked.append(prosody)
+        return super().speak(voice, text, prosody)
 
-    def speak_timed(self, voice: Voice, text: str, prosody: Prosody) -> TimedSpeech:
-        return TimedSpeech(
-            pcm=_PCM,
-            sample_rate=22050,
-            timings=(Timing(samples=_SAMPLES, separates_words=False),),
-        )
+
+def served_by(engine) -> TestClient:
+    """The real API surface, over the engine given."""
+    return TestClient(api.create_app(_SETTINGS, engine))
 
 
 def served(*capabilities: Capability) -> TestClient:
     """The real API surface over an engine declaring exactly `capabilities`."""
-    settings = Settings(
-        voices=(VOICE.id,),
-        fallback=VOICE.id,
-        models_dir=Path("/nonexistent"),
-        allow_download=False,
-        api_key=None,
-        # Deliberately the opposite of what the engine below declares. The
-        # setting is what an operator asked of Piper; it must reach no decision
-        # this file makes, and a server that still consulted it would answer
-        # every question here backwards.
-        timestamps=True,
-        host="127.0.0.1",
-        port=0,
-    )
-    return TestClient(
-        api.create_app(settings, DeclaredEngine(frozenset(capabilities)))
-    )
+    return served_by(DeclaredEngine(frozenset(capabilities)))
 
 
 def ignored(client: TestClient, **body) -> str:
@@ -138,6 +119,40 @@ def test_the_same_parameter_goes_unreported_when_the_engine_can(parameter):
     """
     with served(api._NEEDS_CAPABILITY[parameter]) as client:
         assert parameter not in ignored(client, **_ASKS_FOR[parameter])
+
+
+#: The capability `voice_settings.speed` needs, read out of the table rather than
+#: named again, so the two tests below cannot outlive a change to it.
+_SPEED = api._NEEDS_CAPABILITY["voice_settings.speed"]
+
+
+def test_a_speed_the_engine_cannot_vary_never_reaches_it():
+    """The reported subtraction, applied rather than only announced.
+
+    Reporting alone leaves the header true by assumption: it says the speed was
+    dropped, and it is right only for as long as every engine ignores a value it
+    never claimed it could use. Withholding the value makes the header true by
+    construction — there is no engine, however written, that can honour a speed
+    it was not given.
+    """
+    engine = RecordingEngine(frozenset())
+    with served_by(engine) as client:
+        ignored(client, voice_settings={"speed": 1.5})
+
+    assert [asked.speed for asked in engine.asked] == [1.0]
+
+
+def test_a_speed_the_engine_can_vary_reaches_it_unchanged():
+    """The other direction, where a server this cautious would break rule 1.
+
+    Withholding from an engine that declared the capability would be the header
+    telling the truth about a limitation the server invented for itself.
+    """
+    engine = RecordingEngine(frozenset({_SPEED}))
+    with served_by(engine) as client:
+        ignored(client, voice_settings={"speed": 1.5})
+
+    assert [asked.speed for asked in engine.asked] == [1.5]
 
 
 def test_an_unasked_for_parameter_is_never_reported():
