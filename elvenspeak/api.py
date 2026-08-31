@@ -282,7 +282,15 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     # because the interface promises the answer is fixed for the engine's life,
     # and holding one answer is what makes the 501 gate and the ignored header
     # two readings of a single fact instead of two facts free to disagree.
-    capabilities = engine.capabilities()
+    #
+    # [LAW:single-enforcer] The subtraction is here, where the engine's answer and
+    # the deployment's meet, and nowhere else. An engine told what was withheld
+    # may spare itself the machinery, but it is never the thing enforcing the
+    # deployment's decision — an engine that ignored the setting used to serve the
+    # capability anyway, silently, which is the whole reason this line exists.
+    # Applied after the engine declared, so an engine whose capabilities are read
+    # off the assets it opened is subtracted from rather than second-guessed.
+    capabilities = engine.capabilities() - settings.withheld
 
     app = FastAPI(
         title="elvenspeak",
@@ -294,12 +302,18 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     # carry that explanation itself, in the form of a Piper environment variable
     # it had no business knowing; said here instead, it is true of whichever
     # engine is behind this surface and is said before anyone has to ask.
+    #
+    # What was withheld is logged beside it because those are the two different
+    # reasons a capability is missing, and only one of them is something the
+    # operator can change. An absent capability with nothing withheld is an
+    # engine that cannot; an absent one named here is a deployment that chose.
     _LOGGER.info(
-        "serving %s (fallback: %s; engine can: %s)",
+        "serving %s (fallback: %s; offering: %s; withheld: %s)",
         ", ".join(voice.id for voice in cat.installed) or "no voices",
         cat.fallback or "none",
         ", ".join(sorted(item.name.lower() for item in capabilities)) or "nothing "
         "beyond plain speech",
+        ", ".join(sorted(item.name.lower() for item in settings.withheld)) or "nothing",
     )
 
     def require_key(xi_api_key: str | None = Header(default=None)) -> None:
@@ -320,7 +334,14 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     guarded = [Depends(require_key)]
 
     def require(capability: Capability) -> None:
-        """Refuses an endpoint whose answer this engine cannot really produce.
+        """Refuses an endpoint whose answer this service cannot really produce.
+
+        "Service" rather than "engine": a capability is missing either because
+        the engine has no way to do it or because the deployment withheld it, and
+        a refusal that blamed the engine would send an operator who switched it
+        off themselves to read an engine's source. Which of the two it was is in
+        the startup log, where it can be said without naming a setting to a
+        caller who cannot change one.
 
         [LAW:no-silent-failure] On the timestamp endpoints the alternative is
         answering with plausible timings derived from nothing, which a caption
@@ -337,7 +358,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         """
         if capability not in capabilities:
             raise HTTPException(
-                status_code=501, detail=f"this engine cannot {capability.value}"
+                status_code=501, detail=f"this service cannot {capability.value}"
             )
 
     def parse_format(value: str) -> OutputFormat:

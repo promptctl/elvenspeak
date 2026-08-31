@@ -26,17 +26,21 @@ from elvenspeak.settings import Settings
 
 VOICE = DECLARED_VOICES[0]
 
-_SETTINGS = Settings(
-    # The engine the *deployment* would have built, which is not the engine each
-    # test below hands to `create_app`. It is here to be ignored: what a server
-    # says it can do must come from the engine it was given, and nothing in this
-    # file would answer differently if this field were removed.
-    engine=DeclaredPrepared(),
-    fallback=VOICE.id,
-    api_key=None,
-    host="127.0.0.1",
-    port=0,
-)
+def _settings(withheld: frozenset[Capability] = frozenset()) -> Settings:
+    """A deployment's settings, withholding whatever it was asked to."""
+    return Settings(
+        # The engine the *deployment* would have built, which is not the engine
+        # each test below hands to `create_app`. It is here to be ignored: what a
+        # server says it can do must come from the engine it was given, and
+        # nothing in this file would answer differently if this field were
+        # removed.
+        engine=DeclaredPrepared(),
+        withheld=withheld,
+        fallback=VOICE.id,
+        api_key=None,
+        host="127.0.0.1",
+        port=0,
+    )
 
 
 class RecordingEngine(DeclaredEngine):
@@ -56,9 +60,9 @@ class RecordingEngine(DeclaredEngine):
         return super().speak(voice, text, prosody)
 
 
-def served_by(engine) -> TestClient:
-    """The real API surface, over the engine given."""
-    return TestClient(api.create_app(_SETTINGS, engine))
+def served_by(engine, *withheld: Capability) -> TestClient:
+    """The real API surface, over the engine given, withholding what it says."""
+    return TestClient(api.create_app(_settings(frozenset(withheld)), engine))
 
 
 def served(*capabilities: Capability) -> TestClient:
@@ -191,3 +195,56 @@ def test_the_refusal_explains_itself_without_naming_an_engine_or_its_settings():
     assert Capability.TIMESTAMPS.value in detail
     for leak in ("PIPER", "ELVENSPEAK_", "piper", "onnx", "restart"):
         assert leak not in detail
+
+
+@pytest.mark.parametrize("path", ["/with-timestamps", "/stream/with-timestamps"])
+def test_a_withheld_capability_is_refused_however_loudly_the_engine_declares_it(path):
+    """The defect this ticket exists for, from the side that used to ship broken.
+
+    Switching timestamps off was `ELVENSPEAK_TIMESTAMPS`, parsed by Piper — so a
+    deployment that set it and ran a different engine was answered with the
+    timestamps it had asked the service not to give, silently, having used the
+    documented name. Enforced against the engine's declaration rather than
+    delegated to it, no engine can disagree with the deployment by omission.
+    """
+    with served_by(
+        DeclaredEngine(frozenset(Capability)), Capability.TIMESTAMPS
+    ) as client:
+        response = client.post(
+            f"/v1/text-to-speech/{VOICE.id}{path}", json={"text": "hello there"}
+        )
+        assert response.status_code == 501
+
+
+def test_a_withheld_parameter_is_reported_ignored_and_never_reaches_the_engine():
+    """Withholding reaches every answer derived from the negotiation, not just the 501.
+
+    The 501 gate and the ignored header are two readings of one capability set,
+    which is only worth anything if the subtraction happens where that set is
+    settled. Done at either endpoint instead, the other would keep announcing —
+    and passing along — a parameter the deployment had switched off.
+    """
+    engine = RecordingEngine(frozenset({_SPEED}))
+    with served_by(engine, _SPEED) as client:
+        assert "voice_settings.speed" in ignored(
+            client, voice_settings={"speed": 1.5}
+        )
+
+    assert [asked.speed for asked in engine.asked] == [1.0]
+
+
+def test_withholding_what_the_engine_never_had_is_not_an_error():
+    """Reachable by ordinary deployment, not a hypothetical.
+
+    A Kokoro export without a `duration` output declares no timestamps, and a
+    deployment that switched them off besides has said nothing contradictory —
+    it has said the same thing twice. Subtraction from a set is what makes that
+    free rather than a case anyone had to remember to allow.
+    """
+    with served_by(DeclaredEngine(frozenset()), Capability.TIMESTAMPS) as client:
+        response = client.post(
+            f"/v1/text-to-speech/{VOICE.id}/stream",
+            json={"text": "hello there"},
+            params={"output_format": "pcm_22050"},
+        )
+        assert response.status_code == 200, response.text

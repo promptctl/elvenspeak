@@ -30,15 +30,20 @@ from elvenspeak.engine import (
     Voice,
 )
 
-#: Every variable a startup reads — the server's own and the engines' — since
-#: `Settings.from_env` now splices an engine's parse into its own. One copy,
-#: because a second one is free to drift: the next setting added would be
+#: Every variable a startup answers for — the server's own and the engines' —
+#: since `Settings.from_env` now splices an engine's parse into its own. One
+#: copy, because a second one is free to drift: the next setting added would be
 #: remembered in one test's clearing list and forgotten in the other, and the
 #: test that forgot goes flaky later with nothing pointing at the cause.
+#:
+#: Retired names belong here too. `ELVENSPEAK_TIMESTAMPS` is no longer read, and
+#: is refused rather than ignored — so a shell that still exports it fails a
+#: startup just as surely as one that mistyped a port.
 _ENVIRONMENT = (
     "ELVENSPEAK_ENGINE",
     "ELVENSPEAK_FALLBACK_VOICE",
     "ELVENSPEAK_API_KEY",
+    "ELVENSPEAK_WITHHOLD",
     "ELVENSPEAK_TIMESTAMPS",
     "PIPER_VOICES",
     "PIPER_MODELS_DIR",
@@ -200,7 +205,8 @@ def kokoro_prepared(
             "KOKORO_MODELS_DIR": str(models_dir),
             "KOKORO_MODEL": model,
             "KOKORO_ALLOW_DOWNLOAD": "1" if allow_download else "0",
-        }
+        },
+        frozenset(),
     )
 
 
@@ -226,8 +232,12 @@ def piper_prepared(
             "PIPER_VOICES": ",".join(voices),
             "PIPER_MODELS_DIR": str(models_dir),
             "PIPER_ALLOW_DOWNLOAD": "1" if allow_download else "0",
-            "ELVENSPEAK_TIMESTAMPS": "1" if timings else "0",
-        }
+        },
+        # Not an environment variable any more. Switching timestamps off is the
+        # server's decision, made against the shared vocabulary and handed to
+        # whichever engine is running — so a test asking Piper not to build
+        # alignments now says it the way a deployment does.
+        frozenset() if timings else frozenset({Capability.TIMESTAMPS}),
     )
 
 #: Two, so that "every voice the engine offers" is a claim about more than one.

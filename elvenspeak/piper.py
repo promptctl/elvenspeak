@@ -269,7 +269,9 @@ class _Prepared:
         )
 
 
-def configure(env: "Mapping[str, str]") -> _Prepared:
+def configure(
+    env: "Mapping[str, str]", withheld: frozenset[engine.Capability]
+) -> _Prepared:
     """Reads Piper's own environment, or says everything wrong with it at once.
 
     [LAW:parse-dont-validate] The checkpoint for this engine. Nothing below holds
@@ -279,6 +281,13 @@ def configure(env: "Mapping[str, str]") -> _Prepared:
     Every problem is collected rather than raised at the first, because this list
     is spliced into the server's own — an operator bringing the service up should
     not discover a bad voice name and then, one restart later, a bad port.
+
+    Whether to build alignments comes from `withheld` and not from `env`. It was
+    `ELVENSPEAK_TIMESTAMPS`, parsed here — this engine's private name for a thing
+    every engine has, which meant a deployment that switched timestamps off and
+    then ran a different engine got them anyway. The server owns that decision
+    now; this engine is only told, and only so it can decline to pay for what
+    nobody will ask it for.
     """
     problems: list[str] = []
 
@@ -301,16 +310,11 @@ def configure(env: "Mapping[str, str]") -> _Prepared:
         problems.append("PIPER_MODELS_DIR is empty; name a directory or unset it")
     models_dir = Path(models_text or str(Path(__file__).parent.parent / "models"))
 
-    flags = {}
-    for name, default in (
-        ("PIPER_ALLOW_DOWNLOAD", True),
-        ("ELVENSPEAK_TIMESTAMPS", True),
-    ):
-        try:
-            flags[name] = flag(env, name, default=default)
-        except ValueError as error:
-            problems.append(str(error))
-            flags[name] = default
+    try:
+        allow_download = flag(env, "PIPER_ALLOW_DOWNLOAD", default=True)
+    except ValueError as error:
+        problems.append(str(error))
+        allow_download = True
 
     if problems:
         raise ConfigError(problems)
@@ -318,8 +322,11 @@ def configure(env: "Mapping[str, str]") -> _Prepared:
     return _Prepared(
         keys=keys,
         models_dir=models_dir,
-        allow_download=flags["PIPER_ALLOW_DOWNLOAD"],
-        timings=flags["ELVENSPEAK_TIMESTAMPS"],
+        allow_download=allow_download,
+        # The saving is the point: an unpatched graph is the memory a withheld
+        # TIMESTAMPS buys back, and it can only be unpatched by a session that
+        # was never opened patched. Decided here, before anything is opened.
+        timings=engine.Capability.TIMESTAMPS not in withheld,
     )
 
 

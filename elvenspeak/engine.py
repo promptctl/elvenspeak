@@ -67,7 +67,7 @@ class Capability(Enum):
     engine states what it does once and every answer the server gives — the 501,
     the ignored header, the startup log — is derived from that one statement.
 
-    Each value is a phrase completing "this engine cannot …", because telling a
+    Each value is a phrase completing "this service cannot …", because telling a
     caller is the only thing the server does with an absent capability. Written
     here so it is written once: a message assembled at an endpoint would be a
     second answer to what a capability means, from the layer least able to give
@@ -264,6 +264,12 @@ class Engine(Protocol):
         it — which is what keeps the report honest, since a server that reported
         an option as ignored and passed it anyway would be telling the truth only
         for as long as every engine ignored what it never claimed.
+
+        This is what the engine can do, not what the deployment offers. A
+        deployment may withhold a capability the engine declared, in which case
+        the server subtracts it once and the engine is simply never asked — see
+        [`elvenspeak.provisioning.Configure`]. So an engine states its own truth
+        here and never has to model anybody's configuration to do it.
         """
         ...
 

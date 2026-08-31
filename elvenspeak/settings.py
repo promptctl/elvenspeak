@@ -8,10 +8,17 @@ once, rather than surfacing as a 500 on somebody's first call.
 # What is here and what is the engine's
 
 Only what is true whichever engine is running: which engine that is, which voice
-answers for an id this server does not know, whether a key is required, and
-where to listen. Where model files live and whether they may be fetched are
-Piper's business and are parsed by Piper — held here, they would be fields every
-other engine is handed and ignores.
+answers for an id this server does not know, which capabilities this deployment
+withholds, whether a key is required, and where to listen. Where model files live
+and whether they may be fetched are Piper's business and are parsed by Piper —
+held here, they would be fields every other engine is handed and ignores.
+
+The reverse mistake is the one this module made longest. Whether to offer
+timestamps was spelled `ELVENSPEAK_TIMESTAMPS` and parsed by Piper, so a
+deployment that switched it off and then ran a different engine got timestamps
+anyway, silently: one engine's private name for a thing every engine has. It is
+[`Settings.withheld`] now, parsed here once against the shared vocabulary, and
+the engine an operator happens to be running cannot change the answer.
 
 The engine's problems still arrive in this module's list, at this module's one
 moment, because [`Settings.from_env`] splices them in. Separating the settings
@@ -31,8 +38,20 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from .engine import Capability
 from .provisioning import ConfigError, Prepared, Registry
 from .voices import Fallback, Substitution
+
+#: Settings that named a capability in one engine's dialect, and what replaced
+#: them. Refused rather than ignored: an operator who set one meant to change an
+#: answer, and a name silently no longer read gives them the opposite of what
+#: they asked for with nothing to notice. Data rather than a branch, so retiring
+#: the next name is a line here ([LAW:dataflow-not-control-flow]).
+_RETIRED = {
+    "ELVENSPEAK_TIMESTAMPS": (
+        "set ELVENSPEAK_WITHHOLD=timestamps to switch them off, or unset this"
+    )
+}
 
 
 @dataclass(frozen=True)
@@ -44,6 +63,12 @@ class Settings:
     #: value, which is what stops the build and the boot naming different
     #: engines.
     engine: Prepared
+    #: Capabilities this deployment does not offer, whatever the engine can do.
+    #: Subtracted from the engine's own declaration in
+    #: [`elvenspeak.api.create_app`], which is the one place the two meet — and
+    #: handed to the engine at [`Configure`] as well, so an engine that can spare
+    #: itself the machinery does. Empty is the ordinary case: nothing withheld.
+    withheld: frozenset[Capability]
     #: Which voice answers for an id this server does not know. A name, or one of
     #: [`Substitution`]'s two answers for callers who named neither a voice nor
     #: nothing. Switching substitution off makes unknown ids 404 — correct for a
@@ -87,8 +112,23 @@ class Settings:
             if not 1 <= port <= 65535:
                 problems.append(f"PORT={port} is outside 1-65535")
 
+        problems += [
+            f"{name} is no longer read; {advice}"
+            for name, advice in _RETIRED.items()
+            if name in env
+        ]
+
         try:
-            prepared = _prepare(engines, env)
+            withheld = _withheld(env)
+        except ValueError as error:
+            problems.append(str(error))
+            # Carried on with, rather than raised on, so that the engine's own
+            # complaints still reach the list below. An operator with a typo here
+            # and a bad voice name should read both on the first run.
+            withheld = frozenset()
+
+        try:
+            prepared = _prepare(engines, env, withheld)
         except ConfigError as error:
             # Spliced rather than replacing: a bad port and a bad voice name are
             # both true at once, and an operator should see both on the first
@@ -100,6 +140,7 @@ class Settings:
 
         return Settings(
             engine=prepared,
+            withheld=withheld,
             fallback=fallback,
             api_key=env.get("ELVENSPEAK_API_KEY") or None,
             host=env.get("HOST", "0.0.0.0"),
@@ -137,7 +178,42 @@ def reported_or_exit() -> Iterator[None]:
         raise SystemExit(2) from None
 
 
-def _prepare(engines: Registry, env: Mapping[str, str]) -> Prepared:
+def _withheld(env: Mapping[str, str]) -> frozenset[Capability]:
+    """The capabilities this deployment switched off, or a complaint about the names.
+
+    [LAW:one-source-of-truth] Spelled against [`Capability`], which is already the
+    closed vocabulary the server and every engine share, so "what can be switched
+    off" has one definition and this setting cannot name something no endpoint
+    gates. The member name in any case is the spelling, which is also what the
+    startup log prints — an operator reads back what they wrote.
+
+    [LAW:no-silent-failure] An unrecognised name is refused rather than skipped
+    over. A typo that withheld nothing would answer with the timestamps an
+    operator had asked the service not to give, which is exactly the silent
+    disagreement this setting exists to end, arriving one spelling later.
+
+    Naming a capability the running engine never had is not an error and never
+    becomes one: what this returns is subtracted from a set, and subtracting
+    something absent is how sets already behave.
+    """
+    named = [
+        text.strip()
+        for text in env.get("ELVENSPEAK_WITHHOLD", "").split(",")
+        if text.strip()
+    ]
+    unknown = [text for text in named if text.upper() not in Capability.__members__]
+    if unknown:
+        raise ValueError(
+            f"ELVENSPEAK_WITHHOLD names {', '.join(repr(text) for text in unknown)}, "
+            f"which is not a capability; choose from "
+            f"{', '.join(item.name.lower() for item in Capability)}"
+        )
+    return frozenset(Capability[text.upper()] for text in named)
+
+
+def _prepare(
+    engines: Registry, env: Mapping[str, str], withheld: frozenset[Capability]
+) -> Prepared:
     """The named engine, configured from `env`, or a [`ConfigError`] saying why not.
 
     [LAW:parse-dont-validate] Its own unit, returning a type that could not exist
@@ -174,4 +250,4 @@ def _prepare(engines: Registry, env: Mapping[str, str]) -> Prepared:
         raise ConfigError(
             [f"ELVENSPEAK_ENGINE={chosen!r} is not one of: {', '.join(engines)}"]
         )
-    return configure(env)
+    return configure(env, withheld)

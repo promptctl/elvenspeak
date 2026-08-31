@@ -39,7 +39,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Protocol
 
-from .engine import Engine, Voice
+from .engine import Capability, Engine, Voice
 
 
 class ConfigError(ValueError):
@@ -145,7 +145,23 @@ def flag(env: Mapping[str, str], name: str, default: bool) -> bool:
 #: Turns an environment into a [`Prepared`], or raises [`ConfigError`] naming
 #: every problem it found — all of them, not the first, so that an engine's
 #: complaints join the server's in the single list an operator reads at startup.
-Configure = Callable[[Mapping[str, str]], Prepared]
+#:
+#: The second argument is what this deployment withheld: capabilities the server
+#: will not offer, whichever engine is behind it. An engine is *told* rather than
+#: merely overruled because withholding is only worth anything if the machinery
+#: goes unbuilt — Piper patches its ONNX graph at load time to expose durations,
+#: so the memory a withheld `TIMESTAMPS` saves is saved only by an engine that
+#: knew before it opened its sessions. It arrives here, at the checkpoint, for the
+#: same reason everything else does: [`Prepared`]'s methods take no arguments.
+#:
+#: [LAW:single-enforcer] Telling an engine is not asking it to enforce. The
+#: subtraction happens once, in [`elvenspeak.api.create_app`], against whatever
+#: the engine declared — so an engine that ignores this argument passes up an
+#: economy and never serves a capability the deployment switched off. That
+#: distinction is what makes the setting engine-agnostic: an engine whose
+#: capabilities are derived from the assets it opened, rather than chosen, cannot
+#: know its own baseline until long after this call, and does not have to.
+Configure = Callable[[Mapping[str, str], frozenset[Capability]], Prepared]
 
 #: The engines a deployment may choose between, by the name that selects one.
 #:
