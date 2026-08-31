@@ -21,9 +21,13 @@ because the previous version of this service broke it:
    all 28 published formats; `voice_id` selects a real voice; `speed`
    changes the speech rate.
 2. A parameter that *cannot* be honoured is named in the `x-elvenspeak-ignored`
-   response header. Nothing here has an equivalent for `stability` or `seed`,
+   response header. Nothing crosses the engine seam for `stability` or `seed`,
    so those are dropped — but a caller is told which of the things it asked for
-   did not happen, instead of having to infer it from the audio.
+   did not happen, instead of having to infer it from the audio. Which
+   parameters those are is *derived*, from the request schema below and the
+   engine's declared [`elvenspeak.engine.Capability`] set, never listed here: a
+   list beside them is a second answer to "what can this server do", and it
+   would be right only for the engine it was written against.
 3. A request that cannot be served is refused. An unknown `output_format` is a
    422 quoting the offending value, not a silent substitution.
 
@@ -50,7 +54,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import alignment as align_mod
 from . import encoding, text, voices
-from .engine import Engine, Prosody, Voice
+from .engine import Capability, Engine, Prosody, Voice
 from .formats import (
     DEFAULT_OUTPUT_FORMAT,
     SUPPORTED_OUTPUT_FORMATS,
@@ -61,30 +65,25 @@ from .settings import Settings
 
 _LOGGER = logging.getLogger("elvenspeak.api")
 
-#: Body fields ElevenLabs accepts that describe a generative model's sampling,
-#: cross-request conditioning, or a pronunciation database — none of which this
-#: server can honour. Named here, once, so the header in rule 2 above is derived
-#: from one list rather than assembled at each endpoint.
-_UNSUPPORTED_BODY_FIELDS = (
-    "model_id",
-    "language_code",
-    "seed",
-    "previous_text",
-    "next_text",
-    "previous_request_ids",
-    "next_request_ids",
-    "pronunciation_dictionary_locators",
-    "apply_text_normalization",
-    "apply_language_text_normalization",
-    "use_pvc_as_ivc",
-)
+#: What an engine has to declare before a request parameter can be honoured.
+#: The one place ElevenLabs' vocabulary is mapped onto the engine seam's, which
+#: is work only this module can do: an engine has never heard of a body field,
+#: and [`elvenspeak.engine`] must not learn one to stay reusable.
+#:
+#: A parameter absent from this table is one nothing carries across the seam —
+#: `seed`, `stability`, a field ElevenLabs adds next year — so no engine can
+#: honour it however capable, and every request naming it is told so. That is
+#: the safe direction to be wrong in: forgetting an entry understates the server
+#: and is visible in the header, where an over-claim would be a silent lie.
+_NEEDS_CAPABILITY: dict[str, Capability] = {
+    "voice_settings.speed": Capability.SPEED,
+}
 
-_UNSUPPORTED_VOICE_SETTINGS = (
-    "stability",
-    "similarity_boost",
-    "style",
-    "use_speaker_boost",
-)
+#: Fields of [`SpeechRequest`] that are not parameters a caller asks to have
+#: honoured, and so are never candidates for the ignored header. `text` is what
+#: the request *is*; `voice_settings` is a container, and its leaves are what
+#: get reported.
+_NOT_AN_OPTION = frozenset({"text", "voice_settings"})
 
 
 class VoiceSettings(BaseModel):
@@ -155,7 +154,25 @@ class SpeechRequest(BaseModel):
         if not stripped:
             raise ValueError("text must contain something other than whitespace")
         return stripped
-    voice_settings: VoiceSettings | None = None
+
+    voice_settings: VoiceSettings = Field(default_factory=VoiceSettings)
+
+    @field_validator("voice_settings", mode="before")
+    @classmethod
+    def _absent_settings_are_empty(cls, value: object) -> object:
+        """Maps an omitted or explicitly-null `voice_settings` onto an empty one.
+
+        [LAW:parse-dont-validate] So nothing downstream holds a maybe. Both
+        readers of this field — [`prosody`] and [`_requested`] — carried the same
+        `if it was sent` branch, which is one question asked twice after the
+        crossing that could have answered it once. An empty `VoiceSettings` says
+        exactly what an absent one meant: nothing was asked for.
+
+        Normalised rather than refused, because ElevenLabs accepts a null here
+        and a 422 would break a client that is correct against the real API.
+        """
+        return VoiceSettings() if value is None else value
+
     model_id: str | None = None
     language_code: str | None = None
     seed: int | None = Field(default=None, ge=0, le=4294967295)
@@ -169,36 +186,58 @@ class SpeechRequest(BaseModel):
     use_pvc_as_ivc: bool | None = None
 
     def prosody(self) -> Prosody:
-        speed = self.voice_settings.speed if self.voice_settings else None
-        return Prosody(speed=speed if speed is not None else 1.0)
+        speed = self.voice_settings.speed
+        return Prosody(speed=1.0 if speed is None else speed)
 
-    def ignored(self) -> tuple[str, ...]:
+    def requested(self) -> tuple[str, ...]:
+        """Every option this request asks for, honourable or not.
+
+        Read off the two models rather than from a list beside them. A list is
+        what let a field added to the schema go unreported — the silent discard
+        rule 2 exists to forbid — and it can only be kept true by a human
+        remembering, where the models are re-read on every call.
+
+        Unmodelled fields come last and sorted, having no declaration order to
+        borrow. They are here for the same reason `extra="allow"` is: a field
+        ElevenLabs adds next year is a parameter this server cannot honour, and
+        saying so is the whole promise.
+        """
+        chosen = self.voice_settings
+        return tuple(
+            [
+                name
+                for name in type(self).model_fields
+                if name not in _NOT_AN_OPTION and getattr(self, name) is not None
+            ]
+            + [
+                f"voice_settings.{name}"
+                for name in type(chosen).model_fields
+                if getattr(chosen, name) is not None
+            ]
+            + [f"voice_settings.{name}" for name in sorted(chosen.model_extra or {})]
+            + sorted(self.model_extra or {})
+        )
+
+    def ignored(self, capabilities: frozenset[Capability]) -> tuple[str, ...]:
         """Which of the caller's parameters this server could not honour.
 
-        Only fields actually sent are reported — a caller that asked for nothing
-        unsupported gets no header at all, so the header's presence means
-        something happened rather than being constant noise.
+        [LAW:one-source-of-truth] Derived on both sides. This used to subtract
+        nothing: it walked two hand-written tuples of field names that were a
+        second answer to what this server can do, correct only while Piper was
+        the only engine behind it. An engine with a fixed speaking rate would
+        have had `speed` honoured in the header and ignored in the audio, and an
+        engine that reproduces a `seed` would have had it reported as dropped —
+        both of them rule 2 broken by a list nobody had reason to revisit.
 
-        Three sources, because there are three ways a parameter goes unhonoured:
-        a known field this server cannot honour, a known voice setting it cannot,
-        and a field this server has never heard of. The last is what keeps rule 2
-        true as ElevenLabs' schema grows — an unmodelled field was previously
-        dropped by the parser and reported nowhere, which is the exact silent
-        discard the rule exists to forbid.
+        Only parameters actually asked for are reported, so the header's presence
+        means something happened rather than being constant noise.
         """
-        sent = [name for name in _UNSUPPORTED_BODY_FIELDS if getattr(self, name) is not None]
-        if self.voice_settings is not None:
-            sent += [
-                f"voice_settings.{name}"
-                for name in _UNSUPPORTED_VOICE_SETTINGS
-                if getattr(self.voice_settings, name) is not None
-            ]
-            sent += [
-                f"voice_settings.{name}"
-                for name in sorted(self.voice_settings.model_extra or {})
-            ]
-        sent += sorted(self.model_extra or {})
-        return tuple(sent)
+        honoured = {
+            name
+            for name, capability in _NEEDS_CAPABILITY.items()
+            if capability in capabilities
+        }
+        return tuple(name for name in self.requested() if name not in honoured)
 
 
 def create_app(settings: Settings, engine: Engine) -> FastAPI:
@@ -219,15 +258,28 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     # whichever call first needed an alias.
     cat = voices.Catalog.for_engine(engine, settings.fallback)
 
+    # The negotiation, and the only one. Asked once here rather than per request
+    # because the interface promises the answer is fixed for the engine's life,
+    # and holding one answer is what makes the 501 gate and the ignored header
+    # two readings of a single fact instead of two facts free to disagree.
+    capabilities = engine.capabilities()
+
     app = FastAPI(
         title="elvenspeak",
         summary="ElevenLabs-compatible text-to-speech, served from local voices",
         version="1.0.0",
     )
+    # The capabilities are logged because nothing else tells an operator why a
+    # request came back refused or a parameter came back ignored. The 501 used to
+    # carry that explanation itself, in the form of a Piper environment variable
+    # it had no business knowing; said here instead, it is true of whichever
+    # engine is behind this surface and is said before anyone has to ask.
     _LOGGER.info(
-        "serving %s (fallback: %s)",
+        "serving %s (fallback: %s; engine can: %s)",
         ", ".join(voice.id for voice in cat.installed) or "no voices",
         settings.fallback or "none",
+        ", ".join(sorted(item.name.lower() for item in capabilities)) or "nothing "
+        "beyond plain speech",
     )
 
     def require_key(xi_api_key: str | None = Header(default=None)) -> None:
@@ -247,25 +299,25 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
 
     guarded = [Depends(require_key)]
 
-    def require_timestamps() -> None:
-        """Refuses the timestamp endpoints when the engine cannot measure.
+    def require(capability: Capability) -> None:
+        """Refuses an endpoint whose answer this engine cannot really produce.
 
-        [LAW:no-silent-failure] The alternative is answering with plausible
-        timings derived from nothing, which a caption renderer would trust.
+        [LAW:no-silent-failure] On the timestamp endpoints the alternative is
+        answering with plausible timings derived from nothing, which a caption
+        renderer would trust.
 
-        [LAW:one-source-of-truth] Asked of the engine, not of `settings`. The
-        setting is what an operator wants; whether these sessions can actually
-        report durations is a fact only the engine holds, and reading the setting
-        instead let a server built from one and an engine built from the other
-        disagree — a 200 carrying invented timings, which is the failure above.
+        One gate for every capability rather than one named function per
+        capability, and the message comes from the [`Capability`] itself. It used
+        to end `set ELVENSPEAK_TIMESTAMPS=1 and restart` — the server telling an
+        operator how to change an answer, in the vocabulary of one particular
+        engine that this module is arranged never to know about. It is also the
+        kind of wrong that reads as helpful: an engine lacking timings because it
+        has no phonemizer would send that instruction to someone who could follow
+        it all afternoon.
         """
-        if not engine.can_time():
+        if capability not in capabilities:
             raise HTTPException(
-                status_code=501,
-                detail=(
-                    "timestamps are disabled; set ELVENSPEAK_TIMESTAMPS=1 and "
-                    "restart so voices load with alignment support"
-                ),
+                status_code=501, detail=f"this engine cannot {capability.value}"
             )
 
     def parse_format(value: str) -> OutputFormat:
@@ -305,7 +357,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         }
         if resolution.substituted:
             out["x-elvenspeak-voice-requested"] = (resolution.requested,)
-        ignored = body.ignored()
+        ignored = body.ignored(capabilities)
         if ignored:
             out["x-elvenspeak-ignored"] = ignored
         # An endpoint with a header of its own passes it here rather than
@@ -390,7 +442,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     ) -> JSONResponse:
         fmt = parse_format(output_format)
         resolution = resolve(voice_id)
-        require_timestamps()
+        require(Capability.TIMESTAMPS)
 
         spoken = await asyncio.to_thread(
             engine.speak_timed, resolution.voice, body.text, body.prosody()
@@ -416,7 +468,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     ) -> StreamingResponse:
         fmt = parse_format(output_format)
         resolution = resolve(voice_id)
-        require_timestamps()
+        require(Capability.TIMESTAMPS)
         prosody = body.prosody()
 
         async def stream() -> AsyncIterator[bytes]:
