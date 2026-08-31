@@ -22,12 +22,12 @@ someone could forget to look.
 
 # Why every format is one ffmpeg invocation
 
-[LAW:composability] Thirty formats across six codec families could be six encode
-functions and a dispatch, which makes the codec a *name* — `encode_mp3`,
-`encode_opus` — and every new format a new function. Instead the codec is a
-*value*: Piper always emits signed 16-bit PCM at its voice's native rate, and
-ffmpeg turns that into any of the 28 in a single pass that resamples and
-encodes together. A twenty-ninth format is a row in [`_FORMATS`], not code.
+[LAW:composability] Six codec families could be six encode functions and a
+dispatch, which makes the codec a *name* — `encode_mp3`, `encode_opus` — and
+every new format a new function. Instead the codec is a *value*: Piper always
+emits signed 16-bit PCM at its voice's native rate, and ffmpeg turns that into
+any of them in a single pass that resamples and encodes together. A new format
+is a row in [`_FORMATS`], not code.
 
 That also *removes* a dependency rather than adding one. This service used to
 shell out to `lame`, which knows exactly one codec — the single-format
@@ -182,8 +182,7 @@ def _build_formats() -> dict[str, OutputFormat]:
     """Every format ElevenLabs publishes, transcribed from the API reference.
 
     [LAW:one-source-of-truth] Written out rather than generated from a rate x
-    bitrate cross product, because the published set is not a cross product —
-    MP3 offers 32 kbps only at 22.05 kHz, and 128 only at 44.1 — and a
+    bitrate cross product, because the published set is not a cross product and a
     generator would invent formats the real API rejects. The list is the map;
     `tests/test_formats.py` pins it against the spelling rules so a typo is a
     test failure rather than a 422 in production.

@@ -63,7 +63,7 @@ So under the default single-voice setup the table is inert and all nine ids land
 on the fallback. To make them live, install their targets:
 
 ```
-PIPER_VOICES=en_US-lessac-medium,en_US-hfc_female-medium,en_US-hfc_male-medium,en_US-amy-medium,en_US-joe-medium
+PIPER_VOICES=en_US-lessac-medium,en_US-hfc_female-medium,en_US-kristin-medium,en_US-amy-medium,en_US-kathleen-low,en_US-hfc_male-medium,en_US-joe-medium,en_US-bryce-medium,en_US-john-medium,en_US-danny-low
 ```
 
 `GET /v1/voices` reports each voice's live aliases, so what actually resolves is
@@ -84,10 +84,12 @@ its resolution:
   each word's start and end come from the model.
 - **Characters within a word are interpolated** across that word's measured
   span.
-- When the phonemizer's word count disagrees with the text's — an expanded
-  number, an abbreviation — no correspondence exists, and the whole utterance is
-  spread evenly instead. That is much worse, so it is reported:
-  `x-elvenspeak-alignment: word-exact | interpolated`.
+- **When they cannot be, the result says so.** Timings are `interpolated` when
+  the phonemizer's word count disagrees with the text's — an expanded number, an
+  abbreviation — or when audio arrives that no phoneme accounts for.
+  `/with-timestamps` reports it as `x-elvenspeak-alignment`;
+  `/stream/with-timestamps` reports it per object as `alignment_fidelity`, since
+  fidelity is decided per sentence.
 
 ## Running it
 
@@ -144,8 +146,8 @@ client against whatever that URL names and has no opinion about what answers.
 uv run --extra dev pytest
 ```
 
-The format and alignment tests run anywhere. The API tests need a voice in
-`models/` and skip without one.
+Only the API tests need a voice in `models/`, and they skip without one.
+Everything else runs anywhere.
 
 Two of them are worth knowing about, because they encode findings rather than
 expectations. `test_pcm_length_matches_its_declared_rate` runs against the

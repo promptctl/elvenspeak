@@ -192,8 +192,8 @@ class Catalog:
         """Decides which installed voice answers for `requested`.
 
         Three steps, most specific first: the id names an installed voice, the
-        id is aliased onto one, or the fallback speaks. Only the third is a
-        substitution, and only the third can be switched off.
+        id is aliased onto one, or the fallback speaks. Only the third can be
+        switched off.
         """
         exact = self._voices.get(requested)
         if exact is not None:
