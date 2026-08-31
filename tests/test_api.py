@@ -203,6 +203,12 @@ def test_streamed_timestamps_report_fidelity_per_object(client):
     )
     objects = [json.loads(line) for line in response.text.splitlines() if line.strip()]
     assert objects
+    # The absence is the contract, not an oversight. Fidelity is decided per
+    # sentence and can differ between objects of one response, so a single header
+    # could report only one of several answers — and would have to be sent before
+    # any of them were known. A client is meant to read the per-object field, so
+    # re-adding a blanket header here would quietly restore the wrong answer.
+    assert "x-elvenspeak-alignment" not in response.headers
     for obj in objects:
         assert obj["alignment_fidelity"] in {"word-exact", "interpolated"}
 
@@ -290,6 +296,30 @@ def test_timestamps_disabled_refuses_rather_than_inventing(client):
         assert response.status_code == 501
 
 
+@pytest.mark.parametrize("text", ["   ", "\t\n ", " "])
+def test_text_with_nothing_to_say_is_refused(client, text):
+    """422, not a 200 carrying no audio.
+
+    `min_length=1` counts characters, so whitespace passed it. On the streaming
+    timestamp endpoint that produced the worst available answer: `split_sentences`
+    finds no sentences, the generator yields nothing, and the caller receives a
+    successful, empty response for a request that was never going to work.
+    """
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}/stream/with-timestamps", json={"text": text}
+    )
+    assert response.status_code == 422
+
+
+def test_text_is_spoken_as_stripped(client):
+    """The alignment describes the text that was actually synthesized."""
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}/with-timestamps", json={"text": "  hello  "}
+    )
+    assert response.status_code == 200
+    assert "".join(response.json()["alignment"]["characters"]) == "hello"
+
+
 def test_a_non_latin1_voice_id_still_answers(client):
     """The substitution contract, for an id that cannot be a header value.
 
@@ -314,3 +344,19 @@ def test_a_non_latin1_body_field_name_still_answers(client):
     )
     assert response.status_code == 200
     assert "65e5" in response.headers["x-elvenspeak-ignored"]
+
+
+def test_unknown_voice_settings_are_reported_not_dropped(client):
+    """Rule 2, one level down from the body.
+
+    Enumerating the four settings ElevenLabs publishes today made the promise
+    true only for those four; a setting added later was discarded by the parser
+    with nothing anywhere reporting it — the same silent drop the top-level
+    `extra="allow"` was added to close.
+    """
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}/stream",
+        json={"text": "hello", "voice_settings": {"some_future_setting": 1}},
+    )
+    assert response.status_code == 200
+    assert "voice_settings.some_future_setting" in response.headers["x-elvenspeak-ignored"]

@@ -42,7 +42,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import alignment as align_mod
 from . import speech, voices
@@ -88,9 +88,14 @@ class VoiceSettings(BaseModel):
     The rest are declared rather than swept into an `extra` bucket so that the
     schema states plainly what may be sent, and so a caller sending `stability`
     gets it reported back as ignored instead of silently discarded by the parser.
+
+    Unmodelled settings are kept for the same reason [`SpeechRequest`] keeps
+    unmodelled body fields: enumerating the four ElevenLabs publishes today makes
+    rule 2 true only for those four, and a setting added next year would go back
+    to being dropped with nothing reporting it.
     """
 
-    model_config = ConfigDict(protected_namespaces=())
+    model_config = ConfigDict(protected_namespaces=(), extra="allow")
 
     speed: float | None = Field(default=None, gt=0.25, le=4.0)
     stability: float | None = None
@@ -123,6 +128,27 @@ class SpeechRequest(BaseModel):
     #: string is unspecified, and finding out mid-stream is not an option on the
     #: streaming endpoints — the 200 is already committed by then.
     text: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
+
+    @field_validator("text")
+    @classmethod
+    def _must_say_something(cls, value: str) -> str:
+        """Rejects text with nothing in it to speak, and stamps it stripped.
+
+        [LAW:parse-dont-validate] `min_length` measures characters, and `"   "`
+        has three of them, so it reached synthesis: the streaming endpoints
+        answered 200 with an empty body — `split_sentences` correctly finds no
+        sentences — and the others handed whitespace to Piper, whose behaviour on
+        it is unspecified. The refusal belongs here, at the one crossing, so that
+        no endpoint downstream can hold a `SpeechRequest` with nothing to say.
+
+        Stripped rather than merely checked, so the text carried forward is the
+        text that gets spoken — the alignment endpoints return `characters` built
+        from this string, and leading blanks would be characters no sound answers.
+        """
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("text must contain something other than whitespace")
+        return stripped
     voice_settings: VoiceSettings | None = None
     model_id: str | None = None
     language_code: str | None = None
@@ -160,6 +186,10 @@ class SpeechRequest(BaseModel):
                 f"voice_settings.{name}"
                 for name in _UNSUPPORTED_VOICE_SETTINGS
                 if getattr(self.voice_settings, name) is not None
+            ]
+            sent += [
+                f"voice_settings.{name}"
+                for name in sorted(self.voice_settings.model_extra or {})
             ]
         sent += sorted(self.model_extra or {})
         return tuple(sent)
