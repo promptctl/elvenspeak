@@ -58,12 +58,15 @@ ENV PIPER_MODELS_DIR=/app/models \
 # pair would otherwise leave the build green and the image broken at every
 # startup. `allow_download` is passed explicitly because the ENV above turns it
 # off for runtime, where a missing model must fail the deploy instead.
+#
+# `install` rather than `piper.load`: this step wants the files, and opening an
+# ONNX session per voice only to throw it away would cost the build a minute and
+# a gigabyte for nothing.
 RUN uv run python -c "\
 from elvenspeak.settings import Settings; \
-from elvenspeak.voices import install; \
+from elvenspeak import piper; \
 s = Settings.from_env(); \
-install(keys=s.voices, models_dir=s.models_dir, fallback=s.fallback, \
-        include_alignments=s.timestamps, allow_download=True)"
+piper.install(keys=s.voices, models_dir=s.models_dir, allow_download=True)"
 
 # [LAW:effects-at-boundaries] Nothing after this point needs root. ffmpeg and the
 # ONNX runtime both process caller-influenced input, so a compromise anywhere in

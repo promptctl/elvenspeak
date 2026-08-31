@@ -194,3 +194,84 @@ def test_substituted_env_values_are_quoted():
     for line in DOCKERFILE.read_text().splitlines():
         for name, value in re.findall(r"(\w+)=(\$\{\w+\})", line):
             assert False, f"unquoted substitution {name}={value}; wrap it in quotes"
+
+
+#: `RUN uv run python -c "<source>"`, with the shell's backslash continuations
+#: still in it. The image bakes voices in by calling into this package, so the
+#: Dockerfile holds Python that no import of this repo ever reaches.
+_RUN_PYTHON = re.compile(r'RUN\s+uv\s+run\s+python\s+-c\s+"(.*?)"', re.DOTALL)
+
+
+def baked_python() -> str:
+    """The Python source the image build executes, ready to parse."""
+    joined = DOCKERFILE.read_text().replace("\\\n", "")
+    match = _RUN_PYTHON.search(joined)
+    assert match, "no `RUN uv run python -c` step found — the regex is wrong"
+    return "\n".join(part.strip() for part in match.group(1).split(";"))
+
+
+def test_the_baked_voice_step_calls_functions_that_exist():
+    """The check that would have caught a deleted function, run automatically.
+
+    `piper-engine-axb.2` moved `install` out of `elvenspeak.voices`, and this
+    step went on importing it from there. Nothing failed: the test suite never
+    executes the Dockerfile, so the only thing that would have reported it was an
+    image build, which by this repo's rules happens in CI after the merge.
+
+    [LAW:verifiable-goals] Resolved against the real modules rather than grepped
+    for, because the failure has two shapes — a name that is gone, and a name
+    that survived with different parameters — and only one of them is visible as
+    text.
+    """
+    import ast
+    import importlib
+    import inspect
+
+    tree = ast.parse(baked_python())
+    imported: dict[str, object] = {}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = importlib.import_module(node.module)
+            for alias in node.names:
+                # `from x import y` names an attribute of `x` when y is a class
+                # or function, and a submodule when it is not — and a submodule
+                # is invisible to `hasattr` until something imports it. Both are
+                # valid imports, so both are resolved here; only a name that is
+                # neither is the failure this test is for.
+                found = getattr(module, alias.name, None)
+                if found is None:
+                    try:
+                        found = importlib.import_module(f"{node.module}.{alias.name}")
+                    except ImportError:
+                        pytest.fail(
+                            f"Dockerfile imports {alias.name!r} from {node.module}, "
+                            f"which has no such attribute or submodule"
+                        )
+                imported[alias.asname or alias.name] = found
+
+    assert imported, "parsed no imports — the extraction is wrong, not the file"
+
+    calls = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            target = getattr(imported.get(func.value.id), func.attr, None)
+        elif isinstance(func, ast.Name) and func.id in imported:
+            target = imported[func.id]
+        else:
+            continue
+        if target is None or not callable(target):
+            continue
+        calls += 1
+        # Binds the call the Dockerfile actually writes, so a kwarg that no
+        # longer exists, or a required one it stopped passing, is a failure here
+        # rather than at `docker build`.
+        inspect.signature(target).bind(
+            *(object() for _ in node.args),
+            **{kw.arg: object() for kw in node.keywords if kw.arg},
+        )
+
+    assert calls, "resolved no calls — the extraction is wrong, not the file"

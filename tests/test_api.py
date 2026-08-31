@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from elvenspeak import create_app
+from elvenspeak import create_app, piper
 from elvenspeak.settings import Settings
 
 VOICE = "en_US-lessac-medium"
@@ -24,7 +24,8 @@ MODELS = Path(os.environ.get("PIPER_MODELS_DIR", Path(__file__).parent.parent / 
 
 pytestmark = pytest.mark.skipif(
     not (MODELS / f"{VOICE}.onnx").exists(),
-    reason=f"no {VOICE} model in {MODELS}; run scripts/fetch-voice.sh",
+    reason=f"no {VOICE} model in {MODELS}; "
+    "fetch it with PIPER_ALLOW_DOWNLOAD=1 uv run main.py",
 )
 
 #: An ElevenLabs voice id from aliases.toml. Used to prove substitution, which
@@ -32,19 +33,45 @@ pytestmark = pytest.mark.skipif(
 FOREIGN_ID = "21m00Tcm4TlvDq8ikWAM"
 
 
+def settings_for(**overrides) -> Settings:
+    return Settings(
+        **{
+            "voices": (VOICE,),
+            "fallback": VOICE,
+            "models_dir": MODELS,
+            "allow_download": False,
+            "api_key": None,
+            "timestamps": True,
+            "host": "127.0.0.1",
+            "port": 0,
+            **overrides,
+        }
+    )
+
+
+def served(settings: Settings) -> TestClient:
+    """The app as `main.build()` assembles it: a real engine behind the surface.
+
+    The engine is chosen here rather than by `create_app`, which is the property
+    under test as much as a convenience — the API surface is handed one and never
+    names it.
+    """
+    return TestClient(
+        create_app(
+            settings,
+            piper.load(
+                keys=settings.voices,
+                models_dir=settings.models_dir,
+                allow_download=settings.allow_download,
+                timings=settings.timestamps,
+            ),
+        )
+    )
+
+
 @pytest.fixture(scope="module")
 def client():
-    settings = Settings(
-        voices=(VOICE,),
-        fallback=VOICE,
-        models_dir=MODELS,
-        allow_download=False,
-        api_key=None,
-        timestamps=True,
-        host="127.0.0.1",
-        port=0,
-    )
-    with TestClient(create_app(settings)) as started:
+    with served(settings_for()) as started:
         yield started
 
 
@@ -254,17 +281,7 @@ def test_streamed_timestamps_form_one_continuous_timeline(client):
 
 
 def test_api_key_is_enforced_when_configured():
-    settings = Settings(
-        voices=(VOICE,),
-        fallback=VOICE,
-        models_dir=MODELS,
-        allow_download=False,
-        api_key="s3cret",
-        timestamps=False,
-        host="127.0.0.1",
-        port=0,
-    )
-    with TestClient(create_app(settings)) as guarded:
+    with served(settings_for(api_key="s3cret", timestamps=False)) as guarded:
         payload = {"text": "hello"}
         assert guarded.post(f"/v1/text-to-speech/{VOICE}/stream", json=payload).status_code == 401
         allowed = guarded.post(
@@ -279,17 +296,7 @@ def test_api_key_is_enforced_when_configured():
 
 def test_timestamps_disabled_refuses_rather_than_inventing(client):
     """[LAW:no-silent-failure] 501 beats plausible numbers derived from nothing."""
-    settings = Settings(
-        voices=(VOICE,),
-        fallback=VOICE,
-        models_dir=MODELS,
-        allow_download=False,
-        api_key=None,
-        timestamps=False,
-        host="127.0.0.1",
-        port=0,
-    )
-    with TestClient(create_app(settings)) as plain:
+    with served(settings_for(timestamps=False)) as plain:
         response = plain.post(
             f"/v1/text-to-speech/{VOICE}/with-timestamps", json={"text": "hello"}
         )
@@ -418,17 +425,16 @@ def test_one_voice_serves_concurrent_requests():
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    from elvenspeak import speech, voices
+    from elvenspeak.engine import Prosody
 
-    catalog = voices.install(
-        keys=(VOICE,), models_dir=MODELS, fallback=VOICE,
-        include_alignments=False, allow_download=False,
+    engine = piper.load(
+        keys=(VOICE,), models_dir=MODELS, allow_download=False, timings=False
     )
-    model = catalog.model(catalog.get(VOICE))
+    voice = engine.voices()[0]
     text = "The quick brown fox jumps over the lazy dog."
 
     def synth():
-        return b"".join(speech.stream_pcm(model, text, speech.Prosody(speed=1.0)))
+        return b"".join(engine.speak(voice, text, Prosody(speed=1.0)).audio)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = [f.result() for f in [pool.submit(synth) for _ in range(4)]]

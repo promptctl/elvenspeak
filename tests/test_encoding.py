@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from elvenspeak.encoding import SynthesisFailed, encode, encode_stream
+from elvenspeak.encoding import EncodingFailed, encode, encode_stream
 from elvenspeak.formats import OutputFormat
 
 NATIVE_RATE = 22050
@@ -88,7 +88,7 @@ async def test_a_producer_failure_is_raised_not_encoded_as_a_short_answer():
         yield ONE_SECOND
         raise RuntimeError("piper fell over mid-utterance")
 
-    with pytest.raises(SynthesisFailed):
+    with pytest.raises(EncodingFailed):
         await encode_stream_to_bytes(failing_chunks())
 
 
@@ -104,7 +104,7 @@ async def test_a_failure_on_the_very_first_chunk_still_raises():
         raise RuntimeError("piper never started")
         yield  # pragma: no cover - generator marker
 
-    with pytest.raises(SynthesisFailed):
+    with pytest.raises(EncodingFailed):
         await encode_stream_to_bytes(failing_immediately())
 
 
@@ -115,11 +115,11 @@ PACKAGE_NAME = PACKAGE.name
 def _imported_modules(module_file: Path) -> set[str]:
     """Canonical dotted names of every module `module_file` imports.
 
-    Canonical because one module has four spellings — `import elvenspeak.speech`,
-    `from elvenspeak import speech`, `from .speech import Prosody`,
-    `from . import speech` — and a matcher that recognises only the spellings the
+    Canonical because one module has four spellings — `import elvenspeak.piper`,
+    `from elvenspeak import piper`, `from .piper import PiperEngine`,
+    `from . import piper` — and a matcher that recognises only the spellings the
     package happens to use today has a hole exactly the shape of the ones it
-    does not. Every form is resolved to `elvenspeak.speech` here, once, so that
+    does not. Every form is resolved to `elvenspeak.piper` here, once, so that
     neither the engine check nor the graph walk below has to know how an import
     was written.
 
@@ -168,8 +168,14 @@ def _followed_module_file(name: str) -> Path | None:
     return path if path.exists() else None
 
 
-def _modules_reaching_piper(root: str) -> set[str]:
-    """First-party modules reachable from `root` that name Piper."""
+#: Third-party libraries that make a module a concrete engine. One entry per
+#: engine, and the only line a new engine has to add here — reaching an engine's
+#: *module* is caught by the same walk, since that module reaches its library.
+_ENGINE_LIBRARIES = frozenset({"piper"})
+
+
+def _modules_reaching_an_engine(root: str) -> set[str]:
+    """First-party modules reachable from `root` that name an engine library."""
     hits: set[str] = set()
     seen: set[str] = set()
     queue = [f"{PACKAGE_NAME}.{root}"]
@@ -183,48 +189,51 @@ def _modules_reaching_piper(root: str) -> set[str]:
         if source is None:
             continue
         for imported in _imported_modules(source):
-            if imported.split(".")[0] == "piper":
+            if imported.split(".")[0] in _ENGINE_LIBRARIES:
                 hits.add(name)
             elif _followed_module_file(imported) is not None:
                 queue.append(imported)
     return hits
 
 
-@pytest.mark.parametrize("root", ["encoding", "text"])
-def test_the_encoder_cannot_reach_the_engine(root: str):
+@pytest.mark.parametrize(
+    "root", ["api", "voices", "alignment", "encoding", "formats", "text", "engine"]
+)
+def test_the_server_cannot_reach_a_concrete_engine(root: str):
     """The seam, asserted rather than described.
 
-    Encoding is engine-agnostic for every engine that will ever exist — they all
-    emit PCM and ffmpeg does not care who produced it. That claim is what makes
-    the encoder the reusable half, and it is worth nothing as a sentence in a
-    docstring: one convenience import of a Piper type for an annotation would
-    quietly undo it, every other test would stay green, and the second engine
-    would discover the coupling instead of the reviewer.
+    Every module named here is part of the ElevenLabs surface — the reusable
+    half — and holds only [`elvenspeak.engine`]'s vocabulary. That claim is worth
+    nothing as a sentence in a docstring: one convenience import of a Piper type
+    for an annotation would quietly undo it, every other test would stay green,
+    and the second engine would discover the coupling instead of the reviewer.
 
     Read statically off the import graph rather than observed at runtime. The
     obvious runtime version — import the module and look for `piper` in
     `sys.modules` — passes whether or not the seam holds, because nothing here
-    imports Piper at module scope; it was written, it went green, and it was
-    only caught by re-coupling the module on purpose to watch it stay green.
+    imports an engine library at module scope; it was written, it went green, and
+    it was only caught by re-coupling the module on purpose to watch it stay
+    green.
 
-    Transitive, because `from . import speech` inside `encoding` would satisfy a
+    Transitive, because `from . import piper` inside `api` would satisfy a
     direct-import check while dragging the whole engine in behind it.
     """
-    assert not _modules_reaching_piper(root)
+    assert not _modules_reaching_an_engine(root)
 
 
-@pytest.mark.parametrize("root", ["speech", "api"])
+@pytest.mark.parametrize("root", ["piper"])
 def test_the_seam_check_can_actually_fail(root: str):
     """Positive control: the detector still detects.
 
     A test that cannot fail proves nothing, and this one has now been unable to
     fail twice — first as a runtime `sys.modules` probe that saw nothing because
     Piper is imported lazily, then as a matcher that followed relative imports
-    only and would have walked straight past `import elvenspeak.speech`. Both
-    were green, and both were caught by hand rather than by the suite.
+    only and would have walked straight past `import elvenspeak.piper`. Both were
+    green, and both were caught by hand rather than by the suite.
 
-    `speech` and `api` genuinely do reach Piper, so they pin the detector from
+    `piper` genuinely does reach an engine library, so it pins the detector from
     the other side: any future edit to the resolver that quietly stops finding
-    things turns this red instead of turning the seam test vacuous.
+    things turns this red instead of turning the seam test vacuous. Every engine
+    added to `_ENGINE_LIBRARIES` belongs in this parametrize list too.
     """
-    assert _modules_reaching_piper(root)
+    assert _modules_reaching_an_engine(root)

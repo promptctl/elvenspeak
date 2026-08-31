@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import sys
 
-from elvenspeak import create_app
+from elvenspeak import create_app, piper
 from elvenspeak.settings import ConfigError, Settings
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -36,13 +36,37 @@ def _settings() -> Settings:
         raise SystemExit(2) from None
 
 
+def _app(settings: Settings):
+    """The composition root: this is where the engine is chosen.
+
+    [LAW:one-way-deps] The only place in the service that names a concrete
+    engine. Everything above it — the endpoints, the formats, the alignment, the
+    voice table — depends on [`elvenspeak.engine`] and cannot tell which one is
+    behind it, so a second engine is a change to this line rather than to the
+    API surface.
+
+    Built before the server starts rather than in a lifespan hook, so a voice
+    that cannot be fetched or opened is a refusal to boot with a non-zero exit,
+    not a process that binds a port and then answers 500 to everything.
+    """
+    return create_app(
+        settings,
+        piper.load(
+            keys=settings.voices,
+            models_dir=settings.models_dir,
+            allow_download=settings.allow_download,
+            timings=settings.timestamps,
+        ),
+    )
+
+
 def build():
     """The ASGI application, for `uvicorn main:build --factory` and for tests."""
-    return create_app(_settings())
+    return _app(_settings())
 
 
 if __name__ == "__main__":
     import uvicorn
 
     settings = _settings()
-    uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
+    uvicorn.run(_app(settings), host=settings.host, port=settings.port)
