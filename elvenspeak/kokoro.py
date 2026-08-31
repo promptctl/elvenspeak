@@ -235,14 +235,18 @@ class _Prepared:
         not a disagreement about the interface. Piper pays one ~60 MB session
         per voice, so opening at bake time costs a minute and a gigabyte for
         nothing; Kokoro has exactly one session for all 54 voices, so opening it
-        is seconds and proves the export is intact. Presence is not readability,
-        and the build is the last moment that failure is cheap.
+        is seconds and proves the export is intact. Presence is not readability:
+        an export that downloaded completely and is still not a loadable graph
+        passes every file check there is, and the build is the last moment that
+        failure is cheap.
+
+        The session is discarded. What is wanted from it is that building it
+        succeeded.
         """
-        return tuple(
-            _install(
-                self.keys, self.models_dir, self.model, allow_download=True
-            ).values()
+        _, installed = _open(
+            self.keys, self.models_dir, self.model, allow_download=True
         )
+        return tuple(installed.values())
 
     def open(self) -> KokoroEngine:
         """Opens the export and returns the engine that speaks every named voice."""
@@ -354,20 +358,22 @@ def _install(
     import numpy
 
     models_dir.mkdir(parents=True, exist_ok=True)
-    model_path = _fetch(models_dir / model, allow_download)
-    voices_path = _fetch(models_dir / _VOICES_FILE, allow_download)
+    model_path = _fetch(models_dir / model, f"{_RELEASE}/{model}", allow_download)
+    voices_path = _fetch(
+        models_dir / _VOICES_FILE, f"{_RELEASE}/{_VOICES_FILE}", allow_download
+    )
 
     # The pack is a mapping of id to style vector, so this both proves the file
     # parses and answers whether each configured voice is really in it. A voice
     # named but absent is caught here, at the build, rather than as a KeyError
     # inside the first request that asked for it.
-    pack = numpy.load(voices_path)
-    missing = [key for key in keys if key not in pack]
+    with numpy.load(voices_path) as pack:
+        missing = [key for key in keys if key not in pack]
+        offered = sorted(pack.files)
     if missing:
         raise ValueError(
             f"{voices_path} has no voice named {', '.join(repr(k) for k in missing)}; "
-            f"it offers {len(pack.files)}, including "
-            f"{', '.join(sorted(pack.files)[:4])}"
+            f"it offers {len(offered)}, including {', '.join(offered[:4])}"
         )
 
     _LOGGER.info("kokoro assets ready in %s (%s)", models_dir, model_path.name)
@@ -388,8 +394,14 @@ def _open(
     )
 
 
-def _fetch(path: Path, allow_download: bool) -> Path:
+def _fetch(path: Path, url: str, allow_download: bool) -> Path:
     """Makes one published asset present, and says where it is.
+
+    The URL is the caller's to supply rather than derived from `path.name`,
+    because an asset's name does not determine where it comes from: the two
+    published releases both contain a `kokoro-v1.0.int8.onnx`, and they differ
+    in whether its graph reports durations. Callers own which release they mean;
+    this owns downloading it exactly once and refusing anything short.
 
     Idempotent: a file already there is left alone, so a rebuild over a warm
     cache re-fetches nothing.
@@ -408,7 +420,6 @@ def _fetch(path: Path, allow_download: bool) -> Path:
             f"and downloading is off"
         )
 
-    url = f"{_RELEASE}/{path.name}"
     _LOGGER.info("downloading %s into %s", path.name, path.parent)
     partial = path.with_name(f"{path.name}.partial")
     try:

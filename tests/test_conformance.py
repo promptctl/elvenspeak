@@ -67,6 +67,13 @@ LONG = (
 )
 
 
+#: [LAW:composability] The real engines fetch what they need by opening with
+#: downloading on, rather than the `subject` fixture depending on an
+#: asset-installing one. A fixture would have gated every parametrization on
+#: every engine's assets — so `declares-everything` and `declares-nothing`, which
+#: need no model, no network and no espeak-ng, would have waited on ~200 MB of
+#: downloads to make a noise in memory. Provisioning is something an engine that
+#: has assets does for itself, which is also what `Prepared.open` means.
 def piper_engine() -> Engine:
     """The real thing, opened exactly as `main.build` opens it.
 
@@ -74,7 +81,9 @@ def piper_engine() -> Engine:
     conformance suite's most interesting property with it — and what an operator
     can turn off is not what the interface is being tested about.
     """
-    return piper_prepared(MODELS_DIR, voices=(INSTALLED_VOICE,), timings=True).open()
+    return piper_prepared(
+        MODELS_DIR, voices=(INSTALLED_VOICE,), timings=True, allow_download=True
+    ).open()
 
 
 def kokoro_engine() -> Engine:
@@ -85,7 +94,7 @@ def kokoro_engine() -> Engine:
     being withheld — and this suite is about engines living up to what they
     declared, whichever set that is.
     """
-    return kokoro_prepared(MODELS_DIR).open()
+    return kokoro_prepared(MODELS_DIR, allow_download=True).open()
 
 
 #: Every engine this project can put behind the API surface, and the suite below
@@ -107,7 +116,7 @@ ENGINES = [
 
 
 @pytest.fixture(scope="module", params=ENGINES)
-def subject(request, installed_assets) -> Engine:
+def subject(request) -> Engine:
     """One engine under test, built once for the whole module.
 
     Building is the expensive part for a real one — Piper opens a 60 MB ONNX

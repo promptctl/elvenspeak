@@ -123,6 +123,21 @@ path it is handed and aborts the process, so the Dockerfile points
 `PHONEMIZER_ESPEAK_LIBRARY` at the apt-installed one. A piper-only deployment
 needs none of this.
 
+Installing espeak-ng is not enough on its own, because the bundled library is
+the one tried first and it aborts before phonemizer's system-wide fallback can
+run. Outside Docker, running the kokoro engine means naming the working library
+too:
+
+```
+PHONEMIZER_ESPEAK_LIBRARY=/opt/homebrew/lib/libespeak-ng.dylib   # macOS
+PHONEMIZER_ESPEAK_LIBRARY=/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1
+```
+
+The engine does not go looking for one itself. A broken wheel on one platform is
+a fact about a development machine, and an engine that quietly hunted for a
+library that works would be a silent fallback inside the component whose job is
+to fail loudly.
+
 ```
 uv run main.py
 ```
@@ -161,9 +176,9 @@ its own terms. Kokoro does not read it at all.
 
 Piper is the default because it is the first entry in the registry, and because
 of what it costs: it runs at an RTF of about 0.03, against Kokoro's 0.77 on the
-same class of machine — roughly twenty times the compute for the same second of
-speech. Kokoro sounds considerably better. That is a trade a deployment should
-make on purpose rather than inherit, so it is opt-in.
+same class of machine — roughly twenty-five times the compute for the same
+second of speech. Kokoro sounds considerably better. That is a trade a
+deployment should make on purpose rather than inherit, so it is opt-in.
 
 Voices come from Piper's catalog of 175 — `en_US-amy-medium`,
 `en_GB-alba-medium`, `de_DE-thorsten-medium` and so on. Naming several installs

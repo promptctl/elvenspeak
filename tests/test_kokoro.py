@@ -18,19 +18,24 @@ capability from the session, and both halves of that are checked below.
 from __future__ import annotations
 
 import pytest
-from conftest import KOKORO_TIMELESS_MODEL, KOKORO_VOICES, kokoro_prepared
+from conftest import (
+    KOKORO_MODEL,
+    KOKORO_TIMELESS_MODEL,
+    KOKORO_VOICES,
+    kokoro_prepared,
+)
 
 from elvenspeak import kokoro
 from elvenspeak.engine import Capability, Prosody
 from elvenspeak.provisioning import ConfigError
 
-pytestmark = pytest.mark.usefixtures("installed_assets")
+pytestmark = pytest.mark.usefixtures("kokoro_installed")
 
 TEXT = "Compatibility is measurable, and this sentence is long enough to measure."
 
 
 @pytest.fixture(scope="module")
-def engine(installed_assets):
+def engine(kokoro_installed):
     """The engine as a default deployment opens it, built once for the module."""
     return kokoro_prepared().open()
 
@@ -44,7 +49,9 @@ def test_the_export_that_reports_durations_declares_it(engine):
     assert Capability.SPEED in engine.capabilities()
 
 
-def test_the_export_without_durations_withholds_the_capability(installed_assets):
+def test_the_export_without_durations_withholds_the_capability(
+    kokoro_timeless_installed,
+):
     """[LAW:one-source-of-truth] The capability follows the session, not the name.
 
     The same engine, the same voices, the same code — one older export — and it
@@ -63,7 +70,7 @@ def test_the_export_without_durations_withholds_the_capability(installed_assets)
 
 
 def test_an_engine_that_cannot_measure_says_so_rather_than_inventing_a_timeline(
-    installed_assets,
+    kokoro_timeless_installed,
 ):
     """The claim `speak_timed`'s `measured` makes, checked where it is hardest.
 
@@ -90,7 +97,7 @@ def test_an_engine_that_cannot_measure_says_so_rather_than_inventing_a_timeline(
 
 
 def test_a_timestamps_request_is_refused_rather_than_answered_with_invented_numbers(
-    installed_assets,
+    kokoro_timeless_installed,
 ):
     """The property this engine was added to prove, end to end through the API.
 
@@ -391,7 +398,37 @@ def test_samples_outside_the_nominal_range_clip_rather_than_wrap(sample, expecte
     assert int.from_bytes(pcm, "little", signed=True) == expected
 
 
-def test_acquire_describes_what_it_installed(installed_assets):
+def test_an_export_that_downloaded_whole_and_is_not_a_model_fails_the_bake(
+    tmp_path, kokoro_installed
+):
+    """Presence is not readability, and the build is where that has to be caught.
+
+    A `.onnx` can arrive complete, non-empty, and still not be a loadable graph:
+    a release asset replaced in place, a corrupted cache, a bind mount that
+    received a partial copy from somewhere the size check never saw. Every file
+    check there is passes on that, so the only thing that finds it is opening it.
+
+    This is the same lesson as the voices bake: an earlier version of that
+    stopped at "both files exist", which let a truncated sidecar produce a green
+    image that failed at container startup instead. `acquire` opens the session
+    and discards it precisely so this fails here, where it is cheap, rather than
+    on every container start forever.
+    """
+    (tmp_path / "voices-v1.0.bin").write_bytes(
+        (kokoro_installed / "voices-v1.0.bin").read_bytes()
+    )
+    (tmp_path / KOKORO_MODEL).write_bytes(b"complete, non-empty, and not a model")
+
+    with pytest.raises(Exception) as raised:
+        kokoro_prepared(tmp_path, allow_download=False).acquire()
+
+    # Not the empty-file guard and not a missing-file error: those would mean the
+    # bake had rejected it for a reason that says nothing about the graph.
+    assert "empty" not in str(raised.value)
+    assert not isinstance(raised.value, FileNotFoundError)
+
+
+def test_acquire_describes_what_it_installed(kokoro_installed):
     """[LAW:parse-dont-validate] The bake's guarantee is the voices it returns.
 
     An engine that cannot describe what it installed has not installed it, and
@@ -402,7 +439,7 @@ def test_acquire_describes_what_it_installed(installed_assets):
     assert [voice.id for voice in voices] == list(KOKORO_VOICES)
 
 
-def test_a_voice_that_is_not_in_the_pack_is_caught_at_install(installed_assets):
+def test_a_voice_that_is_not_in_the_pack_is_caught_at_install(kokoro_installed):
     """Caught against the file, not against a list this module keeps.
 
     A hard-coded roster of the 54 published voices would be a second map of the

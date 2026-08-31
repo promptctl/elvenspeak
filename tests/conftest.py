@@ -107,49 +107,60 @@ _KOKORO_TIMELESS_URL = (
 )
 
 
+#: [LAW:no-silent-failure] These replaced a `skipif` that removed the tests when
+#: the models were absent. A skip is indistinguishable from a pass in a summary,
+#: so the suite's most expensive claims — that a real engine satisfies the
+#: contract — silently stopped being made on exactly the machines least likely to
+#: have run them before. Provisioning is what the marker should always have done:
+#: the assets are obtainable, so a missing one is a thing to fetch rather than a
+#: reason to assert nothing.
+#:
+#: [LAW:composability] One fixture per engine, rather than one that installs
+#: everything. A module that exercises Piper should not need Kokoro's ~142 MB and
+#: a working espeak-ng, and with a single fixture its asset bill grew every time
+#: an engine was registered. Each is fetched through that engine's own `acquire`,
+#: which is the door the image build uses, so a change that broke provisioning
+#: breaks this too. Idempotent and session-scoped: a warm checkout fetches
+#: nothing.
+
+
 @pytest.fixture(scope="session")
-def installed_assets() -> Path:
-    """Every model the suite really synthesizes with, present before it starts.
-
-    [LAW:no-silent-failure] This replaced a `skipif` that removed the tests when
-    the models were absent. A skip is indistinguishable from a pass in a summary,
-    so the suite's most expensive claims — that a real engine satisfies the
-    contract — silently stopped being made on exactly the machines least likely
-    to have run them before. Provisioning is what the marker should always have
-    done: the assets are obtainable, so a missing one is a thing to fetch rather
-    than a reason to assert nothing.
-
-    Fetched through each engine's own `acquire`, which is the door the image
-    build uses, so a change that broke provisioning breaks this too. Idempotent
-    and session-scoped: a warm checkout re-downloads nothing.
-    """
+def piper_installed() -> Path:
+    """The Piper voice the tests that synthesize for real speak in."""
     piper_prepared(allow_download=True).acquire()
-    kokoro_prepared(allow_download=True).acquire()
-    _fetch_timeless_export()
     return MODELS_DIR
 
 
-def _fetch_timeless_export() -> None:
-    """The one asset no `acquire` installs: the export that reports no durations.
+@pytest.fixture(scope="session")
+def kokoro_installed() -> Path:
+    """Kokoro's default export and its style pack."""
+    kokoro_prepared(allow_download=True).acquire()
+    return MODELS_DIR
 
-    A deployment chooses one export, so no engine's provisioning has cause to
-    fetch a second. The tests need both, because the property under test is that
-    the capability follows the export rather than the engine's name — and that
-    is unfalsifiable with only the export that reports durations.
+
+@pytest.fixture(scope="session")
+def kokoro_timeless_installed(kokoro_installed: Path) -> Path:
+    """The one asset no `acquire` installs: the export reporting no durations.
+
+    Its own fixture, so only the two tests that need this second ~92 MB export
+    pay for it. A deployment chooses one export, so no engine's provisioning has
+    cause to fetch a second — but the property under test is that the capability
+    follows the export rather than the engine's name, and that is unfalsifiable
+    with only the export that reports durations.
+
+    Downloaded through `kokoro._fetch` rather than by a copy of it here. This was
+    a hand-rolled duplicate that had already lost the empty-body check and the
+    partial-file cleanup its original grew, which is the drift a second copy is
+    always free to do — and it would have poisoned the shared `models/` cache
+    with a file every later run treated as installed. Reaching for a private is
+    the smaller evil: there is one implementation of download-verify-rename, and
+    the release this asset comes from is the caller's business, which is why
+    `_fetch` takes the URL.
     """
-    import urllib.request
+    from elvenspeak import kokoro
 
-    path = MODELS_DIR / KOKORO_TIMELESS_MODEL
-    if path.exists():
-        return
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    partial = path.with_suffix(".partial")
-    with urllib.request.urlopen(_KOKORO_TIMELESS_URL) as response, partial.open(
-        "wb"
-    ) as handle:
-        while block := response.read(1 << 20):
-            handle.write(block)
-    partial.rename(path)
+    kokoro._fetch(MODELS_DIR / KOKORO_TIMELESS_MODEL, _KOKORO_TIMELESS_URL, True)
+    return MODELS_DIR
 
 
 def kokoro_prepared(

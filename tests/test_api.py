@@ -1,9 +1,11 @@
 """The HTTP surface, against a real voice.
 
-Skipped rather than mocked when no model is installed. A mocked Piper would
-prove the handlers call something, which is not the property under test — what
-matters is that the bytes coming back are in the format the caller asked for,
-and only a real encode can show that.
+Installed rather than mocked, and fetched rather than skipped. A mocked Piper
+would prove the handlers call something, which is not the property under test —
+what matters is that the bytes coming back are in the format the caller asked
+for, and only a real encode can show that. A machine without the voice gets it
+downloaded, because a skip reads as a pass in a summary and would withdraw this
+whole module on exactly the machines least likely to have run it.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from elvenspeak.settings import Settings
 
 #: Every test here synthesizes with the real Piper voice, so the whole module
 #: depends on the assets being installed rather than skipping when they are not.
-pytestmark = pytest.mark.usefixtures("installed_assets")
+pytestmark = pytest.mark.usefixtures("piper_installed")
 
 #: An ElevenLabs voice id from aliases.toml. Used to prove substitution, which
 #: is the behaviour openconv depends on.

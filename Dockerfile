@@ -25,7 +25,9 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && ffmpeg -hide_banner -encoders | grep -q libmp3lame \
  && ffmpeg -hide_banner -encoders | grep -q libopus \
- && ln -s "$(ls /usr/lib/*/libespeak-ng.so.1 | head -1)" /usr/local/lib/libespeak-ng.so.1
+ && lib="$(ls /usr/lib/*/libespeak-ng.so.1 | head -1)" \
+ && test -n "$lib" \
+ && ln -s "$lib" /usr/local/lib/libespeak-ng.so.1
 
 ENV PHONEMIZER_ESPEAK_LIBRARY=/usr/local/lib/libespeak-ng.so.1
 

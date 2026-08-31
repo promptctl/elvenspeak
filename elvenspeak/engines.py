@@ -27,8 +27,8 @@ from .provisioning import Registry
 #:
 #: The first entry is the default, so an unset `ELVENSPEAK_ENGINE` always names a
 #: real engine — a separate default setting could name one that is not here.
-#: Piper is first because it is roughly twenty times faster: measured on this
-#: class of machine, Piper runs at RTF ~0.03 against Kokoro's ~0.77. Kokoro
+#: Piper is first because it is roughly twenty-five times faster: measured on
+#: this class of machine, Piper runs at RTF ~0.03 against Kokoro's ~0.77. Kokoro
 #: sounds considerably better, which is a deployment's choice to make and not one
 #: to inherit by being listed.
 ENGINES: Registry = {"piper": piper.configure, "kokoro": kokoro.configure}
