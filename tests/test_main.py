@@ -15,18 +15,13 @@ than inside the first request.
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 import pytest
+from conftest import INSTALLED_VOICE as VOICE
+from conftest import MODELS_DIR as MODELS
+from conftest import needs_installed_model
 from fastapi import FastAPI
 
 import main
-
-VOICE = "en_US-lessac-medium"
-MODELS = Path(
-    os.environ.get("PIPER_MODELS_DIR", Path(__file__).parent.parent / "models")
-)
 
 
 def test_the_factory_entry_point_exits_the_same_way(monkeypatch, capsys):
@@ -40,11 +35,7 @@ def test_the_factory_entry_point_exits_the_same_way(monkeypatch, capsys):
     assert "PORT" in capsys.readouterr().err
 
 
-@pytest.mark.skipif(
-    not (MODELS / f"{VOICE}.onnx").exists(),
-    reason=f"no {VOICE} model in {MODELS}; "
-    "fetch it with PIPER_ALLOW_DOWNLOAD=1 uv run main.py",
-)
+@needs_installed_model
 def test_a_good_environment_builds_an_application(monkeypatch):
     """The success path, so the failure tests are not the only thing exercised.
 

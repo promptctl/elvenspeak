@@ -185,9 +185,29 @@ class SpeechRequest(BaseModel):
     apply_language_text_normalization: bool | None = None
     use_pvc_as_ivc: bool | None = None
 
-    def prosody(self) -> Prosody:
+    def prosody(self, capabilities: frozenset[Capability]) -> Prosody:
+        """What of this request actually crosses the seam.
+
+        [LAW:one-source-of-truth] The same subtraction [`ignored`] reports,
+        applied rather than only announced. Reporting alone leaves two answers to
+        "was the speed honoured": the header, derived from the declaration, and
+        the audio, decided by whatever the engine does with a value it never said
+        it could use. They agree only while every engine ignores what it did not
+        claim — and the one that does not makes the header lie without breaking
+        anything a test could see. Withheld here, the header cannot be wrong,
+        because the parameter it names as ignored was never sent.
+
+        Which is the rule the timestamp endpoints already keep by refusing: an
+        engine is asked for nothing it did not declare. The capability is read
+        out of [`_NEEDS_CAPABILITY`] rather than named again here, so the
+        parameter's requirement is stated in exactly one place.
+        """
         speed = self.voice_settings.speed
-        return Prosody(speed=1.0 if speed is None else speed)
+        honoured = _NEEDS_CAPABILITY["voice_settings.speed"] in capabilities
+        # `Prosody()` rather than a literal 1.0: the neutral speed is the
+        # dataclass's own default, and writing it again here would be a second
+        # copy of it free to disagree with the seam it is meant to be neutral in.
+        return Prosody(speed=speed) if honoured and speed is not None else Prosody()
 
     def requested(self) -> tuple[str, ...]:
         """Every option this request asks for, honourable or not.
@@ -394,7 +414,9 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         resolution = resolve(voice_id)
 
         def synthesize() -> tuple[int, bytes]:
-            spoken = engine.speak(resolution.voice, body.text, body.prosody())
+            spoken = engine.speak(
+                resolution.voice, body.text, body.prosody(capabilities)
+            )
             return spoken.sample_rate, b"".join(spoken.audio)
 
         # Off the loop, which is the obligation the engine interface places on
@@ -426,7 +448,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         # samples are still pulled later, by the encoder's pump, so a client that
         # disconnects between request and read costs nothing.
         spoken = await asyncio.to_thread(
-            engine.speak, resolution.voice, body.text, body.prosody()
+            engine.speak, resolution.voice, body.text, body.prosody(capabilities)
         )
         return StreamingResponse(
             encoding.encode_stream(spoken.audio, spoken.sample_rate, fmt),
@@ -445,7 +467,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         require(Capability.TIMESTAMPS)
 
         spoken = await asyncio.to_thread(
-            engine.speak_timed, resolution.voice, body.text, body.prosody()
+            engine.speak_timed, resolution.voice, body.text, body.prosody(capabilities)
         )
         audio = await encoding.encode(spoken.pcm, spoken.sample_rate, fmt)
         aligned = align_mod.align(body.text, spoken)
@@ -469,7 +491,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         fmt = parse_format(output_format)
         resolution = resolve(voice_id)
         require(Capability.TIMESTAMPS)
-        prosody = body.prosody()
+        prosody = body.prosody(capabilities)
 
         async def stream() -> AsyncIterator[bytes]:
             # Split here rather than letting the engine split internally, because an

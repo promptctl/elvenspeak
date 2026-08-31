@@ -126,6 +126,10 @@ class Prosody:
     model's sampling rather than the delivery of a line, so they are accepted at
     the HTTP edge and dropped there, in one documented place, rather than being
     carried across this seam for an engine to ignore.
+
+    A field gated by a [`Capability`] the engine did not declare arrives holding
+    its neutral value, so an engine reads every field here without first checking
+    what it said it could do — see [`Engine.capabilities`].
     """
 
     #: A multiplier on ordinary speaking rate: 2.0 is twice as fast. Expressed
@@ -243,6 +247,16 @@ class Engine(Protocol):
         Absence is the safe default: a capability not declared is reported to
         callers as not honoured, so an engine that undersells itself is merely
         pessimistic, while one that oversells lies in the audio.
+
+        [LAW:one-source-of-truth] What is declared here decides what the engine
+        is *asked*, not only what callers are told. A capability this set omits
+        reaches the engine as neither a method call nor a parameter value:
+        [`speak_timed`] is refused at the endpoint without [`Capability.TIMESTAMPS`],
+        and a [`Prosody`] field gated by a capability arrives holding its neutral
+        value. An engine that undersells itself is therefore not asked to prove
+        it — which is what keeps the report honest, since a server that reported
+        an option as ignored and passed it anyway would be telling the truth only
+        for as long as every engine ignored what it never claimed.
         """
         ...
 

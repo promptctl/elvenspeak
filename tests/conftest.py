@@ -1,17 +1,32 @@
-"""Fixtures shared by more than one test module.
+"""Fixtures and stand-ins shared by more than one test module.
 
 [LAW:one-source-of-truth] `make_voice` lives here because two files now need a
 voice on disk that no real download produced, and a second copy of "what a
 `.onnx.json` has to contain" would be free to drift from the first — leaving one
 file testing against a sidecar shape the other has stopped believing in.
+
+`DeclaredEngine` and `needs_installed_model` are here for the same reason from
+the two other directions a test reaches an engine: the fake one every capability
+test drives, and where the real one's model is kept.
 """
 
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+from elvenspeak.engine import (
+    Capability,
+    Prosody,
+    Speech,
+    TimedSpeech,
+    Timing,
+    Voice,
+)
 
 #: Every variable `elvenspeak.settings.Settings.from_env` reads. One copy,
 #: because a second one is free to drift: the next setting added to `from_env`
@@ -27,6 +42,116 @@ _ENVIRONMENT = (
     "HOST",
     "PORT",
 )
+
+
+#: The voice that a test wanting real audio needs installed, and where the image
+#: build and the developer loop both put it. One copy, because three files now
+#: skip themselves when it is missing and three spellings of "is the model there"
+#: are free to disagree about which model or which directory — leaving one file
+#: quietly testing nothing while the others ran.
+INSTALLED_VOICE = "en_US-lessac-medium"
+MODELS_DIR = Path(
+    os.environ.get("PIPER_MODELS_DIR", Path(__file__).parent.parent / "models")
+)
+
+#: Applied by the tests that synthesize for real. Skipped rather than mocked: a
+#: mocked Piper proves the caller calls something, and what these tests are for
+#: is what a real model actually produces.
+needs_installed_model = pytest.mark.skipif(
+    not (MODELS_DIR / f"{INSTALLED_VOICE}.onnx").exists(),
+    reason=f"no {INSTALLED_VOICE} model in {MODELS_DIR}; "
+    "fetch it with PIPER_ALLOW_DOWNLOAD=1 uv run main.py",
+)
+
+#: Two, so that "every voice the engine offers" is a claim about more than one.
+DECLARED_VOICES = (
+    Voice(id="fake-voice", name="Fake", description="a test engine's voice"),
+    Voice(id="fake-voice-two", name="Fake Two", description="its other voice"),
+)
+
+#: Audio per character of text, at [`_DECLARED_RATE`]. Arbitrary: what matters is
+#: that it is a positive constant, which is what makes a longer text audibly
+#: longer without the engine having to model anything about speech.
+_SAMPLES_PER_CHARACTER = 100
+_DECLARED_RATE = 22050
+
+
+class DeclaredEngine:
+    """An engine that does exactly what it was told to declare, and nothing more.
+
+    Not a mock of Piper. It declares an arbitrary capability set and makes an
+    unconvincing noise, which is the shape of the second engine this seam exists
+    for: something written elsewhere, never anticipated here, and described
+    accurately anyway.
+
+    [LAW:one-type-per-behavior] One type taking a capability set, rather than a
+    `SpeedlessEngine` and a `TimelessEngine` beside it. What differs between the
+    engines these tests need is a value, so it is passed as one — which is the
+    same argument the interface itself makes, tested here by being relied upon.
+
+    Honest in both directions, which is what lets it stand as a subject of the
+    conformance suite rather than only as a foil for the API's headers: what it
+    declares, it really does, and what it does not declare, it really refuses.
+    """
+
+    def __init__(self, capabilities: frozenset[Capability]) -> None:
+        self._capabilities = capabilities
+
+    def voices(self) -> tuple[Voice, ...]:
+        return DECLARED_VOICES
+
+    def capabilities(self) -> frozenset[Capability]:
+        return self._capabilities
+
+    def speak(self, voice: Voice, text: str, prosody: Prosody) -> Speech:
+        return Speech(
+            sample_rate=_DECLARED_RATE, audio=_silence(self._length(text, prosody))
+        )
+
+    def speak_timed(self, voice: Voice, text: str, prosody: Prosody) -> TimedSpeech:
+        """One stretch covering the whole utterance, for an engine that measures.
+
+        [LAW:no-silent-failure] Refuses outright without the capability, rather
+        than returning something plausible. The server promises never to ask —
+        the timestamp endpoints answer 501 first — and a stand-in that quietly
+        obliged anyway would leave that promise resting on a gate no test failure
+        would ever be traced back to.
+        """
+        if Capability.TIMESTAMPS not in self._capabilities:
+            raise AssertionError(
+                "speak_timed was called on an engine that did not declare "
+                f"{Capability.TIMESTAMPS.name}"
+            )
+        samples = self._length(text, prosody)
+        return TimedSpeech(
+            pcm=b"".join(_silence(samples)),
+            sample_rate=_DECLARED_RATE,
+            timings=(Timing(samples=samples, separates_words=False),),
+        )
+
+    def _length(self, text: str, prosody: Prosody) -> int:
+        """How many samples this utterance runs to.
+
+        `prosody.speed` is read only when [`Capability.SPEED`] was declared. An
+        engine that applied a speed it never claimed would be the dishonest one
+        the ignored header cannot describe — and reading it unconditionally here
+        would make this stand-in that engine, silently, for every test that
+        constructs it declaring nothing.
+        """
+        speed = prosody.speed if Capability.SPEED in self._capabilities else 1.0
+        return int(len(text) * _SAMPLES_PER_CHARACTER / speed)
+
+
+def _silence(samples: int) -> Iterator[bytes]:
+    """`samples` of quiet, in more than one piece.
+
+    Split because a single chunk would let a consumer that mishandles chunk
+    boundaries pass — the streaming encoder is pumped from this iterator, and one
+    chunk is the one case where there are no boundaries to get wrong.
+    """
+    half = samples // 2
+    yield b"\x00\x00" * half
+    yield b"\x00\x00" * (samples - half)
 
 
 @pytest.fixture
