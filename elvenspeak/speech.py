@@ -1,70 +1,39 @@
-"""Text to samples, and samples to the format the caller asked for.
+"""Text into samples.
 
-Two steps that stay separate on purpose. Piper always produces the same thing —
-signed 16-bit mono PCM at its voice's native rate — and every one of the 28
-output formats is that same PCM put through one ffmpeg pass that resamples and
-encodes together. Synthesis therefore knows nothing about codecs, and encoding
-knows nothing about voices.
+Piper always produces the same thing — signed 16-bit mono PCM at its voice's
+native rate — plus, when asked, the phoneme durations that account for it.
+Turning those samples into one of the 28 wire formats is [`encoding`]'s job and
+happens on the other side of that seam, so synthesis knows nothing about codecs
+and encoding knows nothing about voices.
 
-# Why `/stream` streams
+What is left here after that cut is the whole of what this service needs from a
+speech engine: PCM chunks, the rate they are at, and phoneme durations when the
+engine has them. That is the interface, discovered rather than designed.
 
-[LAW:no-silent-failure] The endpoint is named `stream` and the previous version
-did not: it joined every chunk into one buffer, encoded the whole thing, and
-answered with a single body. A caller that had gone to the trouble of consuming
-the response incrementally got its audio in one piece at the end anyway, and
-nothing said so.
+# Why callers run synthesis off the event loop
 
-Here Piper's chunks are written into ffmpeg as they are produced and ffmpeg's
-output is yielded as it appears, so the first audio reaches the caller while the
-rest of the sentence is still being synthesized. That is worth real latency:
-Piper's cost is proportional to the audio it is producing, so on a long clause
-the difference between first-byte and last-byte is most of the request.
+[LAW:effects-at-boundaries] Piper is synchronous, CPU-bound ONNX inference, so
+every function here blocks for as long as the audio takes to make. Run inline in
+an `async def` handler it would stall every other request on the worker for the
+length of the synthesis.
 
-# Why synthesis runs off the event loop
-
-[LAW:effects-at-boundaries] Piper is synchronous, CPU-bound ONNX inference. Run
-inline it would stall every other request on the worker for the length of the
-synthesis. It runs in a thread that feeds the encoder's stdin, so the event loop
-only ever waits on pipes.
+Nothing here may therefore be called on the event loop. A caller discharges that
+one of two ways: await it through `asyncio.to_thread`, or hand the generator to
+[`encoding.encode_stream`], which pulls it on a worker one chunk at a time. Which
+mechanism suits a given endpoint is that endpoint's business — this states the
+obligation rather than listing who currently meets it, because a roster of
+callers is true until the next endpoint lands and silently false afterwards.
 """
 
 from __future__ import annotations
 
-import asyncio
-import logging
-import re
-from collections.abc import AsyncIterator, Iterator
-from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .formats import OutputFormat
-
 if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Iterator
+
     from piper import PiperVoice
-
-_LOGGER = logging.getLogger("elvenspeak.speech")
-
-#: How much encoded audio to hand upward at a time. Small enough that the first
-#: sound leaves promptly, large enough not to spend a syscall per few samples.
-_READ_SIZE = 16 * 1024
-
-#: How long a finished encoder gets to exit before it is killed. Generous,
-#: because reaching it means something is wedged rather than slow — ffmpeg has
-#: already closed stdout by this point and has nothing left to do.
-_EXIT_TIMEOUT = 10.0
-
-
-class SynthesisFailed(RuntimeError):
-    """The encoder refused the audio, or synthesis died before it was complete.
-
-    Distinct from an empty result: this is a fault, not a quiet answer.
-
-    Becomes a 500 only on the non-streaming endpoints. The streaming ones have
-    already committed a 200 by the time synthesis can fail, so all they can do is
-    abort the body — a streaming caller must treat a truncated response as a
-    failure, because no status code is coming to say so.
-    """
 
 
 @dataclass
@@ -122,7 +91,7 @@ class Timed:
 
 def stream_pcm(
     model: "PiperVoice", text: str, prosody: Prosody
-) -> Iterator[bytes]:
+) -> "Iterator[bytes]":
     """Piper's raw samples, one chunk at a time, as they are produced."""
     for chunk in model.synthesize(text, syn_config=prosody.as_piper()):
         yield chunk.audio_int16_bytes
@@ -164,188 +133,3 @@ def synthesize_timed(
 
     result.pcm = b"".join(audio)
     return result
-
-
-async def encode(pcm: bytes, native_rate: int, fmt: OutputFormat) -> bytes:
-    """Converts one complete buffer into `fmt`."""
-    chunks = [part async for part in encode_stream(_once(pcm), native_rate, fmt)]
-    return b"".join(chunks)
-
-
-async def encode_stream(
-    pcm_chunks: Iterator[bytes], native_rate: int, fmt: OutputFormat
-) -> AsyncIterator[bytes]:
-    """Converts samples into `fmt`, emitting encoded bytes as they are ready.
-
-    `pcm_chunks` is a *synchronous* iterator because that is what Piper gives and
-    what a caller can most easily supply; it is drained on a worker thread so
-    that producing it cannot block the loop.
-
-    # Three pipes, and why each is watched
-
-    stdin is fed by [`_pump`], stdout is read here, and stderr is drained by its
-    own task. The last of those is not tidiness: stderr is an OS pipe of about
-    64 KB, and ffmpeg blocks when it fills. Draining it only after the stdout
-    loop ends means a chatty failure can wedge ffmpeg before it has produced the
-    output that would end that loop, and the request hangs rather than fails.
-
-    # Why a synthesis failure cannot pass as a short reply
-
-    [LAW:no-silent-failure] Because that is the failure this whole service was
-    rebuilt to stop producing. If synthesis dies halfway, ffmpeg encodes what it
-    received and exits 0 — a clean 200 carrying half an answer. So the pump's
-    outcome is awaited and its exception raised, rather than the process's exit
-    status being trusted to describe something it never saw.
-    """
-    process = await asyncio.create_subprocess_exec(
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "s16le",
-        "-ar",
-        str(native_rate),
-        "-ac",
-        "1",
-        "-i",
-        "pipe:0",
-        *fmt.ffmpeg_args(),
-        "pipe:1",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    assert process.stdin is not None and process.stdout is not None
-    assert process.stderr is not None
-
-    pump = asyncio.create_task(_pump(process, pcm_chunks))
-    errors = asyncio.create_task(process.stderr.read())
-    failure: BaseException | None = None
-    #: Whether the SIGKILL below came from this function. An exit code cannot
-    #: carry that, and it is the only thing that makes -9 acceptable.
-    killed_here = False
-
-    try:
-        while True:
-            block = await process.stdout.read(_READ_SIZE)
-            if not block:
-                break
-            yield block
-    finally:
-        pump.cancel()
-        try:
-            await pump
-        except asyncio.CancelledError:
-            # The pump was still running when the response ended. Expected on an
-            # abandoned request, and says nothing about whether synthesis worked.
-            pass
-        except (BrokenPipeError, ConnectionResetError):
-            # ffmpeg closed its input first. Its exit status describes that
-            # better than this side of the pipe can.
-            _LOGGER.debug("encoder closed its input early")
-        except BaseException as error:  # noqa: BLE001 - re-raised below, once
-            # Captured rather than raised here: this is a `finally`, and raising
-            # from it during an abort would replace the reason the response
-            # actually ended.
-            failure = error
-        # Bounded for the same reason the wait below is. An abandoned response
-        # leaves the `while` above without having drained stdout, so ffmpeg can
-        # block writing into a full pipe — and a process blocked on stdout never
-        # closes stderr, so an unbounded read here waits on a process that is
-        # itself waiting on us. That deadlock would hold the subprocess and both
-        # tasks forever, never reaching the kill that breaks it.
-        try:
-            stderr = await asyncio.wait_for(errors, timeout=_EXIT_TIMEOUT)
-        except TimeoutError:
-            errors.cancel()
-            # Only decorates the message below, so losing it costs a detail;
-            # the non-zero returncode still reports the failure itself.
-            stderr = b""
-        # Reaped, not killed. `returncode` is still None here on the ordinary
-        # path — stdout reaching EOF means ffmpeg closed the pipe, not that
-        # anything has collected its status yet — so killing on "no returncode"
-        # SIGKILLs a process that had finished, and turns its real exit code into
-        # whatever the race produces. Waited for first; killed only if it will
-        # not leave, which is what the consumer having gone away looks like.
-        try:
-            await asyncio.wait_for(process.wait(), timeout=_EXIT_TIMEOUT)
-        except TimeoutError:
-            killed_here = True
-            process.kill()
-            await process.wait()
-
-    # Only reached when the generator ran to completion — an abandoned response
-    # exits through the `finally` above and never gets here.
-    if failure is not None:
-        raise SynthesisFailed(
-            f"synthesis failed before the {fmt.wire_name} audio was complete"
-        ) from failure
-    # -9 is tolerated only when the kill above is where it came from. Inferring
-    # that from the exit code instead accepts every other SIGKILL as success —
-    # and an ffmpeg killed mid-encode, the OOM killer being the realistic cause
-    # here, closes stdout as it dies. The read loop sees an ordinary EOF, exits
-    # without exception, and `wait()` returns -9 without the timeout branch ever
-    # running, so whatever was encoded before the kill ships as a complete 200.
-    tolerated = (0, -9) if killed_here else (0,)
-    if process.returncode not in tolerated:
-        raise SynthesisFailed(
-            f"ffmpeg exited {process.returncode} encoding {fmt.wire_name}: "
-            f"{stderr.decode(errors='replace')[:500]}"
-        )
-
-
-async def _pump(process, pcm_chunks: Iterator[bytes]) -> None:
-    """Feeds synthesized samples into the encoder without blocking the loop.
-
-    One chunk is pulled per await, each on a worker thread, and written before
-    the next is asked for. That ordering is the whole design: it is what keeps
-    synthesis from running ahead of the encoder, so no queue is needed to bound
-    it and there is no queue to deadlock against when the consumer goes away.
-    An exception from the generator propagates out of this task intact rather
-    than being flattened into an end-of-input that the encoder cannot tell from
-    a finished sentence.
-    """
-    chunks = iter(pcm_chunks)
-    done = object()
-    try:
-        while True:
-            chunk = await asyncio.to_thread(next, chunks, done)
-            if chunk is done:
-                break
-            process.stdin.write(chunk)
-            await process.stdin.drain()
-    finally:
-        # Unconditional: ffmpeg waits on stdin forever if it is never closed, so
-        # skipping this on the error path would turn a synthesis failure into a
-        # hung request.
-        with suppress(BrokenPipeError, ConnectionResetError, RuntimeError):
-            process.stdin.close()
-
-
-def _once(pcm: bytes) -> Iterator[bytes]:
-    yield pcm
-
-
-#: Sentence-final punctuation followed by whitespace. Deliberately simple: this
-#: decides where a *streamed* reply is cut, and a wrong cut costs a slightly odd
-#: pause, not a wrong result. Anything cleverer (abbreviations, decimals) would
-#: be a second opinion about sentence boundaries competing with espeak's own.
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
-
-
-def split_sentences(text: str) -> list[str]:
-    """Cuts text where a streamed response may be broken into pieces.
-
-    Used only by the streaming timestamp endpoint, which must align each emitted
-    object against a known stretch of text.
-
-    Returns an empty list for text with nothing to say. The previous version
-    ended `or [text]`, which cannot produce an empty list — a one-element list
-    literal is always truthy — so empty input became `[""]` and reached
-    synthesis. The endpoints refuse empty text at the edge; this returning
-    nothing is the second half of that, so a whitespace-only string cannot slip
-    through as one blank sentence.
-    """
-    pieces = [piece.strip() for piece in _SENTENCE_END.split(text.strip())]
-    return [piece for piece in pieces if piece]
