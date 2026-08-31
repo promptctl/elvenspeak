@@ -1,0 +1,63 @@
+name: assert-source-is-event-commit
+description: >-
+  Fails unless the checked-out working tree is the commit the triggering event named,
+  and returns that commit so callers can record what they built.
+
+# The invariant CLAUDE.md's build rule rests on, in the one place that states it: an
+# image must be built from a commit a machine fetched itself. Everything else in the ban
+# — no tarring a working tree, no scp to a build host — is downstream of being able to
+# say this and mean it.
+#
+# It has to be asserted per checkout, not per run: every job that consumes the source
+# does its own `actions/checkout`, and a claim proved about one job's workspace says
+# nothing about another's. [LAW:one-source-of-truth] — two copies of the central
+# invariant would be two maps of one territory, free to drift the first time one is
+# edited.
+#
+# openconv carries a twin of this file for the same reason. The two repositories share
+# no code and there is no third place to put this that both can reach, so the duplication
+# is deliberate rather than unnoticed; a Gitea mirror exists for sharing actions
+# (copirate-code-review-agent) and is not worth standing up for thirty lines of bash.
+
+# [LAW:parse-dont-validate] The `revision` output is what makes this a checkpoint rather
+# than a check. Asserting and returning nothing leaves `$GITHUB_SHA` readable by any later
+# step, so an image label built from it carries no trace of having been proved — delete the
+# assertion and the label is still written, still looks authoritative, and is now a claim
+# nobody verified. A caller stamping `steps.<id>.outputs.revision` cannot obtain the value
+# without this action having run and passed: the commit stops being ambient and becomes
+# something handed across a boundary.
+outputs:
+  revision:
+    description: >-
+      The commit the working tree was proved to be. Anything recording provenance into a
+      published artifact should read this rather than $GITHUB_SHA, so the value it records
+      is the one this action verified.
+    value: ${{ steps.assert.outputs.revision }}
+
+runs:
+  using: composite
+  steps:
+    - name: Assert the checkout is the triggering commit
+      id: assert
+      shell: bash
+      run: |
+        set -euo pipefail
+        head="$(git rev-parse HEAD)"
+        echo "checked out: $head"
+        echo "event  said: $GITHUB_SHA"
+        if [ "$head" != "$GITHUB_SHA" ]; then
+          echo "ERROR: checkout is $head but the event names $GITHUB_SHA." >&2
+          echo "       An image built here could not name its own source." >&2
+          exit 1
+        fi
+        # The commit, now proved, handed back as this action's answer. `$head` rather
+        # than `$GITHUB_SHA`: they are equal by the assertion above, and this is the one
+        # that was physically measured against the tree the build will consume.
+        echo "revision=$head" >> "$GITHUB_OUTPUT"
+
+        # `actions/checkout` defaults to fetch-depth 1, and that is enough: the assertion
+        # above compares a sha and needs no ancestry, and this repository carries no git
+        # tags, so `git describe` has nothing to name and the published tag is
+        # `YYYY.MM.DD.N` read from the registry instead. Depth is reported rather than
+        # assumed, so anyone who does reach for history sees what they actually have.
+        echo "history depth: $(git rev-list --count HEAD)"
