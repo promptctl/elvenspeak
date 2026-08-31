@@ -395,10 +395,21 @@ jobs:
     # already ties the extras to the registry. An engine added without a line here would
     # otherwise publish no image and report nothing wrong.
     #
-    # max-parallel 1: both legs share one Docker daemon on a 2-cpu, 7.9GB host, where a
-    # cold build runs ~10 minutes. In sequence the second leg reuses the base layers the
-    # first just built; in parallel they contend for the CPU the build is bound by.
-    # [LAW:no-ambient-temporal-coupling]
+    # max-parallel 1 is DECLARED AND NOT HONOURED, and is left here as the statement of
+    # intent it is rather than deleted as though the intent were wrong. Measured on run
+    # 5225 (2026-08-31): both legs started at the same second, 23:29:49, on an act_runner
+    # with capacity 4. Gitea's scheduler does not implement the key, so what is written
+    # above is a request this forge declines.
+    #
+    # What it asks for is still what this host wants: both legs share one Docker daemon
+    # on 2 cpu and 7.9GB, a cold build is ~10 minutes, and in sequence the second leg
+    # reuses the base layers the first just built rather than contending for the CPU the
+    # build is bound by. Enforcing it needs a mechanism act_runner actually reads — the
+    # workflow-level `concurrency` group below is the only one proved on this runner, and
+    # it scopes across runs rather than within one. Deliberately not replaced with an
+    # untested job-level `concurrency` expression: this file has no way to verify such a
+    # change until the builder can complete a build at all, and a serialisation that
+    # silently does nothing is what is already here. [LAW:no-ambient-temporal-coupling]
     #
     # fail-fast off for the same reason these get separate names and separate service
     # keys: two services that share an API surface, not two attempts at one thing. One
