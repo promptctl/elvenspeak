@@ -1,4 +1,4 @@
-"""ElevenLabs-compatible text-to-speech, served from local Piper voices."""
+"""ElevenLabs-compatible text-to-speech, served from local voices."""
 
 from .api import create_app
 from .settings import Settings

@@ -9,22 +9,19 @@ model is installed. It needs no model: the resolution logic is a lookup over
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
-from elvenspeak.voices import Catalog, Voice, VoiceNotInstalled
+from elvenspeak.engine import Voice
+from elvenspeak import voices as voices_mod
+from elvenspeak.voices import Catalog, VoiceNotInstalled, load_aliases
 
 
 def voice(key: str) -> Voice:
     return Voice(
-        key=key,
+        id=key,
         name=key.split("-")[1] if "-" in key else key,
-        language="en_US",
-        quality="medium",
-        model_path=Path(f"/nonexistent/{key}.onnx"),
-        sample_rate=22050,
-        num_speakers=1,
+        description=key,
+        labels=(("language", "en_US"), ("quality", "medium")),
     )
 
 
@@ -45,7 +42,6 @@ def catalog(
     return Catalog(
         voices={k: voice(k) for k in keys},
         fallback=fallback,
-        include_alignments=False,
         # Filtered as `load_aliases` filters it, since an alias whose target is
         # not installed is dropped at load rather than carried into resolution.
         aliases={f: local for f, local in table.items() if local in keys},
@@ -56,7 +52,7 @@ def test_exact_match_is_not_a_substitution():
     result = catalog("en_US-lessac-medium", fallback="en_US-lessac-medium").resolve(
         "en_US-lessac-medium"
     )
-    assert result.voice.key == "en_US-lessac-medium"
+    assert result.voice.id == "en_US-lessac-medium"
     assert result.substituted is False
 
 
@@ -65,7 +61,7 @@ def test_unknown_id_falls_back_and_is_marked_substituted():
     result = catalog("en_US-lessac-medium", fallback="en_US-lessac-medium").resolve(
         "21m00Tcm4TlvDq8ikWAM"
     )
-    assert result.voice.key == "en_US-lessac-medium"
+    assert result.voice.id == "en_US-lessac-medium"
     assert result.requested == "21m00Tcm4TlvDq8ikWAM"
     assert result.substituted is True
 
@@ -76,7 +72,7 @@ def test_alias_resolves_when_its_target_is_installed():
         "en_US-lessac-medium", "en_US-hfc_female-medium", fallback="en_US-lessac-medium"
     )
     result = cat.resolve("21m00Tcm4TlvDq8ikWAM")
-    assert result.voice.key == "en_US-hfc_female-medium"
+    assert result.voice.id == "en_US-hfc_female-medium"
     assert result.substituted is True
 
 
@@ -89,7 +85,7 @@ def test_alias_is_dropped_when_its_target_is_not_installed():
     """
     cat = catalog("en_US-lessac-medium", fallback="en_US-lessac-medium")
     assert cat.aliases_for("en_US-lessac-medium") == ()
-    assert cat.resolve("21m00Tcm4TlvDq8ikWAM").voice.key == "en_US-lessac-medium"
+    assert cat.resolve("21m00Tcm4TlvDq8ikWAM").voice.id == "en_US-lessac-medium"
 
 
 def test_live_aliases_are_reported_for_discovery():
@@ -115,7 +111,7 @@ def test_get_does_not_substitute():
 
 def test_installed_is_stable_order():
     cat = catalog("en_US-zzz-medium", "en_US-aaa-medium", fallback="en_US-aaa-medium")
-    assert [v.key for v in cat.installed] == ["en_US-aaa-medium", "en_US-zzz-medium"]
+    assert [v.id for v in cat.installed] == ["en_US-aaa-medium", "en_US-zzz-medium"]
 
 
 def test_a_fallback_that_is_not_installed_is_refused_at_construction():
@@ -131,7 +127,6 @@ def test_a_fallback_that_is_not_installed_is_refused_at_construction():
         Catalog(
             voices={"en_US-lessac-medium": voice("en_US-lessac-medium")},
             fallback="en_US-not-installed",
-            include_alignments=False,
         )
 
 
@@ -151,6 +146,61 @@ def test_an_alias_pointing_at_no_installed_voice_is_refused_at_construction():
         Catalog(
             voices={"en_US-lessac-medium": voice("en_US-lessac-medium")},
             fallback="en_US-lessac-medium",
-            include_alignments=False,
             aliases={"21m00Tcm4TlvDq8ikWAM": "en_US-not-installed"},
         )
+
+
+class _Engine:
+    """An engine that offers voices and can do nothing else.
+
+    [`Catalog`] is a lookup over values, so this is the whole of what it needs
+    from an engine — which is the property being demonstrated as much as used.
+    """
+
+    def __init__(self, *keys: str) -> None:
+        self._voices = tuple(voice(key) for key in keys)
+
+    def voices(self) -> tuple[Voice, ...]:
+        return self._voices
+
+
+def test_a_catalog_is_built_from_whatever_the_engine_offers():
+    cat = Catalog.for_engine(_Engine("en_US-lessac-medium"), fallback=None)
+    assert [v.id for v in cat.installed] == ["en_US-lessac-medium"]
+
+
+def test_a_malformed_alias_table_refuses_to_boot(tmp_path, monkeypatch):
+    """The reason aliases are read while the app is built, not on first use.
+
+    `aliases.toml` is documented as operator-editable, so a malformed edit is a
+    realistic event. Read lazily it surfaced as an uncaught TOMLDecodeError on
+    whichever synthesis call first needed an alias — invisible to a healthcheck
+    that never touches resolution, and reported nowhere near the file that caused
+    it.
+    """
+    broken = tmp_path / "aliases.toml"
+    broken.write_text("[elevenlabs\nnot = valid", encoding="utf-8")
+    monkeypatch.setattr(voices_mod, "_ALIASES_FILE", broken)
+
+    with pytest.raises(Exception) as raised:
+        Catalog.for_engine(_Engine("en_US-lessac-medium"), fallback=None)
+    assert "toml" in type(raised.value).__module__.lower()
+
+
+def test_aliases_pointing_at_uninstalled_voices_are_dropped(tmp_path, monkeypatch):
+    """An answer that cannot be spoken is not an answer."""
+    table = tmp_path / "aliases.toml"
+    table.write_text(
+        '[elevenlabs]\n"live" = "en_US-lessac-medium"\n"dead" = "en_US-absent-medium"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(voices_mod, "_ALIASES_FILE", table)
+    assert load_aliases({"en_US-lessac-medium": object()}) == {
+        "live": "en_US-lessac-medium"
+    }
+
+
+def test_a_missing_alias_file_is_an_empty_table(tmp_path, monkeypatch):
+    """Aliases are optional; their absence is not a failure to boot."""
+    monkeypatch.setattr(voices_mod, "_ALIASES_FILE", tmp_path / "nothing-here.toml")
+    assert load_aliases({"en_US-lessac-medium": object()}) == {}

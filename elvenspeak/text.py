@@ -13,7 +13,7 @@ import re
 #: decides where a *streamed* reply is cut, and a wrong cut costs a slightly odd
 #: pause, not a wrong result. Anything cleverer (abbreviations, decimals) would
 #: be a second opinion about sentence boundaries competing with the one the
-#: engine's own phonemizer already holds — espeak, in Piper's case.
+#: engine's own phonemizer already holds.
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
 
