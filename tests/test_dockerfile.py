@@ -85,10 +85,20 @@ def instructions() -> str:
     )
 
 
-def test_the_build_arg_is_not_spliced_into_source_text():
-    """It reaches Python through the environment; interpolation was injectable."""
-    assert "'${PIPER_VOICES}'" not in instructions()
-    assert "os.environ['PIPER_VOICES']" in instructions()
+def test_no_build_arg_is_spliced_into_source_text():
+    """Build args reach Python through the environment; interpolation was injectable.
+
+    A single quote in a `--build-arg` once escaped into executable code, because
+    the value was interpolated as `'${PIPER_VOICES}'.split(',')` — a
+    caller-supplied string inside a Python literal inside a shell command.
+
+    Asserts the property rather than one spelling of it. This previously also
+    required `os.environ['PIPER_VOICES']` to appear, which pinned one particular
+    way of reading the value: routing the same read through `Settings.from_env`
+    satisfied the contract and failed the test anyway.
+    """
+    for block in re.findall(r'python -c "([\s\S]*?)"\s*$', instructions(), re.MULTILINE):
+        assert "${" not in block, f"build arg interpolated into source: {block[:80]!r}"
 
 
 def test_the_image_builds_on_the_python_this_project_targets():
@@ -119,3 +129,38 @@ def test_the_image_builds_on_the_python_this_project_targets():
     )
     for tag in from_tags:
         assert tag == pinned, f"Dockerfile FROM python:{tag} != .python-version {pinned}"
+
+
+def test_the_exposed_port_is_not_a_second_copy_of_the_configured_one():
+    """EXPOSE and HEALTHCHECK both read PORT rather than repeating its value.
+
+    Both were deliberate fixes — a literal here drifts from the port the server
+    actually binds, and nothing else would notice. Pinned because the failure is
+    silent: the image builds, the container starts, and only publishing or the
+    healthcheck is wrong.
+    """
+    text = DOCKERFILE.read_text()
+
+    expose = re.findall(r"^\s*EXPOSE\s+(.+)$", text, re.MULTILINE)
+    assert expose, "no EXPOSE instruction found"
+    for value in expose:
+        assert "PORT" in value, f"EXPOSE {value!r} hardcodes a port instead of using ${{PORT}}"
+
+    healthcheck = re.search(r"HEALTHCHECK[\s\S]*?(?=\n[A-Z]+\s|\Z)", text)
+    assert healthcheck, "no HEALTHCHECK instruction found"
+    body = healthcheck.group()
+    assert "PORT" in body, "HEALTHCHECK does not read PORT from the environment"
+    assert not re.search(r"127\.0\.0\.1:\d+", body), "HEALTHCHECK hardcodes a port"
+
+
+def test_the_voice_list_is_not_parsed_a_second_time():
+    """[LAW:one-source-of-truth] The build reads voices the way the server does.
+
+    This step used to re-implement the split-and-strip from `Settings.from_env`
+    and carry a comment asserting the two agreed — the shape that makes a
+    divergence hard to see rather than impossible, since the comment is what a
+    reader trusts instead of checking.
+    """
+    text = DOCKERFILE.read_text()
+    assert "Settings.from_env" in text
+    assert "PIPER_VOICES'].split" not in text

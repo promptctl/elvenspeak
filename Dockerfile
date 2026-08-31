@@ -48,13 +48,20 @@ ENV PIPER_MODELS_DIR=/app/models \
 # source text. Interpolating it as `'${PIPER_VOICES}'.split(',')` put a
 # caller-supplied string inside a Python literal inside a shell command, so a
 # single quote in a --build-arg escaped into executable code at build time.
-# Entries are stripped exactly as `Settings.from_env` strips them, so the same
-# list means the same thing at build time and at run time.
+#
+# [LAW:one-source-of-truth] The voice list and models directory come from
+# `Settings.from_env` — the same reader the running server uses — rather than
+# being parsed a second time here. This previously re-implemented the split and
+# strip and carried a comment asserting the two agreed, which is the shape that
+# makes a divergence hard to see rather than impossible. A configuration the
+# server would reject now fails the build instead of baking a voice set the app
+# would not agree with.
 RUN uv run python -c "\
-import os, pathlib; \
+from elvenspeak.settings import Settings; \
 from piper.download_voices import download_voice; \
-d = pathlib.Path(os.environ['PIPER_MODELS_DIR']); d.mkdir(parents=True, exist_ok=True); \
-[download_voice(v.strip(), d) for v in os.environ['PIPER_VOICES'].split(',') if v.strip()]"
+s = Settings.from_env(); \
+s.models_dir.mkdir(parents=True, exist_ok=True); \
+[download_voice(v, s.models_dir) for v in s.voices]"
 
 # [LAW:effects-at-boundaries] Nothing after this point needs root. ffmpeg and the
 # ONNX runtime both process caller-influenced input, so a compromise anywhere in
