@@ -506,8 +506,19 @@ def _ascii_safe(value: str) -> str:
     Escaped rather than dropped, because these headers exist to tell a caller
     what it asked for: `\\u65e5` is still recognisably the id they sent, while a
     stripped one would report a request nobody made.
+
+    The rule is the printable range, not encodability. CR and LF are ASCII, so
+    escaping only what fails an ASCII encode let them through untouched — and a
+    voice id of `foo%0D%0AX-Injected:%20evil` arrives at the handler already
+    percent-decoded, putting a bare CRLF in a header value. Whether the server
+    below would refuse that on the way out is not something this function should
+    be leaning on unstated. Everything outside `\\x20`-`\\x7e` is escaped, which
+    covers C0, DEL, and the non-ASCII case together.
     """
-    return value.encode("ascii", "backslashreplace").decode("ascii")
+    return "".join(
+        char if " " <= char <= "~" else char.encode("unicode_escape").decode("ascii")
+        for char in value
+    )
 
 
 def _require_timestamps(request: Request) -> None:
