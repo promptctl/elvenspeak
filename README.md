@@ -22,7 +22,10 @@ checked by a test:
    carries `x-elvenspeak-ignored: model_id, seed, voice_settings.stability` so you
    learn it from the response instead of from the audio.
 3. **A request that cannot be served is refused.** An unknown `output_format` is
-   a `422` quoting the value you sent, not a quiet substitution.
+   a `422` quoting the value you sent, not a quiet substitution. So is `text`
+   that is empty, whitespace-only, or longer than **5000 characters** — the cap
+   exists because `ELVENSPEAK_API_KEY` is unset by default, and without a bound
+   one caller can hold a CPU core for as long as it likes.
 
 ### Endpoints
 

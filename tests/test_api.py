@@ -360,3 +360,81 @@ def test_unknown_voice_settings_are_reported_not_dropped(client):
     )
     assert response.status_code == 200
     assert "voice_settings.some_future_setting" in response.headers["x-elvenspeak-ignored"]
+
+
+@pytest.mark.parametrize("escaped,raw", [
+    ("%0D%0AX-Injected:%20evil", "\r"),
+    ("%0AX-Injected:%20evil", "\n"),
+    ("%00bar", "\x00"),
+])
+def test_control_characters_cannot_reach_a_header_value(client, escaped, raw):
+    """CR and LF are ASCII, so escaping only what fails an ASCII encode let them
+    through untouched — and a `voice_id` reaches the handler already
+    percent-decoded, so `%0D%0A` in the URL became a real CRLF in a header value.
+
+    Sent percent-encoded because that is the actual shape of the attack: an HTTP
+    client will not put a raw control character in a request line, and the router
+    decodes it before the handler ever sees it.
+
+    Asserted on the emitted value rather than on whether the server below would
+    have refused it — leaning on that unstated is the gap, not the mitigation.
+    """
+    response = client.post(
+        f"/v1/text-to-speech/voice{escaped}/stream", json={"text": "hello"}
+    )
+    assert response.status_code == 200
+    echoed = response.headers["x-elvenspeak-voice-requested"]
+    assert raw not in echoed
+    assert "X-Injected" not in response.headers
+
+
+def test_ascii_safe_escapes_everything_outside_the_printable_range():
+    """The rule stated directly, without a client in the way.
+
+    Pinned as a property rather than as three examples: the previous version
+    escaped on encodability, which silently exempted every ASCII control
+    character, and only a range check makes the docstring's claim true.
+    """
+    from elvenspeak.api import _ascii_safe
+
+    for codepoint in list(range(0x00, 0x20)) + [0x7F]:
+        assert chr(codepoint) not in _ascii_safe(chr(codepoint))
+    assert _ascii_safe("plain-voice_id.42") == "plain-voice_id.42"
+    assert "65e5" in _ascii_safe("日")
+
+
+def test_one_voice_serves_concurrent_requests():
+    """Synthesis runs on worker threads against a single cached PiperVoice.
+
+    Piper serializes espeak-ng behind its own module-level lock and ONNX Runtime
+    supports concurrent Run() on one session, so no lock is needed here — but
+    that is a claim about someone else's code, and this is what makes it checked
+    rather than asserted. A regression would show up as an exception or as empty
+    audio from one of the two calls.
+
+    Byte equality is not asserted: Piper samples from a noise distribution, so
+    the same sentence differs run to run. Length and non-emptiness are the
+    properties that separate corruption from that ordinary variance.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from elvenspeak import speech, voices
+
+    catalog = voices.install(
+        keys=(VOICE,), models_dir=MODELS, fallback=VOICE,
+        include_alignments=False, allow_download=False,
+    )
+    model = catalog.model(catalog.get(VOICE))
+    text = "The quick brown fox jumps over the lazy dog."
+
+    def synth():
+        return b"".join(speech.stream_pcm(model, text, speech.Prosody(speed=1.0)))
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = [f.result() for f in [pool.submit(synth) for _ in range(4)]]
+
+    assert all(len(pcm) > 0 for pcm in results)
+    # Same sentence, same voice: lengths vary with sampling but not by orders of
+    # magnitude. A corrupted or truncated concurrent run shows up here.
+    shortest, longest = min(map(len, results)), max(map(len, results))
+    assert longest < shortest * 2
