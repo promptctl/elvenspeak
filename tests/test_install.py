@@ -13,6 +13,7 @@ real sidecar exercises the whole function.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -138,3 +139,91 @@ def test_a_missing_alias_file_is_an_empty_table(tmp_path, monkeypatch):
     """Aliases are optional; their absence is not a failure to boot."""
     monkeypatch.setattr(voices_mod, "_ALIASES_FILE", tmp_path / "nothing-here.toml")
     assert load_aliases({KEY: object()}) == {}
+
+
+def test_a_minimal_config_derives_its_metadata_from_the_key(tmp_path):
+    """The fallback branch: what a sidecar omits is read back out of the key.
+
+    Every other fixture here writes a complete sidecar, so this derivation and
+    the three-part key check gating it were never exercised.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / f"{KEY}.onnx").write_bytes(b"not a real model")
+    (tmp_path / f"{KEY}.onnx.json").write_text(
+        json.dumps({"audio": {"sample_rate": 16000}}), encoding="utf-8"
+    )
+    catalog = install(
+        keys=(KEY,), models_dir=tmp_path, fallback=KEY,
+        include_alignments=False, allow_download=False,
+    )
+    voice = catalog.get(KEY)
+    assert (voice.language, voice.name, voice.quality) == ("en_US", "lessac", "medium")
+    assert voice.sample_rate == 16000
+
+
+def test_an_explicitly_null_section_reads_as_an_absent_one(tmp_path):
+    """`.get(key, {})` substitutes only for a missing key, not for a null value.
+
+    A hand-edited or half-written sidecar carrying `"language": null` made the
+    chained lookup raise AttributeError instead of falling back to the key —
+    which is what the surrounding expression already promises to do.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / f"{KEY}.onnx").write_bytes(b"not a real model")
+    (tmp_path / f"{KEY}.onnx.json").write_text(
+        json.dumps({"language": None, "audio": {"sample_rate": 22050}, "dataset": None}),
+        encoding="utf-8",
+    )
+    catalog = install(
+        keys=(KEY,), models_dir=tmp_path, fallback=KEY,
+        include_alignments=False, allow_download=False,
+    )
+    voice = catalog.get(KEY)
+    assert voice.language == "en_US"
+    assert voice.name == "lessac"
+
+
+def test_a_missing_voice_is_downloaded_when_downloading_is_allowed(tmp_path, monkeypatch):
+    """The branch that actually fetches, which nothing entered before."""
+    calls = []
+
+    def fake_download(key, directory):
+        calls.append((key, Path(directory)))
+        make_voice(Path(directory), key)
+
+    # Patched in sys.modules because `install` imports the symbol inside the
+    # function body, so it resolves the module at call time rather than at import.
+    monkeypatch.setitem(
+        sys.modules,
+        "piper.download_voices",
+        type("M", (), {"download_voice": staticmethod(fake_download)}),
+    )
+    catalog = install(
+        keys=(KEY,), models_dir=tmp_path, fallback=KEY,
+        include_alignments=False, allow_download=True,
+    )
+    assert calls == [(KEY, tmp_path)]
+    assert [v.key for v in catalog.installed] == [KEY]
+
+
+def test_a_download_that_produces_nothing_refuses_to_boot(tmp_path, monkeypatch):
+    """[LAW:no-silent-failure] Returning is not the same as having delivered.
+
+    `download_voice` reports success by returning, and a half-written pair is the
+    same realistic outcome the pre-check exists for. Without a check after the
+    call it surfaced as a bare FileNotFoundError from reading the sidecar, which
+    names the missing file but not the download that failed to produce it.
+    """
+    def writes_nothing(key, directory):
+        return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "piper.download_voices",
+        type("M", (), {"download_voice": staticmethod(writes_nothing)}),
+    )
+    with pytest.raises(FileNotFoundError, match="did not produce"):
+        install(
+            keys=(KEY,), models_dir=tmp_path, fallback=None,
+            include_alignments=False, allow_download=True,
+        )

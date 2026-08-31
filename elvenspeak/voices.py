@@ -172,7 +172,21 @@ class Catalog:
         # Taken as a value, not read from disk. Resolution is pure once it holds
         # its table, so a test can supply one and `load_aliases` can fail at
         # startup where a malformed file is an operator's problem to see.
-        self._aliases = {} if aliases is None else aliases
+        table = {} if aliases is None else aliases
+        # Held to the same standard as the fallback, and for the same reason:
+        # `resolve` indexes `_voices[aliased]` on its alias branch, so a target
+        # that is not installed is the same bare KeyError from inside a request.
+        # Refused rather than filtered — dropping uninstalled targets is
+        # `load_aliases`' job and it says how many it dropped, whereas a
+        # constructor that quietly discarded a caller's entry would report
+        # nothing at all.
+        dangling = sorted(set(table.values()) - set(voices))
+        if dangling:
+            raise ValueError(
+                f"alias targets are not among the installed voices: "
+                f"{', '.join(dangling)}"
+            )
+        self._aliases = table
         self._loaded: dict[str, "PiperVoice"] = {}
 
     @property
@@ -272,6 +286,17 @@ def install(
                 )
             _LOGGER.info("downloading voice %s into %s", key, models_dir)
             download_voice(key, models_dir)
+            # Checked again after the call, not only before it. `download_voice`
+            # reports success by returning, and a half-written pair is the same
+            # realistic outcome the check above exists for — an interrupted
+            # write, a full disk. Without this the gap surfaces as a bare
+            # FileNotFoundError from `_describe` opening the sidecar, which
+            # names the missing file but not the download that failed to make it.
+            if not (model_path.exists() and config_path.exists()):
+                raise FileNotFoundError(
+                    f"downloading voice {key!r} into {models_dir} did not produce "
+                    f"both {model_path.name} and {config_path.name}"
+                )
         voices[key] = _describe(key, model_path)
 
     # Read before the catalog is built, so `aliases.toml` is parsed during
@@ -332,14 +357,18 @@ def _describe(key: str, model_path: Path) -> Voice:
         config = json.load(handle)
 
     parts = key.split("-")
-    language = config.get("language", {}).get("code") or (
+    # `or {}` rather than a default argument: `.get(key, {})` substitutes only
+    # for an absent key, so an explicit null in a hand-edited or half-written
+    # sidecar returned None and the chained lookup raised AttributeError —
+    # instead of the key-derived fallback this expression already promises.
+    language = (config.get("language") or {}).get("code") or (
         parts[0] if len(parts) == _KEY_PARTS else key
     )
     return Voice(
         key=key,
         name=config.get("dataset") or (parts[1] if len(parts) == _KEY_PARTS else key),
         language=language,
-        quality=config.get("audio", {}).get("quality")
+        quality=(config.get("audio") or {}).get("quality")
         or (parts[2] if len(parts) == _KEY_PARTS else "medium"),
         model_path=model_path,
         sample_rate=int(config["audio"]["sample_rate"]),

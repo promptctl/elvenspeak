@@ -133,3 +133,24 @@ def test_a_fallback_that_is_not_installed_is_refused_at_construction():
             fallback="en_US-not-installed",
             include_alignments=False,
         )
+
+
+def test_an_alias_pointing_at_no_installed_voice_is_refused_at_construction():
+    """The alias half of the same invariant the fallback already holds.
+
+    `resolve()` indexes `_voices[aliased]` on its alias branch, so a dangling
+    target is the same bare KeyError from inside a request that checking the
+    fallback at construction was meant to make unreachable — the constructor was
+    only enforcing it for one of its two parameters.
+
+    Refused rather than filtered: dropping uninstalled targets is `load_aliases`'
+    job and it logs how many it dropped, whereas a constructor that silently
+    discarded a caller's entry would report nothing at all.
+    """
+    with pytest.raises(ValueError, match="alias targets are not among"):
+        Catalog(
+            voices={"en_US-lessac-medium": voice("en_US-lessac-medium")},
+            fallback="en_US-lessac-medium",
+            include_alignments=False,
+            aliases={"21m00Tcm4TlvDq8ikWAM": "en_US-not-installed"},
+        )
