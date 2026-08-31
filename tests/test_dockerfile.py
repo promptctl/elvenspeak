@@ -179,11 +179,31 @@ def test_the_baked_default_voice_is_the_projects_default_voice():
     --build-arg and another for `uv run main.py`, and the way that gets noticed is
     by listening to the wrong voice.
     """
-    from elvenspeak.settings import DEFAULT_VOICE
+    from elvenspeak.piper import DEFAULT_VOICE
 
     declared = re.search(r"^\s*ARG\s+PIPER_VOICES=(\S+)", DOCKERFILE.read_text(), re.MULTILINE)
     assert declared, "no ARG PIPER_VOICES found"
     assert declared.group(1) == DEFAULT_VOICE
+
+
+def test_the_baked_default_engine_is_the_registrys_default_engine():
+    """The same tie, for the setting that decides which engine gets baked.
+
+    Compared against the registry's *order* rather than the string "piper",
+    because the order is what actually decides the default — a maintainer who
+    puts a new engine first has moved the default everywhere except this ARG,
+    which keeps naming a real engine and so keeps building.
+
+    Worth more than the voice version it mirrors: the image bakes one engine's
+    assets and boots one engine, and this ARG is what makes those the same one.
+    """
+    from elvenspeak.engines import ENGINES
+
+    declared = re.search(
+        r"^\s*ARG\s+ELVENSPEAK_ENGINE=(\S+)", DOCKERFILE.read_text(), re.MULTILINE
+    )
+    assert declared, "no ARG ELVENSPEAK_ENGINE found"
+    assert declared.group(1) == next(iter(ENGINES))
 
 
 def test_substituted_env_values_are_quoted():
@@ -233,7 +253,7 @@ def test_the_voice_bake_runs_a_module_that_exists_and_refuses_a_bad_environment(
     entry point does.
 
     It stops there, before `bake` is called: what the bake guarantees, and that
-    it still reaches `piper.install`, is `tests/test_bake.py`'s subject, which
+    it still reaches `piper._install`, is `tests/test_bake.py`'s subject, which
     calls it directly — the whole reason this step was given a file.
     """
     import subprocess

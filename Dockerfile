@@ -37,8 +37,16 @@ RUN uv sync --frozen --no-dev
 # depend on Hugging Face being reachable to serve traffic it could otherwise
 # serve offline. PIPER_ALLOW_DOWNLOAD stays off for the same reason: a missing
 # model should fail the deploy, not quietly re-download.
+#
+# [LAW:one-source-of-truth] ELVENSPEAK_ENGINE is set once, above the bake and
+# inherited by the runtime, so the image boots the engine whose assets it baked.
+# Naming it only on `docker run` would leave the two halves free to differ — and
+# an engine asked to open assets nobody installed fails at boot, which is loud
+# but is a worse way to learn it than not being able to say it.
+ARG ELVENSPEAK_ENGINE=piper
 ARG PIPER_VOICES=en_US-lessac-medium
-ENV PIPER_MODELS_DIR=/app/models \
+ENV ELVENSPEAK_ENGINE="${ELVENSPEAK_ENGINE}" \
+    PIPER_MODELS_DIR=/app/models \
     PIPER_VOICES="${PIPER_VOICES}" \
     PIPER_ALLOW_DOWNLOAD=0 \
     ELVENSPEAK_TIMESTAMPS=1 \

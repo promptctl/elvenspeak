@@ -16,10 +16,8 @@ anticipated here is described accurately — and, below, asked accurately too.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
-from conftest import DECLARED_VOICES, DeclaredEngine
+from conftest import DECLARED_VOICES, DeclaredEngine, DeclaredPrepared
 from fastapi.testclient import TestClient
 
 from elvenspeak import api
@@ -29,16 +27,13 @@ from elvenspeak.settings import Settings
 VOICE = DECLARED_VOICES[0]
 
 _SETTINGS = Settings(
-    voices=(VOICE.id,),
+    # The engine the *deployment* would have built, which is not the engine each
+    # test below hands to `create_app`. It is here to be ignored: what a server
+    # says it can do must come from the engine it was given, and nothing in this
+    # file would answer differently if this field were removed.
+    engine=DeclaredPrepared(),
     fallback=VOICE.id,
-    models_dir=Path("/nonexistent"),
-    allow_download=False,
     api_key=None,
-    # Deliberately the opposite of what the engines here declare. The setting is
-    # what an operator asked of Piper; it must reach no decision this file makes,
-    # and a server that still consulted it would answer every question here
-    # backwards.
-    timestamps=True,
     host="127.0.0.1",
     port=0,
 )

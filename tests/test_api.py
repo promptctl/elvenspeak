@@ -14,10 +14,10 @@ import json
 import pytest
 from conftest import INSTALLED_VOICE as VOICE
 from conftest import MODELS_DIR as MODELS
-from conftest import needs_installed_model
+from conftest import needs_installed_model, piper_prepared
 from fastapi.testclient import TestClient
 
-from elvenspeak import create_app, piper
+from elvenspeak import create_app
 from elvenspeak.settings import Settings
 
 pytestmark = needs_installed_model
@@ -27,15 +27,16 @@ pytestmark = needs_installed_model
 FOREIGN_ID = "21m00Tcm4TlvDq8ikWAM"
 
 
-def settings_for(**overrides) -> Settings:
+def settings_for(timings: bool = True, **overrides) -> Settings:
+    """A deployment's settings. `timings` is the engine's, which is why it is not
+    an override: whether durations can be reported is fixed when the model is
+    opened, so it has to be said to the engine and not to the server.
+    """
     return Settings(
         **{
-            "voices": (VOICE,),
+            "engine": piper_prepared(MODELS, voices=(VOICE,), timings=timings),
             "fallback": VOICE,
-            "models_dir": MODELS,
-            "allow_download": False,
             "api_key": None,
-            "timestamps": True,
             "host": "127.0.0.1",
             "port": 0,
             **overrides,
@@ -46,21 +47,11 @@ def settings_for(**overrides) -> Settings:
 def served(settings: Settings) -> TestClient:
     """The app as `main.build()` assembles it: a real engine behind the surface.
 
-    The engine is chosen here rather than by `create_app`, which is the property
+    The engine is opened here rather than by `create_app`, which is the property
     under test as much as a convenience — the API surface is handed one and never
-    names it.
+    names it, and never learns how it was configured either.
     """
-    return TestClient(
-        create_app(
-            settings,
-            piper.load(
-                keys=settings.voices,
-                models_dir=settings.models_dir,
-                allow_download=settings.allow_download,
-                timings=settings.timestamps,
-            ),
-        )
-    )
+    return TestClient(create_app(settings, settings.engine.open()))
 
 
 @pytest.fixture(scope="module")
@@ -275,7 +266,7 @@ def test_streamed_timestamps_form_one_continuous_timeline(client):
 
 
 def test_api_key_is_enforced_when_configured():
-    with served(settings_for(api_key="s3cret", timestamps=False)) as guarded:
+    with served(settings_for(timings=False, api_key="s3cret")) as guarded:
         payload = {"text": "hello"}
         assert guarded.post(f"/v1/text-to-speech/{VOICE}/stream", json=payload).status_code == 401
         allowed = guarded.post(
@@ -290,7 +281,7 @@ def test_api_key_is_enforced_when_configured():
 
 def test_timestamps_disabled_refuses_rather_than_inventing(client):
     """[LAW:no-silent-failure] 501 beats plausible numbers derived from nothing."""
-    with served(settings_for(timestamps=False)) as plain:
+    with served(settings_for(timings=False)) as plain:
         response = plain.post(
             f"/v1/text-to-speech/{VOICE}/with-timestamps", json={"text": "hello"}
         )
@@ -421,9 +412,7 @@ def test_one_voice_serves_concurrent_requests():
 
     from elvenspeak.engine import Prosody
 
-    engine = piper.load(
-        keys=(VOICE,), models_dir=MODELS, allow_download=False, timings=False
-    )
+    engine = piper_prepared(MODELS, voices=(VOICE,)).open()
     voice = engine.voices()[0]
     text = "The quick brown fox jumps over the lazy dog."
 
