@@ -12,9 +12,9 @@ this file.
 
 # What this engine is for
 
-It is roughly twenty times slower than Piper — measured at RTF ~0.77 against
-Piper's ~0.03 — and sounds considerably better. It is a deployment's choice, not
-one to inherit, which is why [`elvenspeak.engines`] lists it second.
+It runs at an RTF of ~0.77 against Piper's ~0.03, and sounds considerably
+better. It is a deployment's choice, not one to inherit, which is why
+[`elvenspeak.engines`] lists it second.
 
 It also has a different voice namespace: `af_heart`, `am_michael`, `bf_emma`,
 not `<lang>-<name>-<quality>`. Nothing above the seam had to learn that, which is
@@ -64,10 +64,10 @@ if TYPE_CHECKING:  # pragma: no cover - import cost is real, the symbol is not
 
 _LOGGER = logging.getLogger("elvenspeak.kokoro")
 
-#: Where the published assets come from. `model-files-v1.1` rather than `v1.0`
-#: because its exports carry the `duration` output, so a default deployment can
-#: answer the timestamp endpoints — see this module's header. The older release
-#: remains a working choice; it simply declares one capability fewer.
+#: Where the published assets come from — pinned, not configurable;
+#: `KOKORO_MODEL` names an export within it. `model-files-v1.1` because its
+#: exports carry the `duration` output, so a default deployment can answer the
+#: timestamp endpoints — see this module's header.
 _RELEASE = (
     "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1"
 )
@@ -88,12 +88,6 @@ DEFAULT_MODEL = "kokoro-v1.0.int8.onnx"
 #: proves every voice it offers at boot without paying for fifty it will not use;
 #: any of the 54 can be named instead.
 DEFAULT_VOICES = ("af_heart", "am_michael", "bf_emma", "bm_george")
-
-#: Sample rate of every Kokoro export. Fixed for the model rather than per voice,
-#: but still returned with the audio rather than stored on a [`engine.Voice`],
-#: because that is where the interface puts it and a second copy could only
-#: disagree.
-_SAMPLE_RATE = 24000
 
 #: A voice id's first character names the language it was trained to speak, and
 #: the phonemizer has to be told which one or an `ef_dora` reads Spanish text
@@ -146,10 +140,12 @@ class KokoroEngine:
         model: "Kokoro",
         installed: dict[str, engine.Voice],
         capabilities: frozenset[engine.Capability],
+        sample_rate: int,
     ) -> None:
         self._model = model
         self._installed = installed
         self._capabilities = capabilities
+        self._sample_rate = sample_rate
 
     def voices(self) -> tuple[engine.Voice, ...]:
         """Every configured voice, in the order the operator named them.
@@ -178,7 +174,7 @@ class KokoroEngine:
         # samples are pulled and a caller that goes away has cost nothing.
         spoken = self._installed[voice.id]
         return engine.Speech(
-            sample_rate=_SAMPLE_RATE,
+            sample_rate=self._sample_rate,
             audio=_stream(self._model, spoken, text, prosody),
         )
 
@@ -195,8 +191,8 @@ class KokoroEngine:
         pcm = _pcm(audio)
         return engine.TimedSpeech(
             pcm=pcm,
-            sample_rate=_SAMPLE_RATE,
-            timings=_stretches(timings, len(pcm) // 2),
+            sample_rate=self._sample_rate,
+            timings=_stretches(timings, len(pcm) // 2, self._sample_rate),
             # An export without a `duration` output returns no timings at all,
             # so this says exactly what happened rather than being read back off
             # the capability that gated the call. The server does not ask an
@@ -243,14 +239,14 @@ class _Prepared:
         The session is discarded. What is wanted from it is that building it
         succeeded.
         """
-        _, installed = _open(
+        _, installed, _ = _open(
             self.keys, self.models_dir, self.model, allow_download=True
         )
         return tuple(installed.values())
 
     def open(self) -> KokoroEngine:
         """Opens the export and returns the engine that speaks every named voice."""
-        model, installed = _open(
+        model, installed, sample_rate = _open(
             self.keys, self.models_dir, self.model, self.allow_download
         )
         # Decided here, beside the session that was opened, rather than stored
@@ -262,6 +258,7 @@ class _Prepared:
             installed,
             capabilities=_INHERENT
             | ({engine.Capability.TIMESTAMPS} if model.has_timings else set()),
+            sample_rate=sample_rate,
         )
 
 
@@ -382,15 +379,24 @@ def _install(
 
 def _open(
     keys: tuple[str, ...], models_dir: Path, model: str, allow_download: bool
-) -> tuple["Kokoro", dict[str, engine.Voice]]:
-    """The opened session and the voices it will speak in."""
-    from kokoro_onnx import Kokoro
+) -> tuple["Kokoro", dict[str, engine.Voice], int]:
+    """The opened session, the voices it will speak in, and the rate it speaks at.
+
+    The rate is taken from `kokoro_onnx` rather than restated here. It is the
+    library's own constant — the same value it returns beside the samples from
+    every `create` — and a copy of it in this module would be free to disagree
+    with the audio it is labelling, which is unfixable from the outside: wrong
+    pitch and wrong duration, no error anywhere. Read here rather than at import
+    because this is where the library is already being paid for.
+    """
+    from kokoro_onnx import SAMPLE_RATE, Kokoro
 
     installed = _install(keys, models_dir, model, allow_download)
     _LOGGER.info("opening kokoro export %s", model)
     return (
         Kokoro(str(models_dir / model), str(models_dir / _VOICES_FILE)),
         installed,
+        SAMPLE_RATE,
     )
 
 
@@ -513,7 +519,7 @@ def _pcm(audio) -> bytes:
     return (numpy.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
 
 
-def _stretches(timings, total: int) -> tuple[engine.Timing, ...]:
+def _stretches(timings, total: int, rate: int) -> tuple[engine.Timing, ...]:
     """Kokoro's per-phoneme spans as stretches accounting for every sample.
 
     [`engine.TimedSpeech`] requires the durations to sum to the audio's sample
@@ -534,8 +540,8 @@ def _stretches(timings, total: int) -> tuple[engine.Timing, ...]:
     cursor = 0
     for timing in timings:
         for boundary, separates in (
-            (round(timing.start * _SAMPLE_RATE), True),
-            (round(timing.end * _SAMPLE_RATE), _separates_words(timing.phoneme)),
+            (round(timing.start * rate), True),
+            (round(timing.end * rate), _separates_words(timing.phoneme)),
         ):
             edge = min(max(boundary, cursor), total)
             if edge > cursor:
