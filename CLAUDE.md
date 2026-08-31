@@ -1,3 +1,17 @@
+## Never build an image from a working tree
+
+This service is being deployed to the homelab, so this rule applies here from the start.
+
+Build from a commit, in CI, on a machine that fetched that commit itself. Anything else is banned and gets deleted on sight — no discussion, no exceptions.
+
+Banned: copying, tarring, rsyncing or scp-ing this source tree onto a build host; building an image from anything the builder did not pull from git itself; any build that needs a laptop, a checkout, or an SSH session to run; build scratch directories left on the VMs.
+
+Do not copy `scripts/build-image.sh` from the openconv repo. It is the pattern this rule exists to kill: it tars the working tree, untracked files included, and ships it over SSH to a build node, producing images whose source nobody can identify.
+
+Why: an image built from a working tree has no known source. It contains whatever was on someone's disk, records no commit, and cannot be reproduced, bisected, or audited.
+
+Instead: build in CI from a commit, tag `YYYY.MM.DD.N`, push to the homelab registry, then file that tag into the homelab's `service-versions.auto.tfvars.json` so Atlantis deploys it.
+
 <!-- BEGIN LIT INTEGRATION -->
 ## lit Agent-Native Workflow
 
