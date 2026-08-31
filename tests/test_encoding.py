@@ -197,7 +197,25 @@ def _modules_reaching_an_engine(root: str) -> set[str]:
 
 
 @pytest.mark.parametrize(
-    "root", ["api", "voices", "alignment", "encoding", "formats", "text", "engine"]
+    "root",
+    [
+        "api",
+        "voices",
+        "alignment",
+        "encoding",
+        "formats",
+        "text",
+        "engine",
+        # Added when engine selection became a value. `settings` is the one an
+        # obvious design gets wrong: putting the name-to-engine lookup behind
+        # `from_env` would make `api` — which imports this module for its API key
+        # — reach every engine's third-party library, and the reusable half of
+        # this package would stop being importable without them. `provisioning`
+        # is the seam that selection crosses and must stay as engine-free as
+        # `engine` itself.
+        "settings",
+        "provisioning",
+    ],
 )
 def test_the_server_cannot_reach_a_concrete_engine(root: str):
     """The seam, asserted rather than described.

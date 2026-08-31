@@ -17,10 +17,12 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import make_voice
+from conftest import make_voice, piper_prepared
 
 from elvenspeak.bake import bake
+from elvenspeak.engines import ENGINES
 from elvenspeak.settings import Settings
+from elvenspeak.voices import Substitution
 
 KEY = "en_US-lessac-medium"
 
@@ -29,15 +31,13 @@ def settings_for(models_dir: Path, voices: tuple[str, ...] = (KEY,)) -> Settings
     """A Settings the bake accepts, built directly rather than through the env.
 
     `allow_download` is False here on purpose: it is the value the image's ENV
-    carries, and every test below depends on the bake not reading it.
+    carries, and every test below depends on the bake reaching `acquire`, which
+    does not consult it.
     """
     return Settings(
-        voices=voices,
-        fallback=voices[0],
-        models_dir=models_dir,
-        allow_download=False,
+        engine=piper_prepared(models_dir, voices=voices, allow_download=False),
+        fallback=Substitution.FIRST_OFFERED,
         api_key=None,
-        timestamps=False,
         host="0.0.0.0",
         port=5001,
     )
@@ -87,13 +87,15 @@ def test_a_corrupt_sidecar_fails_the_bake(tmp_path, sidecar, reason):
 def test_a_missing_voice_is_fetched_even_though_the_runtime_may_not_fetch(
     tmp_path, monkeypatch
 ):
-    """The one setting the bake overrides, asserted by what it does.
+    """That this step reaches `acquire`, asserted by what it does.
 
     The image turns `PIPER_ALLOW_DOWNLOAD` off so a missing model at boot fails
     the deploy instead of silently re-downloading — which leaves the build as
-    the only moment a fetch is correct. Read from the settings instead, this
-    step would refuse to bake anything into an image configured the way the
-    image is configured.
+    the only moment a fetch is correct. This step used to say so with a constant
+    of its own overriding the setting; it says so now by calling the method that
+    fetches by definition, and a later edit that reached for `open` here instead
+    would refuse to bake anything into an image configured the way the image is
+    configured.
 
     The download is stubbed on the real `piper.download_voices` rather than by
     replacing `sys.modules["piper"]`: a stub package has no `__path__`, so
@@ -133,7 +135,7 @@ def test_the_baked_voices_are_the_ones_the_environment_names(tmp_path, clean_env
     clean_env.setenv("PIPER_VOICES", "en_US-lessac-medium, en_GB-alba-medium")
     clean_env.setenv("PIPER_MODELS_DIR", str(tmp_path))
 
-    baked = bake(Settings.from_env())
+    baked = bake(Settings.from_env(ENGINES))
 
     assert [voice.id for voice in baked] == [
         "en_US-lessac-medium",

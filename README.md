@@ -112,16 +112,24 @@ The configured voices download into `models/` on first start. After that
 nothing here touches the network.
 
 ```
-PIPER_VOICES=en_US-lessac-medium   # comma-separated; all installed at startup
-PIPER_FALLBACK_VOICE=…             # default: the first of PIPER_VOICES.
+# The server's own, true whichever engine runs:
+ELVENSPEAK_ENGINE=piper            # the only one so far; any other name refuses to start
+ELVENSPEAK_FALLBACK_VOICE=…        # default: the first voice the engine offers.
                                    # Empty string turns substitution off (404s).
-PIPER_MODELS_DIR=./models
-PIPER_ALLOW_DOWNLOAD=1             # 0 to require models be present already
-ELVENSPEAK_API_KEY=                     # unset accepts every request
-ELVENSPEAK_TIMESTAMPS=1                 # 0 saves memory; timestamp endpoints 501
+ELVENSPEAK_API_KEY=                # unset accepts every request
 PORT=5001
 HOST=0.0.0.0
+
+# The Piper engine's own, read only when it is the engine:
+PIPER_VOICES=en_US-lessac-medium   # comma-separated; all installed at startup
+PIPER_MODELS_DIR=./models
+PIPER_ALLOW_DOWNLOAD=1             # 0 to require models be present already
+ELVENSPEAK_TIMESTAMPS=1            # 0 saves memory; timestamp endpoints 501
 ```
+
+`ELVENSPEAK_TIMESTAMPS` is in the second group despite its name — the Piper
+engine is what reads it, and another engine would answer the timestamp
+endpoints on its own terms.
 
 Voices come from Piper's catalog of 175 — `en_US-amy-medium`,
 `en_GB-alba-medium`, `de_DE-thorsten-medium` and so on. Naming several installs

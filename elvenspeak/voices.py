@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import logging
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from . import engine
@@ -40,6 +42,51 @@ from . import engine
 _LOGGER = logging.getLogger("elvenspeak.voices")
 
 _ALIASES_FILE = Path(__file__).parent / "aliases.toml"
+
+
+class Substitution(Enum):
+    """What answers for an unknown voice id when the operator named no voice.
+
+    [LAW:types-are-the-program] Two answers rather than one absent value. The
+    setting has always had three states — name a voice, take the obvious one, or
+    switch substitution off — and while the voice list lived beside it in
+    [`Settings`], "the obvious one" could be resolved during parsing and the
+    third state collapsed into `None`. The list belongs to the engine now, so the
+    choice outlives the parse and has to survive in the type; spelled as one
+    absent value it would be two meanings sharing a representation, and the
+    operator who cleared the variable to disable substitution would silently get
+    a voice instead.
+    """
+
+    #: Whichever voice the engine offers first. The compatible default: a server
+    #: that 404s the ElevenLabs ids its clients hold is a drop-in for nothing.
+    FIRST_OFFERED = "the first voice the engine offers"
+    #: Nothing — an unrecognised id is a 404. Set by giving the variable an empty
+    #: value, and correct only for a deployment whose callers know its ids.
+    OFF = "no substitution"
+
+
+#: A voice id, or how to pick one. What [`Settings.fallback`] holds.
+Fallback = str | Substitution
+
+
+def _chosen(fallback: Fallback, voices: Mapping[str, engine.Voice]) -> str | None:
+    """The id that answers for unknown ones, given what the engine actually offers.
+
+    [LAW:dataflow-not-control-flow] The one branch here is on the domain's own
+    enum, which is what that enum is for; the result is a single value, so
+    nothing downstream re-asks how it was chosen.
+
+    An engine offering no voices leaves nothing to substitute with, and the
+    catalog then refuses every id by name — the same answer it gives for
+    [`Substitution.OFF`], because it is the same situation and not a failure this
+    function could report more usefully.
+    """
+    if fallback is Substitution.OFF:
+        return None
+    if fallback is Substitution.FIRST_OFFERED:
+        return next(iter(voices), None)
+    return fallback
 
 
 @dataclass(frozen=True)
@@ -88,7 +135,7 @@ class Catalog:
     ) -> None:
         # [LAW:parse-dont-validate] Checked here, where the catalog is made,
         # rather than by whichever caller remembers to. `resolve()` indexes
-        # `_voices[_fallback]` on its last branch, so a fallback naming no
+        # `_voices[fallback]` on its last branch, so a fallback naming no
         # available voice turns every unrecognised id — the case the fallback
         # exists for — into a bare KeyError from inside synthesis. Enforcing it
         # at construction means no Catalog that exists can reach that state.
@@ -98,7 +145,11 @@ class Catalog:
                 f"{', '.join(sorted(voices)) or '(none)'}"
             )
         self._voices = voices
-        self._fallback = fallback
+        #: The id that actually answers for unknown ones, or `None` for none.
+        #: Read rather than [`Settings.fallback`] by anything reporting to an
+        #: operator: the setting may only say "whichever comes first", and this
+        #: is the one place that knows which one that turned out to be.
+        self.fallback = fallback
         # Taken as a value, not read from disk. Resolution is pure once it holds
         # its table, so a test can supply one and `load_aliases` can fail at
         # startup where a malformed file is an operator's problem to see.
@@ -119,7 +170,7 @@ class Catalog:
         self._aliases = table
 
     @staticmethod
-    def for_engine(source: engine.Engine, fallback: str | None) -> "Catalog":
+    def for_engine(source: engine.Engine, fallback: Fallback) -> "Catalog":
         """The catalog over everything `source` can speak now.
 
         [LAW:effects-at-boundaries] Where `aliases.toml` is read, which is why
@@ -127,10 +178,18 @@ class Catalog:
         malformed edit to an operator-editable file is a refusal to boot rather
         than an uncaught TOMLDecodeError on whichever synthesis call first needed
         an alias — invisible to a healthcheck that never touches resolution.
+
+        Also the one place [`Substitution.FIRST_OFFERED`] can be answered, since
+        this is where a real voice list first exists. The constructor still takes
+        a plain id and still refuses one it does not have, so the membership rule
+        keeps its single enforcer ([LAW:single-enforcer]) and gains no second
+        spelling for the resolved case.
         """
         voices = {voice.id: voice for voice in source.voices()}
         return Catalog(
-            voices=voices, fallback=fallback, aliases=load_aliases(voices)
+            voices=voices,
+            fallback=_chosen(fallback, voices),
+            aliases=load_aliases(voices),
         )
 
     @property
@@ -167,11 +226,11 @@ class Catalog:
                 voice=self._voices[aliased], requested=requested, substituted=True
             )
 
-        if self._fallback is None:
+        if self.fallback is None:
             raise VoiceNotInstalled(requested, tuple(sorted(self._voices)))
 
         return Resolution(
-            voice=self._voices[self._fallback], requested=requested, substituted=True
+            voice=self._voices[self.fallback], requested=requested, substituted=True
         )
 
 

@@ -179,7 +179,7 @@ def test_the_baked_default_voice_is_the_projects_default_voice():
     --build-arg and another for `uv run main.py`, and the way that gets noticed is
     by listening to the wrong voice.
     """
-    from elvenspeak.settings import DEFAULT_VOICE
+    from elvenspeak.piper import DEFAULT_VOICE
 
     declared = re.search(r"^\s*ARG\s+PIPER_VOICES=(\S+)", DOCKERFILE.read_text(), re.MULTILINE)
     assert declared, "no ARG PIPER_VOICES found"

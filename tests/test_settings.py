@@ -1,157 +1,133 @@
 """Configuration parsing, and the promise that it reports everything at once.
 
-`Settings.from_env` takes a `dict[str, str]` and returns either a `Settings` or a
-`ConfigError` — pure, and testable with no filesystem, no model and no server.
+`Settings.from_env` takes a registry and a `dict[str, str]` and returns either a
+`Settings` or a `ConfigError` — pure, and testable with no filesystem, no model
+and no server. That stays true with a real engine in the registry, because
+`piper.configure` is a parse and does no I/O either.
+
+What this file no longer covers, and where it went: `PIPER_*` belongs to the
+engine that reads it and is `tests/test_piper.py`'s subject, and whether a
+fallback names an installed voice is checked against the voices an engine really
+loaded, in `tests/test_voices.py`. Neither moved because it was awkward here —
+each had a second home that already knew more than this module could.
 """
 
 from __future__ import annotations
 
 import pytest
+from conftest import DeclaredPrepared
 
-from elvenspeak.settings import DEFAULT_VOICE, ConfigError, Settings
+from elvenspeak import piper
+from elvenspeak.engines import ENGINES
+from elvenspeak.piper import DEFAULT_VOICE
+from elvenspeak.provisioning import ConfigError, Registry
+from elvenspeak.settings import Settings
+from elvenspeak.voices import Substitution
 
 
 def env(**overrides) -> dict[str, str]:
     """A minimal valid environment, with the test's changes applied."""
-    base = {"PIPER_VOICES": "en_US-lessac-medium"}
+    base = {"PIPER_VOICES": DEFAULT_VOICE}
     base.update({k: v for k, v in overrides.items() if v is not None})
     return base
 
 
+def from_env(**overrides) -> Settings:
+    return Settings.from_env(ENGINES, env(**overrides))
+
+
 def test_defaults_are_usable_with_one_voice_named():
-    settings = Settings.from_env(env())
-    assert settings.voices == ("en_US-lessac-medium",)
-    assert settings.fallback == "en_US-lessac-medium"
+    settings = from_env()
+    assert settings.fallback is Substitution.FIRST_OFFERED
     assert settings.port == 5001
     assert settings.api_key is None
 
 
-def test_voices_are_split_and_stripped():
-    settings = Settings.from_env(env(PIPER_VOICES="a-b-c , d-e-f,  g-h-i "))
-    assert settings.voices == ("a-b-c", "d-e-f", "g-h-i")
+def test_the_unnamed_engine_is_the_registry_s_first_entry():
+    """[LAW:one-source-of-truth] The default is a position, not a second literal.
+
+    Two entries, because a one-engine registry cannot tell "the first" from "the
+    only" — and the property that matters is that no name is spelled anywhere
+    outside the registry that could come to name an engine that is not in it.
+    """
+    registry: Registry = {
+        "first": lambda _: DeclaredPrepared(),
+        "second": lambda _: pytest.fail("the second entry is not the default"),
+    }
+    assert isinstance(Settings.from_env(registry, {}).engine, DeclaredPrepared)
 
 
-def test_fallback_is_stripped_before_the_membership_check():
-    """A trailing space from a .env file used to report a present voice missing."""
-    settings = Settings.from_env(
-        env(PIPER_VOICES="en_US-lessac-medium", PIPER_FALLBACK_VOICE="en_US-lessac-medium ")
-    )
-    assert settings.fallback == "en_US-lessac-medium"
-
-
-def test_empty_fallback_disables_substitution():
-    assert Settings.from_env(env(PIPER_FALLBACK_VOICE="")).fallback is None
-
-
-def test_fallback_outside_the_voice_list_is_refused():
+def test_an_unknown_engine_is_refused_and_says_what_there_is():
     with pytest.raises(ConfigError) as raised:
-        Settings.from_env(env(PIPER_FALLBACK_VOICE="en_GB-alba-medium"))
-    assert "PIPER_FALLBACK_VOICE" in str(raised.value)
+        from_env(ELVENSPEAK_ENGINE="kokoro")
+    assert "kokoro" in str(raised.value)
+    assert "piper" in str(raised.value)
 
 
-def test_empty_voice_list_is_refused():
-    with pytest.raises(ConfigError):
-        Settings.from_env({"PIPER_VOICES": "  ,  "})
+def test_an_engine_s_problems_join_the_server_s_in_one_list():
+    """The splice, which is the whole reason engine settings could move away.
+
+    Separating what the server reads from what the engine reads was only safe if
+    it did not separate the report: an operator with a bad port and a bad Piper
+    flag must be told both on the first run, exactly as when one module read
+    both. This is the test that would go red if `from_env` ever raised the
+    server's problems before asking the engine for its own.
+    """
+    with pytest.raises(ConfigError) as raised:
+        from_env(PORT="99999", PIPER_ALLOW_DOWNLOAD="tru")
+    problems = raised.value.problems
+    assert len(problems) == 2
+    joined = " ".join(problems)
+    assert "PORT" in joined
+    assert "PIPER_ALLOW_DOWNLOAD" in joined
+
+
+def test_an_unknown_engine_reports_only_that():
+    """No configure to call means no configuration to complain about.
+
+    Reporting `PIPER_ALLOW_DOWNLOAD` here would mean guessing that the engine the
+    operator misnamed was the one whose variables to check, which is a fact this
+    module does not have ([LAW:no-silent-failure] — better one true problem than
+    a second invented one).
+    """
+    with pytest.raises(ConfigError) as raised:
+        from_env(ELVENSPEAK_ENGINE="kokoro", PIPER_ALLOW_DOWNLOAD="tru")
+    assert raised.value.problems == [
+        "ELVENSPEAK_ENGINE='kokoro' is not one of: piper"
+    ]
+
+
+def test_an_unset_fallback_defers_the_choice_to_the_voices_that_load():
+    """[LAW:types-are-the-program] Unset and switched-off stop sharing a value.
+
+    While the voice list lived here, "the obvious voice" was resolved during
+    parsing and only two states survived. The list belongs to the engine now, so
+    an unset variable has to travel as its own answer — and if it were spelled
+    `None` like the disabled case, an operator who cleared the variable to turn
+    substitution off would silently get a voice instead.
+    """
+    assert from_env().fallback is Substitution.FIRST_OFFERED
+    assert from_env(ELVENSPEAK_FALLBACK_VOICE="").fallback is Substitution.OFF
+    assert from_env(ELVENSPEAK_FALLBACK_VOICE="  ").fallback is Substitution.OFF
+
+
+def test_a_named_fallback_is_stripped():
+    """A trailing space from a .env file used to report a present voice missing."""
+    assert from_env(ELVENSPEAK_FALLBACK_VOICE=" a-b-c ").fallback == "a-b-c"
 
 
 @pytest.mark.parametrize("port", ["0", "-1", "65536", "99999"])
 def test_out_of_range_port_is_refused(port):
     """Parsing is not validating — these are all integers and none is a port."""
     with pytest.raises(ConfigError) as raised:
-        Settings.from_env(env(PORT=port))
+        from_env(PORT=port)
     assert "PORT" in str(raised.value)
 
 
 def test_non_numeric_port_is_refused():
     with pytest.raises(ConfigError) as raised:
-        Settings.from_env(env(PORT="eighty"))
+        from_env(PORT="eighty")
     assert "not a number" in str(raised.value)
-
-
-@pytest.mark.parametrize("value,expected", [
-    ("1", True), ("true", True), ("YES", True), ("on", True),
-    ("0", False), ("false", False), ("No", False), ("off", False),
-])
-def test_flags_accept_both_spellings(value, expected):
-    assert Settings.from_env(env(PIPER_ALLOW_DOWNLOAD=value)).allow_download is expected
-
-
-@pytest.mark.parametrize("typo", ["tru", "enabled", "y", ""])
-def test_a_boolean_typo_is_a_config_error_not_a_silent_false(typo):
-    """[LAW:no-silent-failure] `PIPER_ALLOW_DOWNLOAD=tru` used to quietly mean off.
-
-    In the one module whose stated job is catching configuration mistakes at
-    startup, a typo in a boolean is exactly as much a mistake as a typo in a port.
-    """
-    with pytest.raises(ConfigError) as raised:
-        Settings.from_env(env(PIPER_ALLOW_DOWNLOAD=typo))
-    assert "PIPER_ALLOW_DOWNLOAD" in str(raised.value)
-
-
-def test_every_problem_is_reported_together():
-    """The module's whole reason for existing: one restart, the whole list.
-
-    An operator who fixes one problem per restart is being served worse than one
-    who is handed all of them at once, which is why these accumulate rather than
-    raising on the first.
-    """
-    with pytest.raises(ConfigError) as raised:
-        Settings.from_env({
-            "PIPER_VOICES": "en_US-lessac-medium",
-            "PIPER_FALLBACK_VOICE": "not-installed",
-            "PORT": "99999",
-            "ELVENSPEAK_TIMESTAMPS": "maybe",
-        })
-    problems = raised.value.problems
-    assert len(problems) == 3
-    joined = " ".join(problems)
-    assert "PIPER_FALLBACK_VOICE" in joined
-    assert "PORT" in joined
-    assert "ELVENSPEAK_TIMESTAMPS" in joined
-
-
-def test_an_empty_voice_list_does_not_hide_a_bad_fallback():
-    """Both problems, from one pass, when the two coincide.
-
-    The membership check used to be guarded by `voices and`, so an empty
-    PIPER_VOICES suppressed it — the operator fixed the empty list, restarted,
-    and only then learned the fallback was wrong too. That is precisely the
-    one-problem-per-restart loop this module exists to prevent, and it appeared
-    only in the case where the operator was already misconfigured twice.
-    """
-    with pytest.raises(ConfigError) as raised:
-        Settings.from_env({
-            "PIPER_VOICES": "  ,  ",
-            "PIPER_FALLBACK_VOICE": "en_US-lessac-medium",
-        })
-    problems = raised.value.problems
-    assert len(problems) == 2
-    joined = " ".join(problems)
-    assert "PIPER_VOICES is empty" in joined
-    assert "PIPER_FALLBACK_VOICE" in joined
-
-
-def test_an_empty_models_dir_is_refused_not_taken_as_the_working_directory():
-    """The one setting here that was not validated.
-
-    `PIPER_MODELS_DIR=` is a present key, so `get` returns "" rather than the
-    default, `Path("")` is `Path(".")`, and `mkdir` on it succeeds. Nothing
-    fails — the server just reads and writes 60 MB models into whatever
-    directory it was launched from, which is the silent wrong thing rather than
-    the clean refusal this module produces for every other misconfiguration.
-    """
-    with pytest.raises(ConfigError) as raised:
-        Settings.from_env({
-            "PIPER_VOICES": "en_US-lessac-medium",
-            "PIPER_MODELS_DIR": "   ",
-        })
-    assert any("PIPER_MODELS_DIR" in problem for problem in raised.value.problems)
-
-
-def test_an_absent_models_dir_still_gets_the_default():
-    """Unset is not the same as set-to-empty, and only one of them is a problem."""
-    settings = Settings.from_env({"PIPER_VOICES": "en_US-lessac-medium"})
-    assert settings.models_dir.name == "models"
 
 
 def test_a_bad_environment_exits_two_naming_every_problem(monkeypatch, capsys):
@@ -163,29 +139,33 @@ def test_a_bad_environment_exits_two_naming_every_problem(monkeypatch, capsys):
     stderr, not just that the exit code is right.
 
     Reads the real environment, unlike everything above it, because
-    `from_env_or_exit` is what the entry points call with no argument — it is
+    `from_env_or_exit` is what the entry points call with only a registry — it is
     the process-facing half of this module, and stubbing the environment out of
     it would leave the half that actually runs untested.
     """
-    monkeypatch.setenv("PIPER_VOICES", "en_US-lessac-medium")
-    monkeypatch.setenv("PIPER_FALLBACK_VOICE", "not-installed")
     monkeypatch.setenv("PORT", "99999")
     monkeypatch.setenv("ELVENSPEAK_TIMESTAMPS", "maybe")
 
     with pytest.raises(SystemExit) as raised:
-        Settings.from_env_or_exit()
+        Settings.from_env_or_exit(ENGINES)
 
     assert raised.value.code == 2
     stderr = capsys.readouterr().err
-    for expected in ("PIPER_FALLBACK_VOICE", "PORT", "ELVENSPEAK_TIMESTAMPS"):
+    for expected in ("PORT", "ELVENSPEAK_TIMESTAMPS"):
         assert expected in stderr
 
 
 def test_a_good_environment_comes_back_as_settings(clean_env):
     """The positive control: the exit is not the only way out of it.
 
-    Against an environment holding none of what this module reads, so the
-    result is the documented defaults rather than whatever the shell running
-    the tests happens to export.
+    Against an environment holding none of what a startup reads, so the result is
+    the documented defaults rather than whatever the shell running the tests
+    happens to export.
     """
-    assert Settings.from_env_or_exit().voices == (DEFAULT_VOICE,)
+    settings = Settings.from_env_or_exit(ENGINES)
+    assert settings.fallback is Substitution.FIRST_OFFERED
+    # The engine an empty environment produces, compared against the engine an
+    # empty environment produces — the point being that `from_env_or_exit` chose
+    # Piper and handed it the same environment, rather than that Piper's own
+    # defaults are what they are, which is `test_piper.py`'s business.
+    assert settings.engine == piper.configure({})

@@ -297,7 +297,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     _LOGGER.info(
         "serving %s (fallback: %s; engine can: %s)",
         ", ".join(voice.id for voice in cat.installed) or "no voices",
-        settings.fallback or "none",
+        cat.fallback or "none",
         ", ".join(sorted(item.name.lower() for item in capabilities)) or "nothing "
         "beyond plain speech",
     )
