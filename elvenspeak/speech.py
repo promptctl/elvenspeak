@@ -244,7 +244,19 @@ async def encode_stream(
             # from it during an abort would replace the reason the response
             # actually ended.
             failure = error
-        stderr = await errors
+        # Bounded for the same reason the wait below is. An abandoned response
+        # leaves the `while` above without having drained stdout, so ffmpeg can
+        # block writing into a full pipe — and a process blocked on stdout never
+        # closes stderr, so an unbounded read here waits on a process that is
+        # itself waiting on us. That deadlock would hold the subprocess and both
+        # tasks forever, never reaching the kill that breaks it.
+        try:
+            stderr = await asyncio.wait_for(errors, timeout=_EXIT_TIMEOUT)
+        except TimeoutError:
+            errors.cancel()
+            # Only decorates the message below, so losing it costs a detail;
+            # the non-zero returncode still reports the failure itself.
+            stderr = b""
         # Reaped, not killed. `returncode` is still None here on the ordinary
         # path — stdout reaching EOF means ffmpeg closed the pipe, not that
         # anything has collected its status yet — so killing on "no returncode"
