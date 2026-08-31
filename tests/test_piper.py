@@ -21,7 +21,7 @@ import pytest
 from conftest import make_voice
 
 from elvenspeak import piper
-from elvenspeak.engine import Prosody
+from elvenspeak.engine import Capability, Prosody
 
 KEY = "en_US-lessac-medium"
 
@@ -231,8 +231,8 @@ def test_a_sidecar_that_cannot_be_read_fails_the_bake(tmp_path, sidecar):
 
 
 @pytest.mark.parametrize("timings", [True, False])
-def test_the_engine_reports_the_flag_its_sessions_were_opened_under(tmp_path, timings):
-    """[LAW:one-source-of-truth] The 501 gate asks this, not a server setting.
+def test_the_engine_declares_the_flag_its_sessions_were_opened_under(tmp_path, timings):
+    """[LAW:one-source-of-truth] Every answer the server gives reads this.
 
     `include_alignments` patches the graph at load time, so whether a session can
     report durations is decided once, here, and is not recoverable from anything
@@ -241,10 +241,25 @@ def test_the_engine_reports_the_flag_its_sessions_were_opened_under(tmp_path, ti
     both.
     """
     make_voice(tmp_path)
-    engine = piper.load(
+    loaded = piper.load(
         keys=(KEY,), models_dir=tmp_path, allow_download=False, timings=timings
     )
-    assert engine.can_time() is timings
+    assert (Capability.TIMESTAMPS in loaded.capabilities()) is timings
+
+
+def test_piper_always_declares_speed_whatever_timings_was(tmp_path):
+    """`length_scale` is on every voice, so the rate is never not variable.
+
+    Pinned because the capability set is assembled in one expression beside the
+    timings flag, and the shape that fails is one where every capability ends up
+    riding on that flag — which nothing else here would catch, since a request
+    with no `speed` in it behaves identically either way.
+    """
+    make_voice(tmp_path)
+    loaded = piper.load(
+        keys=(KEY,), models_dir=tmp_path, allow_download=False, timings=False
+    )
+    assert Capability.SPEED in loaded.capabilities()
 
 
 def test_installing_does_not_open_any_session(tmp_path, monkeypatch):

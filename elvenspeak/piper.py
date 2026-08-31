@@ -24,7 +24,10 @@ interface asks of it: these can be spoken *now*.
 `include_alignments` patches a voice's graph in memory at load time to expose
 per-phoneme durations. It is a property of the session, not of a call, so a
 request asking for timings against an unpatched session could only fail or lie.
-Whether to pay for it is settled before any voice is opened.
+Whether to pay for it is settled before any voice is opened, and leaves this
+module as [`engine.Capability.TIMESTAMPS`] declared or not declared — which is
+all the server ever learns about it, and the reason the 501 it sends no longer
+names a Piper environment variable.
 """
 
 from __future__ import annotations
@@ -53,6 +56,11 @@ _BOUNDARY_PHONEMES = frozenset({"^", "$", "\n"})
 # key's parts back when the sidecar omits them — never to decide whether a voice
 # exists, which only the files on disk can answer.
 _KEY_PARTS = 3
+
+#: What Piper does whatever it was configured with. `length_scale` is on every
+#: voice's synthesis config, so the rate is never not variable — unlike
+#: alignments, which cost memory and are settled at load time below.
+_INHERENT = frozenset({engine.Capability.SPEED})
 
 
 @dataclass(frozen=True)
@@ -93,19 +101,23 @@ class PiperEngine:
     make unreachable.
     """
 
-    def __init__(self, installed: dict[str, _Installed], timings: bool) -> None:
+    def __init__(
+        self,
+        installed: dict[str, _Installed],
+        capabilities: frozenset[engine.Capability],
+    ) -> None:
         self._installed = installed
-        self._timings = timings
+        self._capabilities = capabilities
 
     def voices(self) -> tuple[engine.Voice, ...]:
         return tuple(self._installed[key].voice for key in sorted(self._installed))
 
-    def can_time(self) -> bool:
-        # The flag the sessions were opened under, not a second copy of the
-        # setting that produced it: `include_alignments` patches the graph at
-        # load time, so this is the only place that knows whether these
-        # particular sessions can report durations.
-        return self._timings
+    def capabilities(self) -> frozenset[engine.Capability]:
+        # Settled by `load` from the flag the sessions were really opened under,
+        # not recomputed from the setting that produced it: `include_alignments`
+        # patches the graph at load time, so these particular sessions are the
+        # only thing that knows whether durations can be reported.
+        return self._capabilities
 
     def speak(
         self, voice: engine.Voice, text: str, prosody: engine.Prosody
@@ -186,7 +198,15 @@ def load(
             ),
         )
 
-    return PiperEngine(installed, timings=timings)
+    # Decided here, beside the loop that opened the sessions, rather than stored
+    # as a flag the engine re-reads later: this is the only line that can see
+    # both what was asked for and what the voices were actually opened with, and
+    # an engine holding the setting instead would keep answering for the setting
+    # if those two ever came apart.
+    return PiperEngine(
+        installed,
+        capabilities=_INHERENT | ({engine.Capability.TIMESTAMPS} if timings else set()),
+    )
 
 
 def install(

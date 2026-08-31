@@ -14,6 +14,8 @@ Every member below exists because an endpoint stated a requirement:
     POST .../{voice}                  -> [`Engine.speak`], drained whole
     POST .../{voice}/stream           -> [`Engine.speak`], drained incrementally
     POST .../{voice}/with-timestamps  -> [`Engine.speak_timed`]
+    every response's ignored header   -> [`Engine.capabilities`]
+    every endpoint's 501              -> [`Engine.capabilities`]
 
 Nothing here exists because an engine happened to offer it, which is the way this
 seam fails: an interface read off one engine's methods — a model file on disk, a
@@ -46,7 +48,42 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from enum import Enum
 from typing import Protocol
+
+
+class Capability(Enum):
+    """Something a caller may ask for that not every engine can do.
+
+    A closed set, because the server has to know what to do about each one:
+    refuse an endpoint, or name a parameter in the ignored header. An engine that
+    does something not listed here has nothing to declare it to — adding a member
+    and giving the server a use for it is one edit, not two.
+
+    [LAW:no-mode-explosion] A set of values rather than a `can_x` method per
+    capability. A method per capability puts the variability in the interface's
+    *structure*: every engine grows a member for every capability any engine ever
+    gains, and every place that cares grows a branch to ask about it. As data, an
+    engine states what it does once and every answer the server gives — the 501,
+    the ignored header, the startup log — is derived from that one statement.
+
+    Each value is a phrase completing "this engine cannot …", because telling a
+    caller is the only thing the server does with an absent capability. Written
+    here so it is written once: a message assembled at an endpoint would be a
+    second answer to what a capability means, from the layer least able to give
+    it — an endpoint has never heard of any engine. The member's `name` is the
+    identifier for logs and tests; the value is the sentence.
+    """
+
+    #: `voice_settings.speed` really changes the rate: 2.0 is twice as fast. An
+    #: engine with a fixed rate does not declare it, and the caller that asked is
+    #: told so rather than left to infer it from the audio.
+    SPEED = "vary its speaking rate"
+
+    #: [`Engine.speak_timed`] returns durations it measured. Without it the
+    #: timestamp endpoints refuse, because the alternative is an alignment
+    #: derived from nothing that a caption renderer would trust.
+    TIMESTAMPS = "report how long each part of an utterance took"
 
 
 @dataclass(frozen=True)
@@ -185,16 +222,27 @@ class Engine(Protocol):
         """
         ...
 
-    def can_time(self) -> bool:
-        """Whether [`speak_timed`] will really measure what it returns.
+    def capabilities(self) -> frozenset[Capability]:
+        """Everything in [`Capability`] this engine really does.
 
-        Asked because the answer is a fact about the engine and nowhere else. It
-        was previously read off a server setting that happened to be what the
-        engine had been built from — two representations of one fact, agreeing
-        only because every caller passed the same value to both
-        ([LAW:one-source-of-truth]). The timestamp endpoints refuse with a 501
-        when this is false, which they can only do honestly if they ask the thing
-        that knows.
+        [LAW:one-source-of-truth] The single negotiation. What an engine can do
+        was previously answered in three places — a server setting the engine had
+        been built from, a `can_time` method, and a hand-written list of
+        unsupported request fields in the API surface — which agreed only for as
+        long as one engine existed and every caller fed all three the same value.
+        Everything the server says about what it can do is now read off this.
+
+        Two properties the endpoints depend on. It is answerable **without
+        synthesizing**: `/stream/with-timestamps` commits its 200 before it calls
+        [`speak_timed`], so a capability discoverable only by calling and
+        catching could never be refused honestly. And it is **constant for the
+        engine's life**, because the server asks once at startup — an engine
+        whose answer varies per utterance has to declare the capability absent,
+        which is the only claim that stays true for every call.
+
+        Absence is the safe default: a capability not declared is reported to
+        callers as not honoured, so an engine that undersells itself is merely
+        pessimistic, while one that oversells lies in the audio.
         """
         ...
 

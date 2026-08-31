@@ -17,10 +17,14 @@ checked by a test:
 1. **A parameter that can be honoured, is.** `output_format` selects any of the
    28 published formats. `voice_id` selects a real voice. `voice_settings.speed`
    changes the speech rate.
-2. **A parameter that cannot be honoured is named back to you.** Piper has no
-   equivalent of `stability` or `seed`, so those are dropped — and the response
-   carries `x-elvenspeak-ignored: model_id, seed, voice_settings.stability` so you
-   learn it from the response instead of from the audio.
+2. **A parameter that cannot be honoured is named back to you.** Nothing here
+   has an equivalent of `stability` or `seed`, so those are dropped — and the
+   response carries `x-elvenspeak-ignored: model_id, seed, voice_settings.stability`
+   so you learn it from the response instead of from the audio. The list is
+   worked out per request from the engine behind the server, not written down
+   anywhere: an engine that cannot vary its speaking rate adds
+   `voice_settings.speed` to it, and one that could reproduce a `seed` would
+   drop it, with no edit here.
 3. **A request that cannot be served is refused.** An unknown `output_format` is
    a `422` quoting the value you sent, not a quiet substitution. So is `text`
    that is empty, whitespace-only, or longer than **5000 characters** — the cap

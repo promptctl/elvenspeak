@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from elvenspeak import piper
-from elvenspeak.engine import Prosody, Voice
+from elvenspeak.engine import Capability, Prosody, Voice
 
 RATE = 22050
 VOICE = Voice(id="test", name="test", description="test")
@@ -52,7 +52,7 @@ def engine_over(*chunks: FakeChunk) -> piper.PiperEngine:
                 voice=VOICE, sample_rate=RATE, model=FakeSession(list(chunks))
             )
         },
-        timings=True,
+        capabilities=frozenset({Capability.SPEED, Capability.TIMESTAMPS}),
     )
 
 
