@@ -44,8 +44,8 @@ speak in one of them; it never has to decide what an id means.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Protocol
 
 
@@ -63,12 +63,21 @@ class Voice:
     it is where an engine puts the facts that have no field of their own — a
     quality tier, a speaker count, which engine spoke — without either side
     inventing a schema for them.
+
+    Pairs rather than a dict, so that `frozen=True` is true instead of
+    decorative. A `dict` field leaves the value mutable — and a `Voice` lives in
+    a process-wide [`elvenspeak.voices.Catalog`] that hands the same object to
+    every request, so one handler writing a label would change what every later
+    caller is told. It also makes the auto-generated `__hash__` raise, which is
+    the same lie caught from the other side. The cost is that pairs admit a
+    duplicate key where a mapping could not; a shared value that cannot be
+    written is worth more than that.
     """
 
     id: str
     name: str
     description: str
-    labels: Mapping[str, str] = field(default_factory=dict)
+    labels: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -173,6 +182,19 @@ class Engine(Protocol):
         Now, not eventually: a voice that would have to be fetched or warmed on
         first use is not offered, because the caller that named it would pay an
         unbounded and silent delay for the privilege of being first.
+        """
+        ...
+
+    def can_time(self) -> bool:
+        """Whether [`speak_timed`] will really measure what it returns.
+
+        Asked because the answer is a fact about the engine and nowhere else. It
+        was previously read off a server setting that happened to be what the
+        engine had been built from — two representations of one fact, agreeing
+        only because every caller passed the same value to both
+        ([LAW:one-source-of-truth]). The timestamp endpoints refuse with a 501
+        when this is false, which they can only do honestly if they ask the thing
+        that knows.
         """
         ...
 

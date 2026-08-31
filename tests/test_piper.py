@@ -61,12 +61,15 @@ class _StubVoice:
 def stub_sessions(monkeypatch):
     """Stands in for the ONNX loader, so a placeholder `.onnx` is loadable.
 
-    Patched in `sys.modules` because `load` imports the symbol inside the
-    function body, so it resolves the module at call time rather than at import.
+    The one symbol is replaced on the real module rather than the module being
+    replaced wholesale. A stub object in `sys.modules["piper"]` has no
+    `__path__`, so `from piper.download_voices import download_voice` — which
+    `install` runs before anything else — could only resolve if some earlier test
+    had already cached that submodule. It did: `test_api.py` runs first and
+    imports the real one, so this file passed in a full run and failed 9 of 11
+    on its own, which is also how it would fail on a machine with no baked model.
     """
-    monkeypatch.setitem(
-        sys.modules, "piper", type("M", (), {"PiperVoice": _StubVoice})
-    )
+    monkeypatch.setattr("piper.PiperVoice", _StubVoice)
 
 
 def load(models_dir: Path, allow_download: bool = False) -> piper.PiperEngine:
@@ -120,9 +123,10 @@ def test_a_minimal_config_derives_its_metadata_from_the_key(tmp_path):
         json.dumps({"audio": {"sample_rate": 16000}}), encoding="utf-8"
     )
     voice = load(tmp_path).voices()[0]
+    labels = dict(voice.labels)
     assert voice.name == "lessac"
-    assert voice.labels["language"] == "en_US"
-    assert voice.labels["quality"] == "medium"
+    assert labels["language"] == "en_US"
+    assert labels["quality"] == "medium"
 
 
 def test_an_explicitly_null_section_reads_as_an_absent_one(tmp_path):
@@ -139,7 +143,7 @@ def test_an_explicitly_null_section_reads_as_an_absent_one(tmp_path):
         encoding="utf-8",
     )
     voice = load(tmp_path).voices()[0]
-    assert voice.labels["language"] == "en_US"
+    assert dict(voice.labels)["language"] == "en_US"
     assert voice.name == "lessac"
 
 
@@ -155,7 +159,7 @@ def test_engine_facts_with_no_elevenlabs_field_travel_as_labels(tmp_path):
         json.dumps({"audio": {"sample_rate": 22050}, "num_speakers": 4}),
         encoding="utf-8",
     )
-    labels = load(tmp_path).voices()[0].labels
+    labels = dict(load(tmp_path).voices()[0].labels)
     assert labels["speakers"] == "4"
     assert labels["engine"] == "piper"
 
@@ -214,3 +218,40 @@ def test_a_voice_with_no_usable_sample_rate_refuses_to_boot(tmp_path, rate):
     )
     with pytest.raises(ValueError, match="sample_rate"):
         load(tmp_path)
+
+
+@pytest.mark.parametrize("timings", [True, False])
+def test_the_engine_reports_the_flag_its_sessions_were_opened_under(tmp_path, timings):
+    """[LAW:one-source-of-truth] The 501 gate asks this, not a server setting.
+
+    `include_alignments` patches the graph at load time, so whether a session can
+    report durations is decided once, here, and is not recoverable from anything
+    else. The API used to read `settings.timestamps` instead — the same fact held
+    in two places, agreeing only for as long as every caller passed one value to
+    both.
+    """
+    make_voice(tmp_path)
+    engine = piper.load(
+        keys=(KEY,), models_dir=tmp_path, allow_download=False, timings=timings
+    )
+    assert engine.can_time() is timings
+
+
+def test_installing_does_not_open_any_session(tmp_path, monkeypatch):
+    """The joint the Dockerfile found: the image bake wants files, not sessions.
+
+    Opening an ONNX session per voice costs a minute and a gigabyte, and the
+    build throws every one of them away. Asserted rather than described, because
+    a later edit that folds the loader back into `install` would cost that on
+    every image build and break nothing visible.
+    """
+    make_voice(tmp_path)
+    monkeypatch.setattr(
+        "piper.PiperVoice",
+        type("Never", (), {"load": staticmethod(lambda *a, **k: pytest.fail(
+            "install opened an ONNX session"
+        ))}),
+    )
+    assert piper.install(
+        keys=(KEY,), models_dir=tmp_path, allow_download=False
+    ) == {KEY: tmp_path / f"{KEY}.onnx"}

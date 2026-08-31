@@ -21,7 +21,7 @@ def voice(key: str) -> Voice:
         id=key,
         name=key.split("-")[1] if "-" in key else key,
         description=key,
-        labels={"language": "en_US", "quality": "medium"},
+        labels=(("language", "en_US"), ("quality", "medium")),
     )
 
 

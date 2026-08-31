@@ -24,7 +24,8 @@ MODELS = Path(os.environ.get("PIPER_MODELS_DIR", Path(__file__).parent.parent / 
 
 pytestmark = pytest.mark.skipif(
     not (MODELS / f"{VOICE}.onnx").exists(),
-    reason=f"no {VOICE} model in {MODELS}; run scripts/fetch-voice.sh",
+    reason=f"no {VOICE} model in {MODELS}; "
+    "fetch it with PIPER_ALLOW_DOWNLOAD=1 uv run main.py",
 )
 
 #: An ElevenLabs voice id from aliases.toml. Used to prove substitution, which

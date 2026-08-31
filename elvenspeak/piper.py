@@ -78,11 +78,19 @@ class PiperEngine:
     make unreachable.
     """
 
-    def __init__(self, installed: dict[str, _Installed]) -> None:
+    def __init__(self, installed: dict[str, _Installed], timings: bool) -> None:
         self._installed = installed
+        self._timings = timings
 
     def voices(self) -> tuple[engine.Voice, ...]:
         return tuple(self._installed[key].voice for key in sorted(self._installed))
+
+    def can_time(self) -> bool:
+        # The flag the sessions were opened under, not a second copy of the
+        # setting that produced it: `include_alignments` patches the graph at
+        # load time, so this is the only place that knows whether these
+        # particular sessions can report durations.
+        return self._timings
 
     def speak(
         self, voice: engine.Voice, text: str, prosody: engine.Prosody
@@ -151,10 +159,35 @@ def load(
     refusal to boot rather than an unbounded delay inside somebody's first call.
     """
     from piper import PiperVoice
+
+    installed: dict[str, _Installed] = {}
+    for key, model_path in install(keys, models_dir, allow_download).items():
+        voice, sample_rate = _describe(key, model_path)
+        _LOGGER.info("loading voice %s", key)
+        installed[key] = _Installed(
+            voice=voice,
+            sample_rate=sample_rate,
+            model=PiperVoice.load(str(model_path), include_alignments=timings),
+        )
+
+    return PiperEngine(installed, timings=timings)
+
+
+def install(
+    keys: tuple[str, ...], models_dir: Path, allow_download: bool
+) -> dict[str, Path]:
+    """Makes sure every named voice's files are on disk, and says where.
+
+    Separate from [`load`] because the container image bakes voices in at build
+    time and wants exactly this and no more — opening an ONNX session per voice
+    only to discard it costs a minute and a gigabyte for nothing. A second caller
+    that wants only half of a function is what a real joint looks like
+    ([LAW:decomposition]).
+    """
     from piper.download_voices import download_voice
 
     models_dir.mkdir(parents=True, exist_ok=True)
-    installed: dict[str, _Installed] = {}
+    paths: dict[str, Path] = {}
 
     for key in keys:
         model_path = models_dir / f"{key}.onnx"
@@ -185,16 +218,9 @@ def load(
                     f"downloading voice {key!r} into {models_dir} did not produce "
                     f"both {model_path.name} and {config_path.name}"
                 )
+        paths[key] = model_path
 
-        voice, sample_rate = _describe(key, model_path)
-        _LOGGER.info("loading voice %s", key)
-        installed[key] = _Installed(
-            voice=voice,
-            sample_rate=sample_rate,
-            model=PiperVoice.load(str(model_path), include_alignments=timings),
-        )
-
-    return PiperEngine(installed)
+    return paths
 
 
 def _stream(
@@ -295,12 +321,12 @@ def _describe(key: str, model_path: Path) -> tuple[engine.Voice, int]:
             # tier, and `speakers` says out loud what a listener would otherwise
             # discover — there is no ElevenLabs field to select a speaker with, so
             # a multi-speaker model always speaks as its default.
-            labels={
-                "language": language,
-                "quality": quality,
-                "engine": "piper",
-                "speakers": str(int(config.get("num_speakers") or 1)),
-            },
+            labels=(
+                ("language", language),
+                ("quality", quality),
+                ("engine", "piper"),
+                ("speakers", str(int(config.get("num_speakers") or 1))),
+            ),
         ),
         int(rate),
     )
