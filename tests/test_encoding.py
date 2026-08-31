@@ -109,10 +109,19 @@ async def test_a_failure_on_the_very_first_chunk_still_raises():
 
 
 PACKAGE = Path(__file__).resolve().parent.parent / "elvenspeak"
+PACKAGE_NAME = PACKAGE.name
 
 
-def _imported_names(module: str) -> set[str]:
-    """Every module `module` names in an import, at any nesting depth.
+def _imported_modules(module_file: Path) -> set[str]:
+    """Canonical dotted names of every module `module_file` imports.
+
+    Canonical because one module has four spellings — `import elvenspeak.speech`,
+    `from elvenspeak import speech`, `from .speech import Prosody`,
+    `from . import speech` — and a matcher that recognises only the spellings the
+    package happens to use today has a hole exactly the shape of the ones it
+    does not. Every form is resolved to `elvenspeak.speech` here, once, so that
+    neither the engine check nor the graph walk below has to know how an import
+    was written.
 
     `ast.walk` rather than a scan of the top level, because this package imports
     Piper exclusively from inside functions and `if TYPE_CHECKING` blocks — so a
@@ -120,16 +129,54 @@ def _imported_names(module: str) -> set[str]:
     package as Piper-free, including the ones built entirely around it.
     """
     found: set[str] = set()
-    for node in ast.walk(ast.parse((PACKAGE / f"{module}.py").read_text())):
+    for node in ast.walk(ast.parse(module_file.read_text())):
         if isinstance(node, ast.Import):
             found.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            # `from .formats import X` names the module; `from . import speech`
-            # names it in the alias list instead.
-            found.update(
-                {node.module} if node.module else {a.name for a in node.names}
-            )
+            # A flat package has no `..` to resolve against, and guessing at one
+            # would silently mis-resolve rather than fail. [LAW:no-silent-failure]
+            assert node.level <= 1, f"{module_file}: unhandled relative import"
+            base = node.module or ""
+            if node.level:
+                base = f"{PACKAGE_NAME}.{base}" if base else PACKAGE_NAME
+            # Both, because `from x import y` names a module in `x` when y is a
+            # submodule and a class in `x` when it is not; the resolver below
+            # tells them apart by which one is backed by a file.
+            found.add(base)
+            found.update(f"{base}.{alias.name}" for alias in node.names)
     return found
+
+
+def _module_file(name: str) -> Path | None:
+    """The file backing a first-party dotted name, or None if it has none."""
+    if name == PACKAGE_NAME:
+        return PACKAGE / "__init__.py"
+    if not name.startswith(f"{PACKAGE_NAME}."):
+        return None
+    path = PACKAGE / (name[len(PACKAGE_NAME) + 1 :].replace(".", "/") + ".py")
+    return path if path.exists() else None
+
+
+def _modules_reaching_piper(root: str) -> set[str]:
+    """First-party modules reachable from `root` that name Piper."""
+    hits: set[str] = set()
+    seen: set[str] = set()
+    queue = [f"{PACKAGE_NAME}.{root}"]
+
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        source = _module_file(name)
+        if source is None:
+            continue
+        for imported in _imported_modules(source):
+            if imported.split(".")[0] == "piper":
+                hits.add(name)
+            elif _module_file(imported) is not None:
+                queue.append(imported)
+    return hits
 
 
 @pytest.mark.parametrize("root", ["encoding", "text"])
@@ -152,15 +199,21 @@ def test_the_encoder_cannot_reach_the_engine(root: str):
     Transitive, because `from . import speech` inside `encoding` would satisfy a
     direct-import check while dragging the whole engine in behind it.
     """
-    first_party = {path.stem for path in PACKAGE.glob("*.py")}
-    seen: set[str] = set()
-    queue = [root]
+    assert not _modules_reaching_piper(root)
 
-    while queue:
-        module = queue.pop()
-        seen.add(module)
-        for name in _imported_names(module):
-            top = name.split(".")[0]
-            assert top != "piper", f"{module} imports {name}; reached from {root}"
-            if top in first_party and top not in seen:
-                queue.append(top)
+
+@pytest.mark.parametrize("root", ["speech", "api"])
+def test_the_seam_check_can_actually_fail(root: str):
+    """Positive control: the detector still detects.
+
+    A test that cannot fail proves nothing, and this one has now been unable to
+    fail twice — first as a runtime `sys.modules` probe that saw nothing because
+    Piper is imported lazily, then as a matcher that followed relative imports
+    only and would have walked straight past `import elvenspeak.speech`. Both
+    were green, and both were caught by hand rather than by the suite.
+
+    `speech` and `api` genuinely do reach Piper, so they pin the detector from
+    the other side: any future edit to the resolver that quietly stops finding
+    things turns this red instead of turning the seam test vacuous.
+    """
+    assert _modules_reaching_piper(root)

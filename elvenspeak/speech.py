@@ -15,9 +15,14 @@ engine has them. That is the interface, discovered rather than designed.
 [LAW:effects-at-boundaries] Piper is synchronous, CPU-bound ONNX inference, so
 every function here blocks for as long as the audio takes to make. Run inline in
 an `async def` handler it would stall every other request on the worker for the
-length of the synthesis. Both call sites therefore hand it to a thread:
-`/with-timestamps` awaits [`synthesize_timed`] in one, and the streaming path
-lets [`encoding._pump`] pull [`stream_pcm`] on one chunk at a time.
+length of the synthesis.
+
+Nothing here may therefore be called on the event loop. A caller discharges that
+one of two ways: await it through `asyncio.to_thread`, or hand the generator to
+[`encoding.encode_stream`], which pulls it on a worker one chunk at a time. Which
+mechanism suits a given endpoint is that endpoint's business — this states the
+obligation rather than listing who currently meets it, because a roster of
+callers is true until the next endpoint lands and silently false afterwards.
 """
 
 from __future__ import annotations

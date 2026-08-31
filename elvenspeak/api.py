@@ -339,10 +339,12 @@ def create_app(settings: Settings) -> FastAPI:
         resolution = resolve(cat, voice_id)
         model = cat.model(resolution.voice)
 
-        # Off the loop. FastAPI does not thread-pool `async def` handlers, so
-        # draining Piper's synchronous generator inline would stall every other
-        # request for the whole synthesis — the exact thing speech.py's docstring
-        # claims every call site does not do, and which was true only of /stream.
+        # Off the loop, which is the obligation speech.py places on every caller.
+        # FastAPI does not thread-pool `async def` handlers, so draining Piper's
+        # synchronous generator inline would stall every other request for the
+        # whole synthesis — and this endpoint did exactly that until the
+        # streaming path, which gets its thread from the encoder's pump, made the
+        # omission visible here.
         pcm = await asyncio.to_thread(
             lambda: b"".join(speech.stream_pcm(model, body.text, body.prosody()))
         )
