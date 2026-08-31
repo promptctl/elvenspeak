@@ -129,8 +129,10 @@ run. Outside Docker, running the kokoro engine means naming the working library
 too:
 
 ```
-PHONEMIZER_ESPEAK_LIBRARY=/opt/homebrew/lib/libespeak-ng.dylib   # macOS
-PHONEMIZER_ESPEAK_LIBRARY=/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1
+PHONEMIZER_ESPEAK_LIBRARY=/opt/homebrew/lib/libespeak-ng.dylib          # macOS, arm64
+PHONEMIZER_ESPEAK_LIBRARY=/usr/local/lib/libespeak-ng.dylib             # macOS, x86_64
+PHONEMIZER_ESPEAK_LIBRARY=/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1   # Linux, x86_64
+PHONEMIZER_ESPEAK_LIBRARY=/usr/lib/aarch64-linux-gnu/libespeak-ng.so.1  # Linux, arm64
 ```
 
 The engine does not go looking for one itself. A broken wheel on one platform is
@@ -243,11 +245,18 @@ pins the alignment fallback's honesty, not its numbers.
 
 ## Voice licensing
 
+The two engines differ in whether this needs checking per voice.
+
 Piper's code is MIT; its voices are licensed individually. The default,
 `en_US-lessac-medium`, ships from the `rhasspy/piper-voices` Hugging Face
 repository, tagged MIT at the repository level. Check a voice's own licence
 before switching — some are CC-BY or otherwise restricted, which matters if this
 ends up somewhere with commercial terms attached.
+
+Kokoro is uniform, so there is no per-voice check to do: the model
+(`hexgrad/Kokoro-82M`) is Apache-2.0, and all 54 voices ship inside that one
+release's single style pack under the same terms. The `kokoro-onnx` wrapper the
+exports come from is MIT.
 
 ## What this deliberately does not do
 
