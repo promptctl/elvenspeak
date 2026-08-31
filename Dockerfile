@@ -61,6 +61,15 @@ COPY elvenspeak/ ./elvenspeak/
 COPY main.py ./
 RUN uv sync --frozen --no-dev --extra "${ELVENSPEAK_ENGINE}"
 
+# [LAW:no-ambient-temporal-coupling] The two syncs above are the only owners of
+# this environment. `uv run` syncs before running unless told not to, so the bake
+# step below and the CMD at the end would each be a second owner — and neither
+# names the extra, so a sync that pruned to the core dependencies would remove
+# the engine this image was built for, after it was installed and before it was
+# used. Today's uv does not prune, which is a fact about a version rather than a
+# guarantee, and this image should not rest on it.
+ENV UV_NO_SYNC=1
+
 # Voices are baked in rather than fetched at boot. A ~60 MB download on every
 # restart is a slow start that looks like a hang, and it makes the container
 # depend on Hugging Face being reachable to serve traffic it could otherwise

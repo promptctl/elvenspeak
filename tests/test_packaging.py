@@ -191,3 +191,43 @@ def test_nothing_is_exported_twice_or_missing():
     assert len(elvenspeak.__all__) == len(set(elvenspeak.__all__))
     for name in elvenspeak.__all__:
         assert hasattr(elvenspeak, name), name
+
+
+#: How the README tells a reader to start the server. Matched loosely on purpose
+#: — what matters is that every spelling of it names an engine, not that there is
+#: one spelling.
+_README_RUN = re.compile(r"^\s*uv run (.*?)main\.py(?:\s|$)", re.MULTILINE)
+
+
+def readme_run_commands() -> list[str]:
+    return _README_RUN.findall(
+        (Path(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
+    )
+
+
+def test_the_readme_still_documents_a_way_to_start_the_server():
+    """Positive control, and it has already been needed.
+
+    A regex over prose is the check most likely to stop matching and go quietly
+    vacuous, and the section it reads has been rewritten twice in this PR alone.
+    """
+    assert readme_run_commands()
+
+
+@pytest.mark.parametrize("flags", readme_run_commands() or [""])
+def test_the_documented_way_to_start_the_server_installs_an_engine(flags: str):
+    """The regression this file was extended for, and it shipped once.
+
+    Moving the engines into extras made `uv run main.py` — the README's own
+    quickstart, unchanged for the whole life of the project — install the API
+    surface with no engine behind it. The default engine then fails to open with
+    a `ModuleNotFoundError`, in a codebase whose entire configuration story is
+    one clean list of problems and exit 2.
+
+    Nothing caught it. The Dockerfile's references to this repository are checked
+    against this repository; the README's were not, and prose is where a command
+    goes stale without anything going red.
+    """
+    named = re.findall(r"--extra\s+(\S+)", flags)
+    assert named, f"`uv run {flags}main.py` installs no engine"
+    assert set(named) <= set(ENGINES), named

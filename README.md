@@ -141,8 +141,17 @@ library that works would be a silent fallback inside the component whose job is
 to fail loudly.
 
 ```
-uv run main.py
+uv run --extra piper main.py            # or --extra kokoro, to run the other one
 ```
+
+The extra is not optional in practice, it is the engine. Each engine's libraries
+live in an extra named after it, so the name that selects an engine is the name
+that installs it — see [Supplying your own engine](#supplying-your-own-engine)
+for why they are not core dependencies. Leaving the extra off installs the API
+surface with no engine behind it, and the engine you selected fails to open with
+a `ModuleNotFoundError` naming the library it wanted. That is deliberate: a
+missing wheel is an installation fault, not a configuration one, and reporting it
+as a config error would also disguise a genuinely broken library build.
 
 The configured voices download into `models/` on first start. After that
 nothing here touches the network.
