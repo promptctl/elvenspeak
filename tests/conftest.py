@@ -51,15 +51,25 @@ def make_voice(
     No real Piper model is needed. `_describe` reads only the `.onnx.json`
     sidecar and never opens the weights, so the `.onnx` here is a placeholder
     whose only job is to exist.
+
+    Every field the key states is read back out of it, rather than fixed at the
+    values its first caller happened to use. A sidecar saying `en_US` for a key
+    saying `en_GB` is a fixture contradicting itself, and it costs nothing until
+    the first test to assert on a language label gets a wrong answer from the
+    thing it was trusting to be right.
+
+    The unpack is the check: a key that is not `<lang>-<name>-<quality>` fails
+    here and says so, rather than being written to disk as a voice.
     """
+    language, dataset, quality = key.split("-")
     models_dir.mkdir(parents=True, exist_ok=True)
     (models_dir / f"{key}.onnx").write_bytes(b"not a real model")
     (models_dir / f"{key}.onnx.json").write_text(
         json.dumps(
             {
-                "dataset": key.split("-")[1],
-                "language": {"code": "en_US"},
-                "audio": {"sample_rate": sample_rate, "quality": "medium"},
+                "dataset": dataset,
+                "language": {"code": language},
+                "audio": {"sample_rate": sample_rate, "quality": quality},
                 "num_speakers": 1,
             }
         ),

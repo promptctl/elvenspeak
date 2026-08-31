@@ -72,16 +72,24 @@ def test_the_container_does_not_run_as_root():
 
 
 def instructions() -> str:
-    """The Dockerfile with its comments removed.
+    """The Dockerfile's instructions, one per line, with its comments removed.
 
     Asserting against the raw text matches the prose describing a pattern as
     readily as the pattern itself — the first version of the test below failed on
     the comment explaining the very interpolation it forbids. A check that cannot
     tell code from a description of code is the same substring-against-prose
     mistake in a new costume.
+
+    Backslash continuations are joined here rather than by each caller, because
+    a line is not what any check below actually reasons about: `RUN a \\` and its
+    `&& b` are one instruction, and a per-line scan reads only as far as the
+    first of them. Left to callers, every future check written here would be
+    free to make that mistake independently — and one already did, passing while
+    a continuation line went unexamined.
     """
     return "\n".join(
-        line for line in DOCKERFILE.read_text().splitlines()
+        line
+        for line in DOCKERFILE.read_text().replace("\\\n", "").splitlines()
         if not line.lstrip().startswith("#")
     )
 
