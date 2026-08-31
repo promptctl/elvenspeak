@@ -63,7 +63,12 @@ RUN useradd --system --create-home --home-dir /home/elvenspeak elvenspeak \
  && chown -R elvenspeak:elvenspeak /app
 USER elvenspeak
 
-EXPOSE 5001
+# [LAW:one-source-of-truth] Expanded from the ENV above rather than repeated, so
+# the exposed port cannot drift from the one the server binds. Docker resolves
+# this at build time, so `run -P -e PORT=...` still publishes the value baked in
+# here — no Dockerfile construct tracks a runtime override, and the drift this
+# removes is the one that is actually representable.
+EXPOSE ${PORT}
 
 # Voices are loaded during startup, so a successful /health means their ONNX
 # sessions were built — not merely that the process is alive. It does not
@@ -71,7 +76,7 @@ EXPOSE 5001
 # this service is bound by.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s \
   CMD python -c "import urllib.request,json,os,sys; \
-b=json.load(urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PORT','5001'))); \
+b=json.load(urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ['PORT'])); \
 sys.exit(0 if b['voices'] else 1)"
 
 CMD ["uv", "run", "--no-dev", "main.py"]
