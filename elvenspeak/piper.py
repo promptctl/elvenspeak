@@ -56,6 +56,21 @@ _KEY_PARTS = 3
 
 
 @dataclass(frozen=True)
+class _Ready:
+    """A voice whose files are present and whose sidecar has been read.
+
+    [LAW:parse-dont-validate] What [`install`] returns, and it exists because the
+    obvious return — the path it was handed — proves nothing. A path says two
+    files have the right names; this says the voice can actually be described,
+    which is what "installed" has to mean for the image build that depends on it.
+    """
+
+    voice: engine.Voice
+    sample_rate: int
+    model_path: Path
+
+
+@dataclass(frozen=True)
 class _Installed:
     """One voice as this engine holds it: what the server sees, plus the model.
 
@@ -161,13 +176,14 @@ def load(
     from piper import PiperVoice
 
     installed: dict[str, _Installed] = {}
-    for key, model_path in install(keys, models_dir, allow_download).items():
-        voice, sample_rate = _describe(key, model_path)
+    for key, ready in install(keys, models_dir, allow_download).items():
         _LOGGER.info("loading voice %s", key)
         installed[key] = _Installed(
-            voice=voice,
-            sample_rate=sample_rate,
-            model=PiperVoice.load(str(model_path), include_alignments=timings),
+            voice=ready.voice,
+            sample_rate=ready.sample_rate,
+            model=PiperVoice.load(
+                str(ready.model_path), include_alignments=timings
+            ),
         )
 
     return PiperEngine(installed, timings=timings)
@@ -175,19 +191,25 @@ def load(
 
 def install(
     keys: tuple[str, ...], models_dir: Path, allow_download: bool
-) -> dict[str, Path]:
-    """Makes sure every named voice's files are on disk, and says where.
+) -> dict[str, _Ready]:
+    """Makes every named voice present and readable, and says what they are.
 
     Separate from [`load`] because the container image bakes voices in at build
     time and wants exactly this and no more — opening an ONNX session per voice
     only to discard it costs a minute and a gigabyte for nothing. A second caller
     that wants only half of a function is what a real joint looks like
     ([LAW:decomposition]).
+
+    The sidecar is read here rather than only by [`load`]. An earlier cut stopped
+    at "both files exist", which let a truncated or malformed `.onnx.json` — the
+    interrupted-write case the checks below already exist for — produce a green
+    image that failed at container startup instead. The bake is the last moment
+    that failure is cheap, so the description happens on this side of the joint.
     """
     from piper.download_voices import download_voice
 
     models_dir.mkdir(parents=True, exist_ok=True)
-    paths: dict[str, Path] = {}
+    ready: dict[str, _Ready] = {}
 
     for key in keys:
         model_path = models_dir / f"{key}.onnx"
@@ -218,9 +240,12 @@ def install(
                     f"downloading voice {key!r} into {models_dir} did not produce "
                     f"both {model_path.name} and {config_path.name}"
                 )
-        paths[key] = model_path
+        voice, sample_rate = _describe(key, model_path)
+        ready[key] = _Ready(
+            voice=voice, sample_rate=sample_rate, model_path=model_path
+        )
 
-    return paths
+    return ready
 
 
 def _stream(
