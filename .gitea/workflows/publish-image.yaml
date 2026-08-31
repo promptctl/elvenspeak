@@ -91,6 +91,79 @@ jobs:
             exit 1
           fi
 
+      # `x86_64` is not one platform. It spans a 2004 Opteron and this year's Zen, and
+      # the wheels this image installs do not run on all of it: NumPy's manylinux
+      # builds carry an x86-64-v2 baseline and abort at IMPORT — not at use — on a
+      # machine below it, and the ONNX runtimes underneath both engines are built the
+      # same way. So the property that decides whether this builder can produce a
+      # working image is the microarchitecture LEVEL, and the step above, which
+      # asserts only the name, admits a machine that cannot execute a line of what it
+      # is about to install. [LAW:types-are-the-program] — `uname -m` was the weaker
+      # theorem, and the gap between it and the true one is exactly where this failed.
+      #
+      # This is not hypothetical, which is why it is worth a step of its own. On
+      # 2026-08-31 both publish legs resolved a tag, composed their labels, installed
+      # their extra, and died ninety seconds into the build inside
+      # `elvenspeak.bake` on:
+      #
+      #     RuntimeError: NumPy was built with baseline optimizations: (X86_V2)
+      #     but your machine doesn't support: (X86_V2).
+      #
+      # A traceback that names a Python module and a package, for a fault that is
+      # entirely the builder's and has nothing to do with the commit under test. The
+      # cost of learning it there rather than here is a cold build per engine, and the
+      # cost of MISreading it is worse: it looks like a dependency problem, and the
+      # obvious repair is to pin NumPy down until it stops complaining — which would
+      # carve a defect in one VM's CPU model into this service's dependency graph
+      # forever. [LAW:no-silent-failure] — the failure was loud, in the wrong place,
+      # about the wrong thing.
+      #
+      # Asked of glibc's loader, which publishes the levels it will search on this
+      # CPU: the same determination the wheels' own runtime dispatch makes, so this
+      # measures the machine rather than restating a belief about it. Reported in
+      # full on every run, not only when it fails, so the builder's capability is on
+      # the record before anyone needs it.
+      - name: Assert the builder's CPU can run the wheels the image installs
+        env:
+          # The floor, named once. It is a fact about the wheel ecosystem this image
+          # installs from, not about this repo, so it is stated where the assertion
+          # can read it and nowhere else. When NumPy raises its baseline, this build
+          # fails here naming a level and a machine, which is a starting point; the
+          # traceback it replaces was not. [LAW:one-source-of-truth]
+          REQUIRED_LEVEL: x86-64-v2
+        run: |
+          set -euo pipefail
+
+          loader=/lib64/ld-linux-x86-64.so.2
+          if [ ! -x "$loader" ]; then
+            echo "ERROR: $loader is missing, so this job cannot ask glibc which" >&2
+            echo "       x86-64 levels this machine supports — and must not assume." >&2
+            exit 1
+          fi
+
+          # Only the levels the loader marks supported. It lists every level it knows
+          # and annotates the ones this CPU can run, so matching on the annotation is
+          # what separates capability from the catalogue.
+          levels="$("$loader" --help | sed -nE 's/^.*(x86-64-v[0-9]+) \(supported.*/\1/p')"
+          echo "builder supports: ${levels:-<nothing above the x86-64 baseline>}"
+
+          if ! printf '%s\n' "$levels" | grep -qx "$REQUIRED_LEVEL"; then
+            echo "ERROR: this builder does not support $REQUIRED_LEVEL, so the wheels" >&2
+            echo "       this image installs cannot execute on it. NumPy aborts at" >&2
+            echo "       import, which surfaces as a bake failure that blames the" >&2
+            echo "       package rather than the machine." >&2
+            echo "" >&2
+            echo "       This is a property of the BUILDER, not of the commit. The" >&2
+            echo "       runner is a Proxmox guest, and a guest reports the CPU its" >&2
+            echo "       VM was given: a model below $REQUIRED_LEVEL on a host well" >&2
+            echo "       above it is a masked CPU, not old hardware. Fix it in" >&2
+            echo "       home-infra by giving the VM a CPU model at or above" >&2
+            echo "       $REQUIRED_LEVEL and restarting it — and do not pin the" >&2
+            echo "       dependency down to fit, which would spread one VM's" >&2
+            echo "       misconfiguration into every image this repo ever builds." >&2
+            exit 1
+          fi
+
       # `jq` is the one command the publish job needs that is not in coreutils and not
       # exercised anywhere before it is relied on. It reads the published image's config
       # blob at the very end of `publish`, which is the worst place in the run to discover
