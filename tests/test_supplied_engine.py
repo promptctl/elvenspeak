@@ -34,8 +34,10 @@ that no protocol can state for it:
   * It parses its own environment and reports every problem at once, through the
     same [`ConfigError`] the server raises, so an operator sees one list.
   * It declares what it can do, and what it declares is true. Timings here are
-    configurable, which is what lets the last-but-one test watch the server
-    refuse an endpoint on the strength of an outside engine's own declaration.
+    switched off by the deployment rather than by a setting this engine invented
+    — the worked example of the one thing an engine is *told* rather than left to
+    read, which is what lets the last-but-one test watch a capability withheld by
+    the server reach an engine the server has never heard of.
 """
 
 from __future__ import annotations
@@ -61,7 +63,6 @@ from elvenspeak import (
     Timing,
     Voice,
     create_app,
-    flag,
 )
 
 # --------------------------------------------------------------- the engine
@@ -172,7 +173,6 @@ class ToneEngine:
 
 VOICES = "TONE_VOICES"
 DIRECTORY = "TONE_DIRECTORY"
-MEASURES = "TONE_TIMINGS"
 
 #: A voice pack is one line of text. Real ones are ONNX files; what matters for
 #: the example is that `open` cannot proceed without what `acquire` wrote.
@@ -232,13 +232,24 @@ class TonePrepared:
         return self.directory / f"{name}{SUFFIX}"
 
 
-def configure(environ: Mapping[str, str]) -> TonePrepared:
+def configure(
+    environ: Mapping[str, str], withheld: frozenset[Capability]
+) -> TonePrepared:
     """This engine's whole configuration, checked in one pass.
 
     Satisfies `elvenspeak.Configure`. `Settings.from_env` splices these problems
     into its own, so a bad `PORT` and a bad `TONE_VOICES` reach the operator
     together — which is the point of collecting a list rather than raising on the
     first one.
+
+    Whether to measure comes from `withheld` and never from `environ`. This
+    engine could spell it `TONE_TIMINGS` and parse it here, and that is the
+    mistake worth showing the way round: a deployment that switched timestamps
+    off would be switching them off for this engine only, and would silently get
+    them back the day it ran another one. What can be switched off is named
+    against the vocabulary every engine shares, parsed by the server once, and
+    handed here — so this engine reads a deployment's decision rather than
+    inventing a private way to be told it.
     """
     problems: list[str] = []
 
@@ -253,17 +264,14 @@ def configure(environ: Mapping[str, str]) -> TonePrepared:
     if not directory:
         problems.append(f"{DIRECTORY} is not set")
 
-    measures = False
-    try:
-        # The server's own boolean rule, borrowed rather than re-spelled, so
-        # `TONE_TIMINGS=tru` is rejected exactly as `PIPER_ALLOW_DOWNLOAD=tru` is.
-        measures = flag(environ, MEASURES, default=True)
-    except ValueError as wrong:
-        problems.append(str(wrong))
-
     if problems:
         raise ConfigError(problems)
-    return TonePrepared(Path(directory), names, measures)
+    # Told, not overruled: the server subtracts what it withheld from whatever
+    # this engine declares, so building the machinery anyway would only waste
+    # the work. An engine with nothing to save is free to ignore this.
+    return TonePrepared(
+        Path(directory), names, Capability.TIMESTAMPS not in withheld
+    )
 
 
 #: The whole registration. A name and something that turns an environment into a
@@ -351,7 +359,7 @@ def test_opening_what_was_never_acquired_fails_loudly(tmp_path):
     here rather than degrading. The alternative is a service that boots, answers
     `/health`, and is wrong.
     """
-    prepared = configure({VOICES: "low", DIRECTORY: str(tmp_path)})
+    prepared = configure({VOICES: "low", DIRECTORY: str(tmp_path)}, frozenset())
     with pytest.raises(FileNotFoundError, match="voice pack"):
         prepared.open()
 
@@ -445,22 +453,31 @@ def test_character_timings_come_out_word_exact(client):
     assert alignment["character_end_times_seconds"][-1] == pytest.approx(total, abs=1e-3)
 
 
-def test_a_capability_the_supplied_engine_withheld_is_refused(environ):
-    """The same engine, configured not to measure, and the endpoint goes away.
+def test_a_capability_this_deployment_withheld_reaches_the_supplied_engine(environ):
+    """One setting, one vocabulary, and an outside engine that hears it.
 
-    [LAW:one-source-of-truth] The 501 is derived from what this engine declared
-    at startup, so an outside engine gets the negotiation the in-tree ones get:
-    it withholds a capability and the server stops offering the endpoint, without
-    either side naming the other. The refusal must also stay clean of this
-    engine's vocabulary — an endpoint that told a caller to set `TONE_TIMINGS`
-    would be an endpoint that had heard of an engine.
+    `ELVENSPEAK_WITHHOLD` is the server's own and names a `Capability`, so it
+    means the same thing whichever engine is running — where the setting it
+    replaced was `ELVENSPEAK_TIMESTAMPS`, read by Piper alone, which left a
+    deployment that switched timestamps off and then ran a different engine being
+    answered with timestamps anyway.
+
+    Both halves are asserted because they are different promises. The engine
+    really declines the capability, which is what makes the setting worth more
+    than a filter over the response — an engine is told in time to not build the
+    machinery. And the endpoint really refuses, which is the server's own
+    enforcement and is what an engine that ignored the offer would still get.
     """
-    timeless = serving({**environ, MEASURES: "0"})
+    withholding = {**environ, "ELVENSPEAK_WITHHOLD": "timestamps"}
+    prepared = Settings.from_env(SUPPLIED, withholding).engine
+    assert Capability.TIMESTAMPS not in prepared.open().capabilities()
+
+    timeless = serving(withholding)
     response = timeless.post(
         "/v1/text-to-speech/tone-low/with-timestamps", json={"text": TEXT}
     )
     assert response.status_code == 501
-    assert MEASURES not in response.text
+    assert "ELVENSPEAK_" not in response.text
     assert timeless.post(
         "/v1/text-to-speech/tone-low", json={"text": TEXT}
     ).status_code == 200

@@ -54,7 +54,7 @@ def test_a_fallback_naming_no_offered_voice_exits_the_same_way(monkeypatch, caps
     monkeypatch.setenv("PIPER_VOICES", VOICE)
     monkeypatch.setenv("PIPER_MODELS_DIR", str(MODELS))
     monkeypatch.setenv("PIPER_ALLOW_DOWNLOAD", "0")
-    monkeypatch.setenv("ELVENSPEAK_TIMESTAMPS", "0")
+    monkeypatch.setenv("ELVENSPEAK_WITHHOLD", "timestamps")
     monkeypatch.setenv("ELVENSPEAK_FALLBACK_VOICE", "en_GB-nonexistent-medium")
     monkeypatch.delenv("ELVENSPEAK_ENGINE", raising=False)
 
@@ -80,7 +80,7 @@ def test_a_good_environment_builds_an_application(monkeypatch):
     monkeypatch.delenv("ELVENSPEAK_FALLBACK_VOICE", raising=False)
     monkeypatch.delenv("ELVENSPEAK_API_KEY", raising=False)
     monkeypatch.setenv("PORT", "5001")
-    monkeypatch.setenv("ELVENSPEAK_TIMESTAMPS", "0")
+    monkeypatch.setenv("ELVENSPEAK_WITHHOLD", "timestamps")
 
     app = main.build()
     assert isinstance(app, FastAPI)

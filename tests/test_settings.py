@@ -18,6 +18,7 @@ import pytest
 from conftest import DeclaredPrepared
 
 from elvenspeak import piper
+from elvenspeak.engine import Capability
 from elvenspeak.engines import ENGINES
 from elvenspeak.piper import DEFAULT_VOICE
 from elvenspeak.provisioning import ConfigError, Registry
@@ -51,8 +52,8 @@ def test_the_unnamed_engine_is_the_registry_s_first_entry():
     outside the registry that could come to name an engine that is not in it.
     """
     registry: Registry = {
-        "first": lambda _: DeclaredPrepared(),
-        "second": lambda _: pytest.fail("the second entry is not the default"),
+        "first": lambda _env, _withheld: DeclaredPrepared(),
+        "second": lambda *_: pytest.fail("the second entry is not the default"),
     }
     assert isinstance(Settings.from_env(registry, {}).engine, DeclaredPrepared)
 
@@ -141,6 +142,89 @@ def test_an_unknown_engine_reports_only_that():
     ]
 
 
+def test_nothing_is_withheld_by_default():
+    assert from_env().withheld == frozenset()
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("timestamps", {Capability.TIMESTAMPS}),
+        ("TIMESTAMPS", {Capability.TIMESTAMPS}),
+        (" speed , timestamps ", {Capability.SPEED, Capability.TIMESTAMPS}),
+        ("", set()),
+    ],
+)
+def test_withheld_capabilities_are_split_stripped_and_read_in_any_case(
+    value, expected
+):
+    """The spelling is the capability's own name, which is what the log prints.
+
+    Present-but-blank is genuinely "withhold nothing" here, unlike
+    `ELVENSPEAK_ENGINE=`: an empty list has an obvious meaning and an empty
+    engine name does not, so there is nothing for an operator to have meant
+    instead.
+    """
+    assert from_env(ELVENSPEAK_WITHHOLD=value).withheld == frozenset(expected)
+
+
+def test_a_name_that_is_not_a_capability_is_refused_rather_than_skipped():
+    """[LAW:no-silent-failure] A typo that withheld nothing is the original bug.
+
+    An operator who wrote `timestmaps` meant to switch timestamps off, and a
+    parse that quietly dropped the word would answer them with the timestamps
+    they asked not to have — the same silent disagreement `ELVENSPEAK_TIMESTAMPS`
+    produced, reached by a different route.
+    """
+    with pytest.raises(ConfigError) as raised:
+        from_env(ELVENSPEAK_WITHHOLD="timestmaps")
+    message = str(raised.value)
+    assert "timestmaps" in message
+    # The real names, read off the enum rather than listed here, so a capability
+    # added to it cannot leave this message describing a vocabulary that moved.
+    for capability in Capability:
+        assert capability.name.lower() in message
+
+
+def test_withholding_something_the_engine_never_had_is_not_an_error():
+    """Reachable by ordinary deployment, so it must not be a case to remember.
+
+    A Kokoro export with no `duration` output declares no timestamps; a
+    deployment that switched them off besides has said the same thing twice.
+    Subtracting from a set is what makes that free.
+    """
+    assert from_env(ELVENSPEAK_WITHHOLD="timestamps,speed").withheld == frozenset(
+        Capability
+    )
+
+
+def test_the_setting_reaches_the_engine_so_it_can_decline_to_build_the_machinery():
+    """Enforcement is the server's; the message is the economy.
+
+    Piper patches its ONNX graph at load time to expose durations, so a withheld
+    `TIMESTAMPS` only saves anything if the engine hears about it before it opens
+    a session. That is why this crosses `Configure` rather than being applied to
+    the engine's answer alone — which the server also does, in `create_app`.
+    """
+    assert from_env(ELVENSPEAK_WITHHOLD="timestamps").engine.timings is False
+    assert from_env().engine.timings is True
+
+
+def test_the_retired_name_is_refused_rather_than_ignored():
+    """[LAW:no-silent-failure] The defect this setting exists to end, on the way out.
+
+    `ELVENSPEAK_TIMESTAMPS` was read by Piper alone, so a deployment that set it
+    and ran another engine got timestamps anyway. Merely no longer reading it
+    would reproduce that exactly — the same operator, the same file, the same
+    wrong answer — so the name is a startup failure that names its replacement.
+    """
+    with pytest.raises(ConfigError) as raised:
+        from_env(ELVENSPEAK_TIMESTAMPS="0")
+    message = str(raised.value)
+    assert "ELVENSPEAK_TIMESTAMPS" in message
+    assert "ELVENSPEAK_WITHHOLD=timestamps" in message
+
+
 def test_an_unset_fallback_defers_the_choice_to_the_voices_that_load():
     """[LAW:types-are-the-program] Unset and switched-off stop sharing a value.
 
@@ -188,14 +272,14 @@ def test_a_bad_environment_exits_two_naming_every_problem(monkeypatch, capsys):
     of it would leave the half that actually runs untested.
     """
     monkeypatch.setenv("PORT", "99999")
-    monkeypatch.setenv("ELVENSPEAK_TIMESTAMPS", "maybe")
+    monkeypatch.setenv("ELVENSPEAK_WITHHOLD", "timestmaps")
 
     with pytest.raises(SystemExit) as raised, reported_or_exit():
         Settings.from_env(ENGINES)
 
     assert raised.value.code == 2
     stderr = capsys.readouterr().err
-    for expected in ("PORT", "ELVENSPEAK_TIMESTAMPS"):
+    for expected in ("PORT", "ELVENSPEAK_WITHHOLD"):
         assert expected in stderr
 
 
@@ -213,4 +297,4 @@ def test_a_good_environment_comes_back_as_settings(clean_env):
     # empty environment produces — the point being that `from_env` chose Piper
     # and handed it the same environment, rather than that Piper's own defaults
     # are what they are, which is `test_piper.py`'s business.
-    assert settings.engine == piper.configure({})
+    assert settings.engine == piper.configure({}, frozenset())

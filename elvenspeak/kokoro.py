@@ -196,7 +196,7 @@ class KokoroEngine:
             # An export without a `duration` output returns no timings at all,
             # so this says exactly what happened rather than being read back off
             # the capability that gated the call. The server does not ask an
-            # engine that withheld TIMESTAMPS; if it ever did, the answer would
+            # engine that never declared TIMESTAMPS; if it ever did, the answer would
             # be one unattributed stretch honestly marked, not invented numbers.
             measured=bool(timings),
         )
@@ -262,7 +262,9 @@ class _Prepared:
         )
 
 
-def configure(env: "Mapping[str, str]") -> _Prepared:
+def configure(
+    env: "Mapping[str, str]", withheld: frozenset[engine.Capability]
+) -> _Prepared:
     """Reads Kokoro's own environment, or says everything wrong with it at once.
 
     [LAW:parse-dont-validate] The checkpoint for this engine. Nothing below holds
@@ -272,6 +274,14 @@ def configure(env: "Mapping[str, str]") -> _Prepared:
     Every problem is collected rather than raised at the first, because this list
     is spliced into the server's own — an operator bringing the service up should
     not discover a bad voice name and then, one restart later, a bad port.
+
+    `withheld` is accepted and unused, which is the honest answer and not an
+    oversight. It is an offer of an economy, and this engine has none to take:
+    durations come out of the one session it opens either way, so there is no
+    cheaper session to open instead — where Piper can decline to patch its graph
+    and really save the memory. What the deployment withheld is enforced by the
+    server, once, against what this engine declares, so declining the offer costs
+    nothing and can never be the wrong answer.
     """
     problems: list[str] = []
 

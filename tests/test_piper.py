@@ -360,11 +360,13 @@ def test_opening_still_refuses_to_fetch_when_the_deployment_said_not_to(
 
 def test_a_voice_list_that_names_nothing_is_refused():
     with pytest.raises(ConfigError, match="PIPER_VOICES is empty"):
-        piper.configure({"PIPER_VOICES": "  ,  "})
+        piper.configure({"PIPER_VOICES": "  ,  "}, frozenset())
 
 
 def test_voices_are_split_and_stripped():
-    prepared = piper.configure({"PIPER_VOICES": "a-b-c , d-e-f,  g-h-i "})
+    prepared = piper.configure(
+        {"PIPER_VOICES": "a-b-c , d-e-f,  g-h-i "}, frozenset()
+    )
     assert prepared.keys == ("a-b-c", "d-e-f", "g-h-i")
 
 
@@ -378,12 +380,12 @@ def test_an_empty_models_dir_is_refused_not_taken_as_the_working_directory():
     the clean refusal a startup produces for every other misconfiguration.
     """
     with pytest.raises(ConfigError, match="PIPER_MODELS_DIR"):
-        piper.configure({"PIPER_MODELS_DIR": "   "})
+        piper.configure({"PIPER_MODELS_DIR": "   "}, frozenset())
 
 
 def test_an_absent_models_dir_still_gets_the_default():
     """Unset is not the same as set-to-empty, and only one of them is a problem."""
-    assert piper.configure({}).models_dir.name == "models"
+    assert piper.configure({}, frozenset()).models_dir.name == "models"
 
 
 @pytest.mark.parametrize("value,expected", [
@@ -391,7 +393,7 @@ def test_an_absent_models_dir_still_gets_the_default():
     ("0", False), ("false", False), ("No", False), ("off", False),
 ])
 def test_flags_accept_both_spellings(value, expected):
-    prepared = piper.configure({"PIPER_ALLOW_DOWNLOAD": value})
+    prepared = piper.configure({"PIPER_ALLOW_DOWNLOAD": value}, frozenset())
     assert prepared.allow_download is expected
 
 
@@ -403,7 +405,7 @@ def test_a_boolean_typo_is_a_config_error_not_a_silent_false(typo):
     typo in a boolean is exactly as much a mistake as a typo in a port.
     """
     with pytest.raises(ConfigError, match="PIPER_ALLOW_DOWNLOAD"):
-        piper.configure({"PIPER_ALLOW_DOWNLOAD": typo})
+        piper.configure({"PIPER_ALLOW_DOWNLOAD": typo}, frozenset())
 
 
 def test_every_problem_in_this_engine_s_configuration_is_reported_together():
@@ -412,9 +414,9 @@ def test_every_problem_in_this_engine_s_configuration_is_reported_together():
         piper.configure({
             "PIPER_VOICES": "  ,  ",
             "PIPER_MODELS_DIR": " ",
-            "ELVENSPEAK_TIMESTAMPS": "maybe",
-        })
+            "PIPER_ALLOW_DOWNLOAD": "maybe",
+        }, frozenset())
     joined = " ".join(raised.value.problems)
     assert len(raised.value.problems) == 3
-    for expected in ("PIPER_VOICES", "PIPER_MODELS_DIR", "ELVENSPEAK_TIMESTAMPS"):
+    for expected in ("PIPER_VOICES", "PIPER_MODELS_DIR", "PIPER_ALLOW_DOWNLOAD"):
         assert expected in joined

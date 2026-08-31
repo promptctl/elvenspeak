@@ -1,4 +1,4 @@
-"""Kokoro's own configuration, and the capability it is entitled to withhold.
+"""Kokoro's own configuration, and the capability it is entitled not to have.
 
 `tests/test_conformance.py` already asks this engine every question the seam
 asks of all of them. What is left here is what only this engine can be asked:
@@ -22,6 +22,7 @@ from conftest import (
     KOKORO_MODEL,
     KOKORO_TIMELESS_MODEL,
     KOKORO_VOICES,
+    MODELS_DIR,
     kokoro_prepared,
 )
 
@@ -47,7 +48,7 @@ def test_the_export_that_reports_durations_declares_it(engine):
     assert Capability.SPEED in engine.capabilities()
 
 
-def test_the_export_without_durations_withholds_the_capability(
+def test_the_export_without_durations_does_not_declare_the_capability(
     kokoro_timeless_installed,
 ):
     """[LAW:one-source-of-truth] The capability follows the session, not the name.
@@ -61,7 +62,7 @@ def test_the_export_without_durations_withholds_the_capability(
     engine = kokoro_prepared(model=KOKORO_TIMELESS_MODEL).open()
 
     assert Capability.TIMESTAMPS not in engine.capabilities()
-    # Still a working engine, so this is a capability withheld rather than a
+    # Still a working engine, so this is a capability absent rather than a
     # deployment broken — the distinction the whole negotiation rests on.
     assert Capability.SPEED in engine.capabilities()
     assert engine.voices()
@@ -113,6 +114,7 @@ def test_a_timestamps_request_is_refused_rather_than_answered_with_invented_numb
     prepared = kokoro_prepared(model=KOKORO_TIMELESS_MODEL)
     settings = Settings(
         engine=prepared,
+        withheld=frozenset(),
         fallback=KOKORO_VOICES[0],
         api_key=None,
         host="127.0.0.1",
@@ -131,6 +133,49 @@ def test_a_timestamps_request_is_refused_rather_than_answered_with_invented_numb
     # No alignment anywhere in the body: a 501 that still carried a character
     # timeline would be the invented numbers under a different status code.
     assert "alignment" not in response.text
+
+
+def test_a_deployment_that_withheld_timestamps_is_obeyed_by_this_engine_too(
+    kokoro_installed,
+):
+    """The defect this setting was made for, against the engine that had it.
+
+    Switching timestamps off was `ELVENSPEAK_TIMESTAMPS` and only Piper read it,
+    so this engine — whose export really does report durations — answered the
+    timestamp endpoints anyway, silently, for an operator who had used the
+    documented name and could see nothing wrong. Driven from an environment
+    rather than from a constructed `Settings`, because the parse is half of what
+    broke: the setting has to be the server's and reach whichever engine ran.
+    """
+    from fastapi.testclient import TestClient
+
+    from elvenspeak import create_app
+    from elvenspeak.engines import ENGINES
+    from elvenspeak.settings import Settings
+
+    settings = Settings.from_env(
+        ENGINES,
+        {
+            "ELVENSPEAK_ENGINE": "kokoro",
+            "ELVENSPEAK_WITHHOLD": "timestamps",
+            "KOKORO_VOICES": ",".join(KOKORO_VOICES),
+            "KOKORO_MODELS_DIR": str(MODELS_DIR),
+            "KOKORO_MODEL": KOKORO_MODEL,
+            "KOKORO_ALLOW_DOWNLOAD": "0",
+        },
+    )
+    opened = settings.engine.open()
+
+    # The engine still declares it: the export has a `duration` output and
+    # saying otherwise would be this engine lying about itself. What changes is
+    # what the server offers, which is the deployment's answer and not its.
+    assert Capability.TIMESTAMPS in opened.capabilities()
+
+    client = TestClient(create_app(settings, opened))
+    assert client.post(
+        f"/v1/text-to-speech/{KOKORO_VOICES[0]}/with-timestamps",
+        json={"text": "Hello there."},
+    ).status_code == 501
 
 
 # ------------------------------------------------------------ what it speaks in
@@ -295,7 +340,7 @@ def test_a_measured_utterance_honours_speed_too(engine):
 
 
 def test_the_defaults_name_a_real_export_and_real_voices():
-    prepared = kokoro.configure({})
+    prepared = kokoro.configure({}, frozenset())
 
     assert prepared.model == kokoro.DEFAULT_MODEL
     assert prepared.keys == kokoro.DEFAULT_VOICES
@@ -314,7 +359,7 @@ def test_a_voice_id_it_cannot_read_a_language_out_of_is_refused(key):
     making. Refused at the parse rather than discovered at synthesis.
     """
     with pytest.raises(ConfigError, match="KOKORO_VOICES"):
-        kokoro.configure({"KOKORO_VOICES": key})
+        kokoro.configure({"KOKORO_VOICES": key}, frozenset())
 
 
 @pytest.mark.parametrize("typo", ["tru", "yess", "0.0", "maybe"])
@@ -327,7 +372,7 @@ def test_a_boolean_that_is_not_one_is_reported_rather_than_read_as_off(typo):
     from the audio.
     """
     with pytest.raises(ConfigError, match="KOKORO_ALLOW_DOWNLOAD"):
-        kokoro.configure({"KOKORO_ALLOW_DOWNLOAD": typo})
+        kokoro.configure({"KOKORO_ALLOW_DOWNLOAD": typo}, frozenset())
 
 
 @pytest.mark.parametrize(
@@ -343,7 +388,7 @@ def test_a_present_but_blank_setting_is_not_an_absent_one(name, value):
     reported nothing.
     """
     with pytest.raises(ConfigError, match=name):
-        kokoro.configure({name: value})
+        kokoro.configure({name: value}, frozenset())
 
 
 def test_every_problem_in_this_engine_s_configuration_is_reported_together():
@@ -354,7 +399,8 @@ def test_every_problem_in_this_engine_s_configuration_is_reported_together():
                 "KOKORO_VOICES": "af_heart,nonsense",
                 "KOKORO_MODELS_DIR": " ",
                 "KOKORO_ALLOW_DOWNLOAD": "maybe",
-            }
+            },
+            frozenset(),
         )
 
     joined = " ".join(raised.value.problems)

@@ -98,7 +98,6 @@ ENV ELVENSPEAK_ENGINE="${ELVENSPEAK_ENGINE}" \
     KOKORO_VOICES="${KOKORO_VOICES}" \
     KOKORO_MODEL="${KOKORO_MODEL}" \
     KOKORO_ALLOW_DOWNLOAD=0 \
-    ELVENSPEAK_TIMESTAMPS=1 \
     PORT=5001
 
 # A module in the package, not Python written into this file. The build arg
