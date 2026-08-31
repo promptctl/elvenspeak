@@ -1,0 +1,13 @@
+# The build context is assembled and sent to the daemon before any COPY is
+# evaluated, so anything listed in .gitignore but present locally is uploaded on
+# every build whether or not the Dockerfile references it. Both of the big ones
+# here are expected to exist on a developer's machine: `.venv/` is gigabytes of
+# installed packages, and `models/` holds ~60 MB ONNX voices per voice.
+.venv/
+models/
+
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/

@@ -1,0 +1,28 @@
+# Which local voice answers for a voice ID this server does not own.
+#
+# [LAW:one-source-of-truth] Data, not code, so an operator can retarget a voice
+# without a release — and so there is exactly one table answering "which voice
+# is this", rather than one here and another in every client.
+#
+# The keys are ElevenLabs' own voice IDs. Callers written against ElevenLabs
+# hold these in config, in settings screens, in saved user preferences; a server
+# claiming to speak that API has to answer to them. The values are Piper voices
+# chosen for a comparable register, NOT for likeness — nothing here reproduces
+# an ElevenLabs voice, and a caller that needs a specific timbre should ask for
+# the Piper voice by name instead.
+#
+# An ID absent from this table is not an error: see `fallback` in settings and
+# the `x-elvenspeak-voice` response header, which names whatever actually spoke.
+
+[elevenlabs]
+# The nine voices from ElevenLabs' original default set, the ones most likely
+# to be hardcoded in a client written before voice pickers existed.
+"21m00Tcm4TlvDq8ikWAM" = "en_US-hfc_female-medium"  # Rachel
+"AZnzlk1XvdvUeBnXmlld" = "en_US-kristin-medium"     # Domi
+"EXAVITQu4vr4xnSDxMaL" = "en_US-amy-medium"         # Bella
+"MF3mGyEYCl7XYWbV9V6O" = "en_US-kathleen-low"       # Elli
+"ErXwobaYiN019PkySvjV" = "en_US-hfc_male-medium"    # Antoni
+"TxGEqnHWrfWFTfGW9XjX" = "en_US-joe-medium"         # Josh
+"VR6AewLTigWG4xSOukaG" = "en_US-bryce-medium"       # Arnold
+"pNInz6obpgDQGcFmaJgB" = "en_US-john-medium"        # Adam
+"yoZ06aMxZJJ28mfd3POQ" = "en_US-danny-low"          # Sam
