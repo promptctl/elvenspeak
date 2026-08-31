@@ -68,7 +68,10 @@ class Settings:
             fallback = fallback.strip()
         if fallback == "":
             fallback = None
-        elif fallback is not None and voices and fallback not in voices:
+        # No `voices and` here: an empty PIPER_VOICES is its own problem, and
+        # suppressing this one until that is fixed is how an operator discovers
+        # the second misconfiguration only after restarting for the first.
+        elif fallback is not None and fallback not in voices:
             problems.append(
                 f"PIPER_FALLBACK_VOICE={fallback!r} is not in PIPER_VOICES "
                 f"({', '.join(voices)})"

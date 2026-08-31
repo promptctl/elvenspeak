@@ -108,3 +108,24 @@ def test_every_problem_is_reported_together():
     assert "PIPER_FALLBACK_VOICE" in joined
     assert "PORT" in joined
     assert "ELVENSPEAK_TIMESTAMPS" in joined
+
+
+def test_an_empty_voice_list_does_not_hide_a_bad_fallback():
+    """Both problems, from one pass, when the two coincide.
+
+    The membership check used to be guarded by `voices and`, so an empty
+    PIPER_VOICES suppressed it — the operator fixed the empty list, restarted,
+    and only then learned the fallback was wrong too. That is precisely the
+    one-problem-per-restart loop this module exists to prevent, and it appeared
+    only in the case where the operator was already misconfigured twice.
+    """
+    with pytest.raises(ConfigError) as raised:
+        Settings.from_env({
+            "PIPER_VOICES": "  ,  ",
+            "PIPER_FALLBACK_VOICE": "en_US-lessac-medium",
+        })
+    problems = raised.value.problems
+    assert len(problems) == 2
+    joined = " ".join(problems)
+    assert "PIPER_VOICES is empty" in joined
+    assert "PIPER_FALLBACK_VOICE" in joined
