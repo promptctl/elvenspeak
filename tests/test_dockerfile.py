@@ -89,3 +89,33 @@ def test_the_build_arg_is_not_spliced_into_source_text():
     """It reaches Python through the environment; interpolation was injectable."""
     assert "'${PIPER_VOICES}'" not in instructions()
     assert "os.environ['PIPER_VOICES']" in instructions()
+
+
+def test_the_image_builds_on_the_python_this_project_targets():
+    """[LAW:one-source-of-truth] Three declarations of one fact, tied together.
+
+    The Python version is asserted independently in `.python-version`, in
+    `pyproject.toml`'s `requires-python`, and in the Dockerfile's `FROM`. Nothing
+    connected them, so bumping the first for local development would leave the
+    image built and tested against a different interpreter than the one anyone
+    develops on — a skew that produces no error at the moment it is introduced.
+
+    Machine-checked rather than remembered: a build-time ARG would still need a
+    literal default here, which moves the third copy rather than removing it.
+    """
+    pinned = (REPO / ".python-version").read_text().strip()
+
+    requires = (REPO / "pyproject.toml").read_text()
+    declared = re.search(r'requires-python\s*=\s*"[^0-9]*([0-9]+\.[0-9]+)', requires)
+    assert declared, "pyproject.toml does not declare requires-python"
+
+    from_tags = re.findall(
+        r"^\s*FROM\s+python:([0-9]+\.[0-9]+)", DOCKERFILE.read_text(), re.MULTILINE
+    )
+    assert from_tags, "no python base image found in the Dockerfile"
+
+    assert declared.group(1) == pinned, (
+        f"pyproject requires-python {declared.group(1)} != .python-version {pinned}"
+    )
+    for tag in from_tags:
+        assert tag == pinned, f"Dockerfile FROM python:{tag} != .python-version {pinned}"
