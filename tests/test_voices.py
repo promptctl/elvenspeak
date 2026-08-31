@@ -13,6 +13,7 @@ import pytest
 
 from elvenspeak.engine import Voice
 from elvenspeak import voices as voices_mod
+from elvenspeak.provisioning import ConfigError
 from elvenspeak.voices import Catalog, Substitution, VoiceNotInstalled, load_aliases
 
 
@@ -130,6 +131,27 @@ def test_a_fallback_that_is_not_installed_is_refused_at_construction():
         )
 
 
+def test_both_catalog_problems_are_reported_together():
+    """One restart, the whole list — the promise `ConfigError` carries.
+
+    This module was the last one raising on the first problem it found, which
+    only became a contradiction when these checks started raising the type whose
+    docstring promises the opposite. An operator with a bad fallback and a
+    dangling alias would fix one, restart, and meet the other.
+    """
+    with pytest.raises(ConfigError) as raised:
+        Catalog(
+            voices={"en_US-lessac-medium": voice("en_US-lessac-medium")},
+            fallback="en_US-not-installed",
+            aliases={"dead": "en_US-also-not-installed"},
+        )
+    problems = raised.value.problems
+    assert len(problems) == 2
+    joined = " ".join(problems)
+    assert "en_US-not-installed" in joined
+    assert "en_US-also-not-installed" in joined
+
+
 def test_an_alias_pointing_at_no_installed_voice_is_refused_at_construction():
     """The alias half of the same invariant the fallback already holds.
 
@@ -177,12 +199,18 @@ def test_an_unnamed_fallback_becomes_the_first_voice_the_engine_offers():
     engine can answer. Answered here, once, and stored as an ordinary id — so
     everything downstream, the operator log included, reads a voice rather than
     an instruction.
+
+    Offered first, not sorted first. The engine here lists its voices in an
+    order that is deliberately *not* alphabetical, because with an already-sorted
+    fixture this test passes whether the fallback follows the engine's order or
+    quietly re-sorts — and a re-sort is precisely the bug that shipped: it hands
+    the deployment a default voice its operator never chose.
     """
     cat = Catalog.for_engine(
-        _Engine("en_US-aaa-medium", "en_US-zzz-medium"),
+        _Engine("en_US-zzz-medium", "en_US-aaa-medium"),
         fallback=Substitution.FIRST_OFFERED,
     )
-    assert cat.fallback == "en_US-aaa-medium"
+    assert cat.fallback == "en_US-zzz-medium"
     assert cat.resolve("some-elevenlabs-id").substituted
 
 

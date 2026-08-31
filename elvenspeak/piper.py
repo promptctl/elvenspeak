@@ -128,11 +128,26 @@ class PiperEngine:
         self._capabilities = capabilities
 
     def voices(self) -> tuple[engine.Voice, ...]:
-        return tuple(self._installed[key].voice for key in sorted(self._installed))
+        """Every configured voice, in the order the operator named them.
+
+        Configured order rather than sorted, because the interface makes this
+        order mean something: the first voice offered is what answers for an
+        unknown id when the deployment named no fallback. Sorted, that default
+        was whichever id happened to come first alphabetically — so an operator
+        who listed their preferred voice first in `PIPER_VOICES` and left the
+        fallback unset silently got a different one. Stable across calls either
+        way, which is all [`engine.Engine.voices`] asks; this order is also
+        true.
+
+        `GET /v1/voices` is unaffected: [`elvenspeak.voices.Catalog.installed`]
+        sorts for display on its own.
+        """
+        return tuple(installed.voice for installed in self._installed.values())
 
     def capabilities(self) -> frozenset[engine.Capability]:
-        # Settled by `load` from the flag the sessions were really opened under,
-        # not recomputed from the setting that produced it: `include_alignments`
+        # Settled by `_Prepared.open` from the flag the sessions were really
+        # opened under, not recomputed from the setting that produced it:
+        # `include_alignments`
         # patches the graph at load time, so these particular sessions are the
         # only thing that knows whether durations can be reported.
         return self._capabilities

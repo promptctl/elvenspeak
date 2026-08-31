@@ -74,6 +74,20 @@ def test_a_blank_engine_name_is_refused_rather_than_taken_as_no_preference():
         from_env(ELVENSPEAK_ENGINE="   ")
 
 
+def test_an_empty_registry_is_a_config_error_not_a_stopiteration():
+    """The one way out of this module that `reported_or_exit` could not catch.
+
+    `next(iter(engines))` on an empty mapping raises `StopIteration`, which is
+    not a `ConfigError` and so becomes an unhandled traceback rather than a
+    clean exit 2. Nothing here registers an empty registry, but `Registry` is a
+    plain mapping a caller supplies and the type cannot say it is non-empty —
+    and the unknown-name message a few lines below already anticipated this
+    case, so it was considered on one path and not the other.
+    """
+    with pytest.raises(ConfigError, match="no engines registered"):
+        Settings.from_env({}, {})
+
+
 def test_an_unknown_engine_is_refused_and_says_what_there_is():
     with pytest.raises(ConfigError) as raised:
         from_env(ELVENSPEAK_ENGINE="kokoro")

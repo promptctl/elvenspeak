@@ -7,7 +7,7 @@ function that still existed, still took those arguments, and had quietly stopped
 guaranteeing what the build depended on. That is precisely what shipped, and the
 only fix is code a test can call — so these call it.
 
-No network and no real model: `install` opens the `.onnx.json` sidecar and never
+No network and no real model: `_install` opens the `.onnx.json` sidecar and never
 the weights, so a placeholder file is a voice as far as this step can tell.
 """
 
@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import make_voice, piper_prepared
+from conftest import DeclaredPrepared, make_voice, piper_prepared
 
 from elvenspeak.bake import bake
 from elvenspeak.engines import ENGINES
@@ -99,7 +99,7 @@ def test_a_missing_voice_is_fetched_even_though_the_runtime_may_not_fetch(
 
     The download is stubbed on the real `piper.download_voices` rather than by
     replacing `sys.modules["piper"]`: a stub package has no `__path__`, so
-    `install`'s own import of that submodule would only resolve if some earlier
+    `_install`'s own import of that submodule would only resolve if some earlier
     test had already cached it — which is how this file would pass in a suite
     and fail on its own.
     """
@@ -117,6 +117,26 @@ def test_a_missing_voice_is_fetched_even_though_the_runtime_may_not_fetch(
 
     assert fetched == [KEY]
     assert voice.id == KEY
+
+
+def test_an_engine_with_no_assets_bakes_nothing_and_says_so():
+    """The build of an image whose engine installs nothing, which must still work.
+
+    A remote engine has no models to fetch, so its `acquire` reports no voices —
+    and the bake has to treat that as a successful build with nothing to log
+    rather than as a failure to install. [LAW:no-silent-failure] cuts the other
+    way here: an empty result is only honest because an engine that *does* have
+    assets refuses an empty voice list while parsing, so the two never arrive at
+    the same value.
+    """
+    settings = Settings(
+        engine=DeclaredPrepared(),
+        fallback=Substitution.FIRST_OFFERED,
+        api_key=None,
+        host="0.0.0.0",
+        port=5001,
+    )
+    assert bake(settings) == ()
 
 
 def test_the_baked_voices_are_the_ones_the_environment_names(tmp_path, clean_env):

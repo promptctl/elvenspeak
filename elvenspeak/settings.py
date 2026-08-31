@@ -154,6 +154,15 @@ def _prepare(engines: Registry, env: Mapping[str, str]) -> Prepared:
     and taking it for "no preference" would boot the default engine, silently,
     for someone whose whole intent was to run a different one.
     """
+    if not engines:
+        # Before `next(iter(engines))`, which would otherwise be a bare
+        # StopIteration — the one way out of this module that is not a
+        # ConfigError, and so the one `reported_or_exit` cannot turn into a
+        # clean exit. Nothing in this repository registers an empty one, but
+        # `Registry` is a plain mapping a caller supplies and the type cannot
+        # say it is non-empty.
+        raise ConfigError(["no engines registered"])
+
     named = env.get("ELVENSPEAK_ENGINE", "").strip()
     if "ELVENSPEAK_ENGINE" in env and not named:
         raise ConfigError(
@@ -163,9 +172,6 @@ def _prepare(engines: Registry, env: Mapping[str, str]) -> Prepared:
     configure = engines.get(chosen)
     if configure is None:
         raise ConfigError(
-            [
-                f"ELVENSPEAK_ENGINE={chosen!r} is not one of: "
-                f"{', '.join(engines) or '(no engines registered)'}"
-            ]
+            [f"ELVENSPEAK_ENGINE={chosen!r} is not one of: {', '.join(engines)}"]
         )
     return configure(env)

@@ -35,7 +35,7 @@ KEY = "en_US-lessac-medium"
 class _StubVoice:
     """A loaded model that produces no audio.
 
-    Enough for every test here: what is under test is which files `load` demands
+    Enough for every test here: what is under test is which files opening demands
     and what it reads out of them, not what the ONNX graph does with them.
     """
 
@@ -54,7 +54,7 @@ def stub_sessions(monkeypatch):
     The one symbol is replaced on the real module rather than the module being
     replaced wholesale. A stub object in `sys.modules["piper"]` has no
     `__path__`, so `from piper.download_voices import download_voice` — which
-    `install` runs before anything else — could only resolve if some earlier test
+    `_install` runs before anything else — could only resolve if some earlier test
     had already cached that submodule. It did: `test_api.py` runs first and
     imports the real one, so this file passed in a full run and failed 9 of 11
     on its own, which is also how it would fail on a machine with no baked model.
@@ -87,6 +87,30 @@ def test_an_installed_voice_becomes_an_engine(tmp_path):
     # rather than on the voice, which is where a caller can act on it.
     spoken = engine.speak(engine.voices()[0], "hello", Prosody())
     assert spoken.sample_rate == 22050
+
+
+def test_voices_come_back_in_the_order_the_operator_named_them(tmp_path):
+    """Configured order, not sorted — the first one offered is load-bearing.
+
+    A deployment that names no fallback answers unknown ids in whichever voice
+    the engine lists first, so sorting here silently overrides the operator's
+    stated preference: `PIPER_VOICES=en_US-lessac-medium,en_GB-alba-medium` used
+    to default to lessac and, sorted, would hand every substituted request to
+    alba instead. The two voices below are chosen so the configured order and
+    the alphabetical one disagree; with any two that happen to agree, this test
+    passes either way and says nothing.
+    """
+    make_voice(tmp_path, key="en_US-lessac-medium")
+    make_voice(tmp_path, key="en_GB-alba-medium")
+
+    engine = piper_prepared(
+        tmp_path, voices=("en_US-lessac-medium", "en_GB-alba-medium")
+    ).open()
+
+    assert [v.id for v in engine.voices()] == [
+        "en_US-lessac-medium",
+        "en_GB-alba-medium",
+    ]
 
 
 def test_a_missing_voice_refuses_to_boot_when_downloading_is_off(tmp_path):
@@ -219,7 +243,8 @@ def test_a_voice_with_no_usable_sample_rate_refuses_to_boot(tmp_path, rate):
 def test_a_sidecar_that_cannot_be_read_fails_the_bake(tmp_path, sidecar):
     """The image build is the last moment this failure is cheap.
 
-    `install` is what the Dockerfile calls, and a version of it that checked only
+    `_install`, reached through `Prepared.acquire`, is what the image build runs,
+    and a version of it that checked only
     that both files existed let a truncated or malformed `.onnx.json` bake into a
     green image that then failed at every container start — the interrupted-write
     case the existence checks are already there for, surviving them because the

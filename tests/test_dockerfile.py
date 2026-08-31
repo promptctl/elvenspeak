@@ -253,7 +253,7 @@ def test_the_voice_bake_runs_a_module_that_exists_and_refuses_a_bad_environment(
     entry point does.
 
     It stops there, before `bake` is called: what the bake guarantees, and that
-    it still reaches `piper.install`, is `tests/test_bake.py`'s subject, which
+    it still reaches `piper._install`, is `tests/test_bake.py`'s subject, which
     calls it directly — the whole reason this step was given a file.
     """
     import subprocess

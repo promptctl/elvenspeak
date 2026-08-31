@@ -186,8 +186,15 @@ class DeclaredPrepared:
     capabilities: frozenset[Capability] = frozenset(Capability)
 
     def acquire(self) -> tuple[Voice, ...]:
-        """Nothing to install, which an engine with no assets says by saying so."""
-        return DECLARED_VOICES
+        """Nothing to install, which an engine with no assets says by saying so.
+
+        No voices rather than the two it will serve: this engine makes its noise
+        in memory, so a build has nothing to put on disk for it and nothing to
+        prove it put there. That is the case `provisioning.Prepared.acquire`
+        describes for a remote API, and returning the served voices here would
+        leave the only worked example of the assetless path modelling it wrongly.
+        """
+        return ()
 
     def open(self) -> DeclaredEngine:
         return DeclaredEngine(self.capabilities)
@@ -222,7 +229,7 @@ def clean_env(monkeypatch):
 def make_voice(
     models_dir: Path, key: str = "en_US-lessac-medium", sample_rate: int = 22050
 ) -> None:
-    """A voice as far as `install` and `load` can tell: both halves present.
+    """A voice as far as installing and opening can tell: both halves present.
 
     No real Piper model is needed. `_describe` reads only the `.onnx.json`
     sidecar and never opens the weights, so the `.onnx` here is a placeholder

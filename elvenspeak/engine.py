@@ -218,11 +218,18 @@ class Engine(Protocol):
     """
 
     def voices(self) -> tuple[Voice, ...]:
-        """Every voice this engine can speak in now, in a stable order.
+        """Every voice this engine can speak in now, best first.
 
         Now, not eventually: a voice that would have to be fetched or warmed on
         first use is not offered, because the caller that named it would pay an
         unbounded and silent delay for the privilege of being first.
+
+        The order is stable across calls, and its first element is load-bearing:
+        a deployment that names no fallback voice answers unknown ids in
+        whichever one an engine lists first. So an engine that has a reason to
+        prefer a voice puts it at the front, and one that does not still must
+        not reorder between calls — a sort chosen for tidiness silently picks
+        the default voice of every deployment that left the setting alone.
         """
         ...
 

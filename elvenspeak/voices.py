@@ -149,12 +149,15 @@ class Catalog:
         # since this is the one configuration check that cannot run until an
         # engine is open. It subclasses ValueError, so a caller catching that
         # still does.
+        # Accumulated rather than raised one at a time, because [`ConfigError`]
+        # promises the whole list and an operator with a bad fallback *and* a
+        # dangling alias would otherwise fix one, restart, and meet the other.
+        # This module was the last one still raising on the first problem.
+        problems: list[str] = []
         if fallback is not None and fallback not in voices:
-            raise ConfigError(
-                [
-                    f"fallback voice {fallback!r} is not among the installed "
-                    f"voices: {', '.join(sorted(voices)) or '(none)'}"
-                ]
+            problems.append(
+                f"fallback voice {fallback!r} is not among the installed "
+                f"voices: {', '.join(sorted(voices)) or '(none)'}"
             )
         self._voices = voices
         self._fallback = fallback
@@ -171,12 +174,13 @@ class Catalog:
         # nothing at all.
         dangling = sorted(set(table.values()) - set(voices))
         if dangling:
-            raise ConfigError(
-                [
-                    f"alias targets are not among the installed voices: "
-                    f"{', '.join(dangling)}"
-                ]
+            problems.append(
+                f"alias targets are not among the installed voices: "
+                f"{', '.join(dangling)}"
             )
+
+        if problems:
+            raise ConfigError(problems)
         self._aliases = table
 
     @property
