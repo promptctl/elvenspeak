@@ -10,6 +10,7 @@ somebody's first call.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -126,6 +127,29 @@ class Settings:
             host=env.get("HOST", "0.0.0.0"),
             port=port,
         )
+
+
+    @staticmethod
+    def from_env_or_exit() -> "Settings":
+        """The environment, or a process already stopped over what is wrong with it.
+
+        [LAW:single-enforcer] Every entry point comes through here — `uv run
+        main.py`, the factory behind `uvicorn main:build --factory`, and the
+        image's `python -m elvenspeak.bake` step — so a misconfiguration is
+        reported one way whichever one is running. This was `main.py`'s private
+        helper, which is the shape that lets the next entry point answer a bad
+        environment with a raw traceback: the divergence gets written by
+        omission, in the module that never knew the helper existed.
+        """
+        try:
+            return Settings.from_env()
+        except ConfigError as error:
+            # Every problem at once, on stderr, with a non-zero exit: an operator
+            # bringing this up for the first time should not discover their
+            # configuration one restart at a time.
+            for problem in error.problems:
+                print(f"config error: {problem}", file=sys.stderr)
+            raise SystemExit(2) from None
 
 
 class ConfigError(ValueError):
