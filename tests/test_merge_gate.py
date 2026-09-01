@@ -27,13 +27,19 @@ from pathlib import Path
 
 WORKFLOW = Path(__file__).parent.parent / ".github" / "workflows" / "tests.yml"
 
-#: The step that runs the suite. Matched against the file with its comment lines
-#: removed, because this workflow's comments discuss retrying at length -- they
-#: are the record of why nothing here retries -- and a check that cannot tell
-#: YAML from prose about YAML would read that prose as the thing it forbids.
+#: The step that runs the suite, captured as everything pytest itself is passed.
+#: Matched against the file with its comment lines removed, because this
+#: workflow's comments discuss retrying at length -- they are the record of why
+#: nothing here retries -- and a check that cannot tell YAML from prose about
+#: YAML would read that prose as the thing it forbids.
 #: `tests/test_workflow.py` keeps its distance from the same mistake, which
 #: `tests/test_dockerfile.py` was bitten by first.
-_PYTEST = re.compile(r"^\s*run:\s*(.*\bpytest\b.*)$", re.MULTILINE)
+#:
+#: The capture starts after the word `pytest` so that the selectors below are
+#: read as pytest's own. `uv run python -m pytest` is a legitimate way to spell
+#: this step, and a check that searched the whole line for `-m` would call that
+#: spelling a narrowed test run and refuse it.
+_PYTEST = re.compile(r"^\s*run:\s*.*\bpytest\b(.*)$", re.MULTILINE)
 
 #: Ways to make a failing suite stop failing the check, spelled as they appear in
 #: a workflow. Not a guess at everything a future editor might reach for -- an
@@ -43,7 +49,12 @@ _SILENCERS = ("continue-on-error", "|| true", "|| :")
 
 #: Selectors that shrink what `pytest` collects. A gate running a tenth of the
 #: suite passes a tenth of the time it should fail.
-_NARROWERS = (" -k", " -m", " --ignore", " tests/", " tests ")
+#:
+#: A named module or test is `.py` and `::` rather than a directory, because
+#: `pytest tests/` collects the whole suite -- every test in this project lives
+#: under that one directory -- and refusing that spelling would be refusing a
+#: gate that does exactly what it should.
+_NARROWERS = (" -k", " -m", " --ignore", " --deselect", ".py", "::")
 
 
 def yaml_without_prose() -> str:
@@ -55,8 +66,8 @@ def yaml_without_prose() -> str:
     )
 
 
-def pytest_commands() -> list[str]:
-    """Every command in the workflow that invokes pytest."""
+def pytest_arguments() -> list[str]:
+    """What each pytest invocation in the workflow passes to pytest."""
     return _PYTEST.findall(yaml_without_prose())
 
 
@@ -68,7 +79,7 @@ def test_the_gate_still_runs_the_suite():
     green, and meaning nothing. A workflow that stopped running the suite reads
     identically from here, which is the point: neither is allowed to be silent.
     """
-    assert pytest_commands(), (
+    assert pytest_arguments(), (
         "no pytest invocation in the merge gate — either the workflow stopped "
         "running the suite, or this regex stopped finding it"
     )
@@ -81,10 +92,10 @@ def test_the_gate_runs_every_test():
     in a green check, so the narrowing has to be refused here rather than noticed
     later.
     """
-    for command in pytest_commands():
-        found = [flag for flag in _NARROWERS if flag in command]
+    for arguments in pytest_arguments():
+        found = [flag for flag in _NARROWERS if flag in arguments]
         assert not found, (
-            f"the merge gate narrows what it collects with {found}: {command!r} — "
+            f"the merge gate narrows what it collects with {found}: {arguments!r} — "
             "a check that runs part of the suite passes for the wrong reason"
         )
 
