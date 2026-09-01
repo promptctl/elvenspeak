@@ -523,11 +523,22 @@ jobs:
               ;;
           esac
 
-          # `tags` comes back as a JSON array, or as null for a repository that exists with
-          # nothing published. tr and sed both succeed on no matches, so that case leaves
-          # `highest` empty; a grep in this position would exit 1 and take the whole
-          # pipeline down under pipefail on exactly the first build.
-          highest="$(tr ',[]' '\n\n\n' < "$body" | tr -d '"' \
+          # Read as JSON, because it is JSON. Splitting the body on brackets and commas
+          # assumes the registry never indents: a pretty-printed array leaves the leading
+          # whitespace on every tag, the anchored match below finds none, `highest` comes
+          # back empty, and the step numbers today from 1 over tags that already exist —
+          # the silent overwrite this whole step is built to prevent, arriving through
+          # formatting rather than through an HTTP error. Nothing downstream would catch
+          # it either: the verify steps compare the registry against what THIS run pushed,
+          # so they pass once the overwrite has happened. [LAW:no-silent-failure]
+          #
+          # `.tags[]?` also covers the case the old pipeline was written around — the
+          # `null` a repository returns when it exists with nothing published yields
+          # nothing and exits 0, so the first build stays the empty case rather than an
+          # error. A body that is not JSON at all now aborts here instead of parsing to
+          # empty, which is the correct direction for a value that decides what gets
+          # overwritten.
+          highest="$(jq -r '.tags[]? // empty' "$body" \
             | sed -nE "s/^$today_re\.([0-9]+)$/\1/p" | sort -n | tail -n 1)"
 
           # 10# because `highest` is a digit string from the registry and anyone may retag:
