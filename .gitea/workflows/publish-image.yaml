@@ -637,31 +637,27 @@ jobs:
           # does not. The version is kept even though it repeats the registry tag: a tag is
           # a pointer the registry owns and can move, while this travels in the image and
           # still answers after a `pull` by digest.
+          #
+          # [LAW:no-silent-failure] `set -u` aborts on a variable that is unset, but not on
+          # one that is set and empty, which would publish `gdn.sanctuary.build.ref=` — a
+          # label that is present, looks answered, and says nothing. `:?` refuses at the
+          # point of interpolation, so an empty value cannot compose into a label rather
+          # than having to be spotted in one afterwards; a check on the finished block
+          # cannot do this, because by then a literal `/` and an interpolated one are the
+          # same character. [LAW:parse-dont-validate]
+          #
+          # [LAW:dataflow-not-control-flow] The guard rides on each use rather than a list
+          # naming the variables, so a label added later is covered by being written the
+          # same way, not by someone remembering to extend a list somewhere else.
+          empty='is empty, and would publish a label that looks answered and says nothing'
           stamp="$(cat <<STAMP
-          org.opencontainers.image.revision=$REVISION
-          org.opencontainers.image.source=$FORGE/$GITHUB_REPOSITORY
-          org.opencontainers.image.version=$TAG
-          gdn.sanctuary.build.ref=$GITHUB_REF
-          gdn.sanctuary.build.run=$FORGE/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          org.opencontainers.image.revision=${REVISION:?$empty}
+          org.opencontainers.image.source=${FORGE:?$empty}/${GITHUB_REPOSITORY:?$empty}
+          org.opencontainers.image.version=${TAG:?$empty}
+          gdn.sanctuary.build.ref=${GITHUB_REF:?$empty}
+          gdn.sanctuary.build.run=${FORGE:?$empty}/${GITHUB_REPOSITORY:?$empty}/actions/runs/${GITHUB_RUN_ID:?$empty}
           STAMP
           )"
-
-          # [LAW:no-silent-failure] Every label must carry a value. `set -u` already aborts
-          # on a variable that is unset, but not on one that is set and empty, which would
-          # publish `gdn.sanctuary.build.ref=` — a label that is present, looks answered,
-          # and says nothing.
-          #
-          # [LAW:dataflow-not-control-flow] Asked of the composed block rather than of each
-          # variable before it. Guards naming individual variables would leave a label
-          # added later unchecked, because nothing would tie the guard list to the label
-          # list; this covers every label there is and every label there will be, so a fact
-          # is protected by having been added to the heredoc above.
-          if printf '%s\n' "$stamp" | grep -q '=$'; then
-            echo "ERROR: these labels came out with no value, so the image would carry" >&2
-            echo "       fields that look answered and say nothing:" >&2
-            printf '%s\n' "$stamp" | grep '=$' >&2
-            exit 1
-          fi
 
           # What the PUBLISHED image must report, which is more than what CI stamps.
           #
