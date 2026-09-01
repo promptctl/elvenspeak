@@ -63,6 +63,16 @@ class Settings:
     #: value, which is what stops the build and the boot naming different
     #: engines.
     engine: Prepared
+    #: What that engine is called: its key in the registry [`from_env`] was
+    #: handed. The name used to be computed here and thrown away, which left the
+    #: server able to run an engine it could not name — and the alias
+    #: declarations are a file named after the engine, so a server that cannot
+    #: say which engine it is running cannot find them
+    #: ([`elvenspeak.voices.load_aliases`]).
+    #:
+    #: [LAW:one-source-of-truth] Filled from the same lookup that produced
+    #: [`engine`], so the two cannot name different engines.
+    engine_name: str
     #: Capabilities this deployment does not offer, whatever the engine can do.
     #: Subtracted from the engine's own declaration in
     #: [`elvenspeak.api.create_app`], which is the one place the two meet — and
@@ -128,7 +138,7 @@ class Settings:
             withheld = frozenset()
 
         try:
-            prepared = _prepare(engines, env, withheld)
+            chosen = _prepare(engines, env, withheld)
         except ConfigError as error:
             # Spliced rather than replacing: a bad port and a bad voice name are
             # both true at once, and an operator should see both on the first
@@ -139,7 +149,8 @@ class Settings:
             raise ConfigError(problems)
 
         return Settings(
-            engine=prepared,
+            engine=chosen.engine,
+            engine_name=chosen.name,
             withheld=withheld,
             fallback=fallback,
             api_key=env.get("ELVENSPEAK_API_KEY") or None,
@@ -211,9 +222,24 @@ def _withheld(env: Mapping[str, str]) -> frozenset[Capability]:
     return frozenset(Capability[text.upper()] for text in named)
 
 
+@dataclass(frozen=True)
+class _Chosen:
+    """One engine, and the name it was chosen by.
+
+    [LAW:parse-dont-validate] The type [`_prepare`] returns, and it carries both
+    halves because both are results of the one lookup that proved the name real.
+    Returned separately — or recomputed by a caller reading `ELVENSPEAK_ENGINE`
+    a second time — they would be two answers to "which engine is this" with
+    nothing holding them together.
+    """
+
+    name: str
+    engine: Prepared
+
+
 def _prepare(
     engines: Registry, env: Mapping[str, str], withheld: frozenset[Capability]
-) -> Prepared:
+) -> _Chosen:
     """The named engine, configured from `env`, or a [`ConfigError`] saying why not.
 
     [LAW:parse-dont-validate] Its own unit, returning a type that could not exist
@@ -250,4 +276,4 @@ def _prepare(
         raise ConfigError(
             [f"ELVENSPEAK_ENGINE={chosen!r} is not one of: {', '.join(engines)}"]
         )
-    return configure(env, withheld)
+    return _Chosen(name=chosen, engine=configure(env, withheld))

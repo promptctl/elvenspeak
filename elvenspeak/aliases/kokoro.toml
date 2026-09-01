@@ -1,0 +1,52 @@
+# Which Kokoro voice answers for a voice id this server does not own.
+#
+# Read only by a deployment running the `kokoro` engine — the file is named
+# after that engine's registry key, and `elvenspeak.voices.load_aliases` opens
+# the one file named after the engine that is running. Why the table is scoped
+# that way is written there, once.
+#
+# The keys are ElevenLabs' own voice IDs, the same nine this service's `piper`
+# table answers for; the values are Kokoro voices chosen for a comparable
+# REGISTER, not for likeness. Nothing here reproduces an ElevenLabs voice.
+#
+# No pitch measurement was needed on this side. A Kokoro voice id is
+# `<language><gender>_<name>`, so the id states the register outright — see
+# `_VOICE_GENDERS` in `elvenspeak.kokoro`, which is already the one place that
+# character is read. `a` is American English and `b` is British.
+#
+# WHY ONLY TWO OF THE FOUR BAKED VOICES APPEAR HERE. The image also bakes
+# bf_emma and bm_george, and this table deliberately sends nothing to them:
+# both return zero samples for short utterances, which reaches a caller as a
+# 500. Measured across sixteen one- and two-word lines through the int8 export
+# this image runs:
+#
+#   af_heart     0/16 failed
+#   am_michael   1/16 failed   (the single letter "A")
+#   bf_emma     12/16 failed   ("No", "Yes", "Ok", "Hi", "Stop", …)
+#   bm_george    7/16 failed
+#
+# That is not a fact about aliases and it is not fixed here — it is its own
+# defect, and both voices remain reachable by their own ids so nothing is
+# hidden. What this table decides is only where a caller who named none of them
+# is sent, and sending an ElevenLabs id onto a voice that fails one short line
+# in two would be choosing the failure on their behalf. openconv's turn loop is
+# made almost entirely of lines that short.
+#
+# So register is held exactly and accent comes free: the American pair is also
+# the accent the nine ElevenLabs originals speak in.
+#
+# An ID absent from this table is not an error: see `fallback` in settings and
+# the `x-elvenspeak-voice` response header, which names whatever actually spoke.
+
+[elevenlabs]
+# The nine voices from ElevenLabs' original default set, the ones most likely
+# to be hardcoded in a client written before voice pickers existed.
+"21m00Tcm4TlvDq8ikWAM" = "af_heart"    # Rachel
+"AZnzlk1XvdvUeBnXmlld" = "af_heart"    # Domi
+"EXAVITQu4vr4xnSDxMaL" = "af_heart"    # Bella
+"MF3mGyEYCl7XYWbV9V6O" = "af_heart"    # Elli
+"ErXwobaYiN019PkySvjV" = "am_michael"  # Antoni
+"TxGEqnHWrfWFTfGW9XjX" = "am_michael"  # Josh
+"VR6AewLTigWG4xSOukaG" = "am_michael"  # Arnold
+"pNInz6obpgDQGcFmaJgB" = "am_michael"  # Adam
+"yoZ06aMxZJJ28mfd3POQ" = "am_michael"  # Sam

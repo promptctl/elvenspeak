@@ -87,7 +87,18 @@ ENV UV_NO_SYNC=1
 # `KOKORO_MODEL` and vice versa — which is the point of an engine parsing its own
 # environment: adding the second engine's settings here costs the first engine
 # nothing and changes no shared type.
-ARG PIPER_VOICES=en_US-lessac-medium
+# Three voices rather than one, because one voice makes the ElevenLabs alias
+# table unanswerable: it maps nine foreign ids onto voices of two registers, and
+# an alias whose target is not baked is dropped at startup — so the image that
+# baked a single voice resolved none of the nine. Two female and one male is the
+# smallest set the table can be honest about, at ~291 MB.
+#
+# [LAW:one-source-of-truth] The first name here is `piper.DEFAULT_VOICE`, and
+# `tests/test_dockerfile.py` fails if it is not. First is the one that matters:
+# a deployment naming no fallback speaks unknown ids in whichever voice the
+# engine offers first, so reordering this line changes what every such
+# deployment says.
+ARG PIPER_VOICES=en_US-lessac-high,en_US-ljspeech-high,en_US-hfc_male-medium
 ARG KOKORO_VOICES=af_heart,am_michael,bf_emma,bm_george
 ARG KOKORO_MODEL=kokoro-v1.0.int8.onnx
 ENV ELVENSPEAK_ENGINE="${ELVENSPEAK_ENGINE}" \

@@ -114,6 +114,7 @@ def test_a_timestamps_request_is_refused_rather_than_answered_with_invented_numb
     prepared = kokoro_prepared(model=KOKORO_TIMELESS_MODEL)
     settings = Settings(
         engine=prepared,
+        engine_name="kokoro",
         withheld=frozenset(),
         fallback=KOKORO_VOICES[0],
         api_key=None,

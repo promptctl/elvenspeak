@@ -42,7 +42,10 @@ from .provisioning import ConfigError
 
 _LOGGER = logging.getLogger("elvenspeak.voices")
 
-_ALIASES_FILE = Path(__file__).parent / "aliases.toml"
+#: One file per engine, each named after that engine's key in
+#: [`elvenspeak.engines.ENGINES`]. See [`load_aliases`] for why the table is
+#: scoped to an engine rather than shared.
+_DECLARATIONS = Path(__file__).parent / "aliases"
 
 
 class Substitution(Enum):
@@ -200,14 +203,21 @@ class Catalog:
         return self._fallback
 
     @staticmethod
-    def for_engine(source: engine.Engine, fallback: Fallback) -> "Catalog":
-        """The catalog over everything `source` can speak now.
+    def for_engine(name: str, source: engine.Engine, fallback: Fallback) -> "Catalog":
+        """The catalog over everything the engine called `name` can speak now.
 
-        [LAW:effects-at-boundaries] Where `aliases.toml` is read, which is why
+        `name` is that engine's key in [`elvenspeak.engines.ENGINES`], and it is
+        here for one reason: it picks the declaration file. It arrives as an
+        argument rather than being asked of `source`, because which engine this
+        is was decided when the environment was parsed and is a fact
+        [`elvenspeak.settings.Settings`] already holds — asking the engine would
+        make every engine answer a question about the server's registry.
+
+        [LAW:effects-at-boundaries] Where the declarations are read, which is why
         this is separate from the constructor: it happens once at startup, so a
-        malformed edit to an operator-editable file is a refusal to boot rather
-        than an uncaught TOMLDecodeError on whichever synthesis call first needed
-        an alias — invisible to a healthcheck that never touches resolution.
+        malformed table is a refusal to boot rather than an uncaught
+        TOMLDecodeError on whichever synthesis call first needed an alias —
+        invisible to a healthcheck that never touches resolution.
 
         Also the one place [`Substitution.FIRST_OFFERED`] can be answered, since
         this is where a real voice list first exists. The constructor still takes
@@ -219,7 +229,7 @@ class Catalog:
         return Catalog(
             voices=voices,
             fallback=_chosen(fallback, voices),
-            aliases=load_aliases(voices),
+            aliases=load_aliases(name, voices),
         )
 
     @property
@@ -264,20 +274,37 @@ class Catalog:
         )
 
 
-def load_aliases(voices: dict[str, engine.Voice]) -> dict[str, str]:
-    """Foreign voice ids mapped onto the local ids they reach.
+def load_aliases(name: str, voices: dict[str, engine.Voice]) -> dict[str, str]:
+    """Foreign voice ids mapped onto the local ids they reach, for one engine.
 
-    [LAW:effects-at-boundaries] The one place `aliases.toml` is read. Resolution
-    itself takes the finished table, so it stays a pure function of its inputs
-    and a test can hand it a fixture instead of depending on the shipped file.
+    [LAW:effects-at-boundaries] The one place a declaration file is read.
+    Resolution itself takes the finished table, so it stays a pure function of
+    its inputs and a test can hand it a fixture instead of depending on the
+    shipped file.
+
+    [LAW:one-source-of-truth] The table is scoped to the engine because its
+    values are that engine's voice ids and mean nothing anywhere else. One
+    shared table was measured against the images that actually shipped and
+    resolved to nothing in either of them: it named Piper voices, so the Kokoro
+    image dropped all nine as unspeakable, and it named Piper voices the Piper
+    image did not bake, so that image dropped all nine too. A table that can
+    name a voice no image carries is a table free to be wrong everywhere at
+    once; named after the engine, each one can only be wrong about voices its
+    own engine was supposed to have.
+
+    An engine with no declarations has no file and gets an empty table, which is
+    the honest answer rather than a failure — it answers for the ids it owns and
+    for nothing else. Nothing is registered centrally to add a table: an engine's
+    declarations are a file named after it.
 
     Entries naming a voice that is not available are dropped rather than kept and
     failed later: the table's job is to answer "which voice is this", and an
     answer that cannot be spoken is not an answer.
     """
-    if not _ALIASES_FILE.exists():
+    declared = _DECLARATIONS / f"{name}.toml"
+    if not declared.exists():
         return {}
-    with _ALIASES_FILE.open("rb") as handle:
+    with declared.open("rb") as handle:
         table = tomllib.load(handle)
     published = table.get("elevenlabs", {})
     mapped = {
@@ -286,7 +313,9 @@ def load_aliases(voices: dict[str, engine.Voice]) -> dict[str, str]:
     dropped = len(published) - len(mapped)
     if dropped:
         _LOGGER.info(
-            "%d alias(es) point at voices that are not installed; ignoring them",
+            "%d of %s's alias(es) point at voices that are not installed; "
+            "ignoring them",
             dropped,
+            name,
         )
     return mapped
