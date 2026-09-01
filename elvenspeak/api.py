@@ -273,10 +273,15 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     server without touching the process environment and the deployment has one
     place its configuration comes from.
     """
-    # Built once, here, rather than per request: it reads `aliases.toml`, and an
-    # operator's malformed edit should stop the process rather than surface on
-    # whichever call first needed an alias.
-    cat = voices.Catalog.for_engine(engine, settings.fallback)
+    # Built once, here, rather than per request: it reads the engine's alias
+    # declarations off disk, and a malformed table should stop the process
+    # rather than surface on whichever call first needed an alias.
+    #
+    # The engine's name comes from the settings, not from `engine`: which engine
+    # this is was decided when the environment was parsed, and this module still
+    # cannot name a concrete one — it passes a string through to the module that
+    # owns the alias table.
+    cat = voices.Catalog.for_engine(settings.engine_name, engine, settings.fallback)
 
     # The negotiation, and the only one. Asked once here rather than per request
     # because the interface promises the answer is fixed for the engine's life,

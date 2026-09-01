@@ -39,6 +39,7 @@ def settings_for(timings: bool = True, **overrides) -> Settings:
     return Settings(
         **{
             "engine": piper_prepared(MODELS, voices=(VOICE,), timings=timings),
+            "engine_name": "piper",
             "withheld": frozenset(),
             "fallback": VOICE,
             "api_key": None,

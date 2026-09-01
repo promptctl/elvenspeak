@@ -60,10 +60,21 @@ if TYPE_CHECKING:  # pragma: no cover - import cost is real, the symbol is not
 
 _LOGGER = logging.getLogger("elvenspeak.piper")
 
-#: The voice installed when none is named. `en_US-lessac-medium` because it is
-#: the one Piper voice that is MIT at the repository level, so a default install
-#: carries no licence surprise — see README, "Voice licensing".
-DEFAULT_VOICE = "en_US-lessac-medium"
+#: The voice installed when none is named. Still lessac, which is the one Piper
+#: voice that is MIT at the repository level, so a default install carries no
+#: licence surprise — see README, "Voice licensing". `high` rather than `medium`
+#: because tier buys nothing below it: every en_US model is ~63 MB whether the
+#: index calls it low or medium, since the tier names synthesis quality and not
+#: model size, so a lower tier is a worse voice at the same price.
+#:
+#: Load-bearing beyond the download. [`elvenspeak.voices.Substitution`]'s
+#: shipped default answers an unknown id in whichever voice the engine lists
+#: first, and the engine lists them in the order they were configured — so this
+#: is what every deployment that names no fallback speaks in. The image bakes
+#: more than this one voice, and `tests/test_dockerfile.py` holds this equal to
+#: the first name in `ARG PIPER_VOICES` so that the two cannot disagree about
+#: which one comes first.
+DEFAULT_VOICE = "en_US-lessac-high"
 
 #: Phonemes espeak emits that mark structure rather than sound — the run-up into
 #: an utterance, the run-out, a line break. They consume real time but belong to

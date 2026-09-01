@@ -63,19 +63,23 @@ An id this server does not know still gets audio, in the fallback voice, because
 clients hold ElevenLabs voice ids in saved settings and a server that 404s all
 of them replaces nothing.
 
-`aliases.toml` maps the nine original ElevenLabs voices onto comparable Piper
-ones — comparable in register, **not** in likeness. **An alias only takes effect
-if its target voice is installed**: the table is filtered to `PIPER_VOICES` at
-startup, since an alias pointing at a voice that cannot speak is not an answer.
-So under the default single-voice setup the table is inert and all nine ids land
-on the fallback. To make them live, install their targets:
+`elvenspeak/aliases/` holds one table per engine — `piper.toml`, `kokoro.toml` —
+each named after that engine's key in the registry, and an engine reads only the
+file named after itself. Every table maps the nine original ElevenLabs voices
+onto that engine's own voices, comparable in register, **not** in likeness. The
+scoping is what keeps them honest: one shared table can only name one engine's
+voices, and a Piper voice name is meaningless inside the Kokoro image. An engine
+with no file of its own gets an empty table rather than an error, so an engine
+you supplied can have aliases or go without them, and neither has to be
+registered anywhere central.
 
-```
-PIPER_VOICES=en_US-lessac-medium,en_US-hfc_female-medium,en_US-kristin-medium,en_US-amy-medium,en_US-kathleen-low,en_US-hfc_male-medium,en_US-joe-medium,en_US-bryce-medium,en_US-john-medium,en_US-danny-low
-```
+**An alias only takes effect if its target voice is installed**: the table is
+filtered at startup to the voices the engine actually loaded, since an alias
+pointing at a voice that cannot speak is not an answer. Both images bake every
+voice their table names, so all nine ids resolve to real speech out of the box.
 
 `GET /v1/voices` reports each voice's live aliases, so what actually resolves is
-readable from the server rather than inferred from this file.
+readable from the server rather than inferred from a file.
 
 Substitution is never invisible: every synthesis response carries
 `x-elvenspeak-voice` naming what actually spoke, and `x-elvenspeak-voice-requested` when
@@ -171,7 +175,11 @@ PORT=5001
 HOST=0.0.0.0
 
 # The Piper engine's own, read only when it is the engine:
-PIPER_VOICES=en_US-lessac-medium   # comma-separated; all installed at startup
+PIPER_VOICES=en_US-lessac-high     # comma-separated; all installed at startup.
+                                   # The published image bakes three, so that
+                                   # its alias table can answer in both
+                                   # registers; one voice is enough to develop
+                                   # against and is a third of the download.
 PIPER_MODELS_DIR=./models
 PIPER_ALLOW_DOWNLOAD=1             # 0 to require models be present already
 
@@ -219,10 +227,20 @@ British English, `e` Spanish, `f` French, `h` Hindi, `i` Italian, `j` Japanese,
 of them costs no extra disk or memory; all 54 are selectable through
 `KOKORO_VOICES`, and four are offered by default.
 
+The aliases send ElevenLabs ids only to the American pair, `af_heart` and
+`am_michael`. The two British voices return zero samples for short utterances —
+across sixteen one- and two-word lines, `bf_emma` failed twelve and `bm_george`
+seven, against `af_heart`'s none — and a caller sees that as a 500. That is a
+defect with its own ticket rather than a property of the aliases; both voices
+stay reachable by their own ids. What the table decides is only where a caller
+who named no voice of this server's is sent, and sending them to a voice that
+fails one short line in two would be choosing that failure for them.
+
 ### With Docker
 
 ```
-docker build -t elvenspeak --build-arg PIPER_VOICES=en_US-lessac-medium .
+docker build -t elvenspeak \
+  --build-arg PIPER_VOICES=en_US-lessac-high,en_US-ljspeech-high,en_US-hfc_male-medium .
 docker run -p 5001:5001 elvenspeak
 ```
 
@@ -377,7 +395,7 @@ pins the alignment fallback's honesty, not its numbers.
 The two engines differ in whether this needs checking per voice.
 
 Piper's code is MIT; its voices are licensed individually. The default,
-`en_US-lessac-medium`, ships from the `rhasspy/piper-voices` Hugging Face
+`en_US-lessac-high`, ships from the `rhasspy/piper-voices` Hugging Face
 repository, tagged MIT at the repository level. Check a voice's own licence
 before switching — some are CC-BY or otherwise restricted, which matters if this
 ends up somewhere with commercial terms attached.

@@ -26,12 +26,17 @@ def voice(key: str) -> Voice:
     )
 
 
-#: A fixed stand-in for `aliases.toml`, so these tests describe resolution rather
-#: than the shipped table's current contents. That file is documented as
-#: operator-editable — retargeting a voice without a release is the point of it —
-#: and reading the live one meant a correct edit to it failed tests about
-#: `Catalog`, which has no opinion about which ids map where.
+#: A fixed stand-in for a shipped declaration file, so these tests describe
+#: resolution rather than the current contents of any engine's table. Reading a
+#: live one meant that retargeting a voice failed tests about `Catalog`, which
+#: has no opinion about which ids map where.
 ALIASES = {"21m00Tcm4TlvDq8ikWAM": "en_US-hfc_female-medium"}
+
+#: An engine name no declaration file is shipped for. The tests below are about
+#: resolution over a table they were handed, so they ask for the one engine
+#: whose table is empty — naming a real engine would quietly make them assert
+#: against whatever that engine currently declares.
+_UNDECLARED = "no-such-engine"
 
 
 def catalog(
@@ -187,7 +192,9 @@ class _Engine:
 
 
 def test_a_catalog_is_built_from_whatever_the_engine_offers():
-    cat = Catalog.for_engine(_Engine("en_US-lessac-medium"), fallback=Substitution.OFF)
+    cat = Catalog.for_engine(
+        _UNDECLARED, _Engine("en_US-lessac-medium"), fallback=Substitution.OFF
+    )
     assert [v.id for v in cat.installed] == ["en_US-lessac-medium"]
 
 
@@ -207,6 +214,7 @@ def test_an_unnamed_fallback_becomes_the_first_voice_the_engine_offers():
     the deployment a default voice its operator never chose.
     """
     cat = Catalog.for_engine(
+        _UNDECLARED,
         _Engine("en_US-zzz-medium", "en_US-aaa-medium"),
         fallback=Substitution.FIRST_OFFERED,
     )
@@ -223,7 +231,9 @@ def test_switching_substitution_off_does_not_quietly_pick_a_voice():
     now, so an enum carries the difference this far — and this is the test that
     goes red if either member is ever mapped onto the other.
     """
-    cat = Catalog.for_engine(_Engine("en_US-aaa-medium"), fallback=Substitution.OFF)
+    cat = Catalog.for_engine(
+        _UNDECLARED, _Engine("en_US-aaa-medium"), fallback=Substitution.OFF
+    )
     assert cat.fallback is None
     with pytest.raises(VoiceNotInstalled):
         cat.resolve("some-elevenlabs-id")
@@ -250,44 +260,81 @@ def test_an_engine_offering_nothing_leaves_nothing_to_substitute_with():
     already does: every id is refused by name, which is what an empty engine
     means whichever way the fallback was configured.
     """
-    cat = Catalog.for_engine(_Engine(), fallback=Substitution.FIRST_OFFERED)
+    cat = Catalog.for_engine(
+        _UNDECLARED, _Engine(), fallback=Substitution.FIRST_OFFERED
+    )
     assert cat.fallback is None
     with pytest.raises(VoiceNotInstalled):
         cat.resolve("anything")
 
 
+def declare(directory, engine_name: str, body: str):
+    """Writes one engine's declaration file, where `load_aliases` looks for it."""
+    (directory / f"{engine_name}.toml").write_text(body, encoding="utf-8")
+    return directory
+
+
 def test_a_malformed_alias_table_refuses_to_boot(tmp_path, monkeypatch):
     """The reason aliases are read while the app is built, not on first use.
 
-    `aliases.toml` is documented as operator-editable, so a malformed edit is a
-    realistic event. Read lazily it surfaced as an uncaught TOMLDecodeError on
-    whichever synthesis call first needed an alias — invisible to a healthcheck
-    that never touches resolution, and reported nowhere near the file that caused
-    it.
+    Read lazily it surfaced as an uncaught TOMLDecodeError on whichever
+    synthesis call first needed an alias — invisible to a healthcheck that never
+    touches resolution, and reported nowhere near the file that caused it.
     """
-    broken = tmp_path / "aliases.toml"
-    broken.write_text("[elevenlabs\nnot = valid", encoding="utf-8")
-    monkeypatch.setattr(voices_mod, "_ALIASES_FILE", broken)
+    declare(tmp_path, "piper", "[elevenlabs\nnot = valid")
+    monkeypatch.setattr(voices_mod, "_DECLARATIONS", tmp_path)
 
     with pytest.raises(Exception) as raised:
-        Catalog.for_engine(_Engine("en_US-lessac-medium"), fallback=Substitution.OFF)
+        Catalog.for_engine(
+            "piper", _Engine("en_US-lessac-medium"), fallback=Substitution.OFF
+        )
     assert "toml" in type(raised.value).__module__.lower()
+
+
+def test_an_engine_reads_its_own_declarations_and_no_others(tmp_path, monkeypatch):
+    """[LAW:one-source-of-truth] The table belongs to the engine, not the server.
+
+    The whole of what went wrong before: one shared table named Piper voices, so
+    the Kokoro image loaded nine ids pointing at voices it could not possibly
+    have and dropped every one. A file per engine makes that unrepresentable —
+    a table can only ever name voices its own engine was meant to offer.
+
+    Both files are present here, which is the case that matters: the engine that
+    is running must not see the other's entries even when they are right there
+    on disk.
+    """
+    declare(tmp_path, "piper", '[elevenlabs]\n"shared-id" = "en_US-lessac-medium"\n')
+    declare(tmp_path, "kokoro", '[elevenlabs]\n"shared-id" = "af_heart"\n')
+    monkeypatch.setattr(voices_mod, "_DECLARATIONS", tmp_path)
+
+    assert load_aliases("piper", {"en_US-lessac-medium": object()}) == {
+        "shared-id": "en_US-lessac-medium"
+    }
+    assert load_aliases("kokoro", {"af_heart": object()}) == {"shared-id": "af_heart"}
+    # The Piper entry is on disk and its target is installed, and it still does
+    # not reach Kokoro — which is the claim, since dropping-by-target would give
+    # an empty table here for the wrong reason.
+    assert load_aliases("kokoro", {"en_US-lessac-medium": object()}) == {}
 
 
 def test_aliases_pointing_at_uninstalled_voices_are_dropped(tmp_path, monkeypatch):
     """An answer that cannot be spoken is not an answer."""
-    table = tmp_path / "aliases.toml"
-    table.write_text(
+    declare(
+        tmp_path,
+        "piper",
         '[elevenlabs]\n"live" = "en_US-lessac-medium"\n"dead" = "en_US-absent-medium"\n',
-        encoding="utf-8",
     )
-    monkeypatch.setattr(voices_mod, "_ALIASES_FILE", table)
-    assert load_aliases({"en_US-lessac-medium": object()}) == {
+    monkeypatch.setattr(voices_mod, "_DECLARATIONS", tmp_path)
+    assert load_aliases("piper", {"en_US-lessac-medium": object()}) == {
         "live": "en_US-lessac-medium"
     }
 
 
-def test_a_missing_alias_file_is_an_empty_table(tmp_path, monkeypatch):
-    """Aliases are optional; their absence is not a failure to boot."""
-    monkeypatch.setattr(voices_mod, "_ALIASES_FILE", tmp_path / "nothing-here.toml")
-    assert load_aliases({"en_US-lessac-medium": object()}) == {}
+def test_an_engine_with_no_declarations_gets_an_empty_table(tmp_path, monkeypatch):
+    """Aliases are optional; their absence is not a failure to boot.
+
+    The case a supplied engine arrives in — it answers for the ids it owns and
+    for nothing else, and there is nothing to register anywhere to say so.
+    """
+    monkeypatch.setattr(voices_mod, "_DECLARATIONS", tmp_path)
+    assert load_aliases("brought-its-own", {"en_US-lessac-medium": object()}) == {}

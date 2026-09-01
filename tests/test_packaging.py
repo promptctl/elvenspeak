@@ -43,6 +43,12 @@ PYPROJECT = tomllib.loads(
 #: deliberate act that shows up as a failure and not as a silent third category.
 NOT_AN_ENGINE = frozenset({"dev"})
 
+#: Where an engine's alias declarations ship. Read from the package's own
+#: directory rather than from `voices._DECLARATIONS`, because what is under test
+#: is which files this repository ships — a check that asked the module would go
+#: green by agreeing with whatever the module had been changed to look at.
+ALIAS_TABLES = Path(elvenspeak.__file__).parent / "aliases"
+
 #: A requirement string's distribution name is everything before the first
 #: character that starts an extras list, a version specifier, a URL or a marker.
 _NAME = re.compile(r"^[A-Za-z0-9._-]+")
@@ -125,6 +131,41 @@ def test_an_engines_library_is_installed_only_by_that_engines_extra(library: str
     }
     assert len(installs) == 1
     assert installs <= set(ENGINES)
+
+
+def test_every_shipped_alias_table_is_named_after_a_real_engine():
+    """[LAW:one-source-of-truth] The filename is the whole of the binding.
+
+    An engine's alias declarations are the file named after its registry key, so
+    the name is not a label on the table — it is the only thing that decides
+    whether the table is ever read. A file named `pipe.toml`, or one left behind
+    after an engine was renamed, is loaded by nobody and says nothing about it:
+    `load_aliases` returns an empty table for an engine with no file, which is
+    the correct answer for a supplied engine and indistinguishable from a typo.
+
+    That is the same class of silent nothing this whole area was fixed for. The
+    old shared table dropped its entries at INFO, which was at least a line in a
+    log; a misnamed file does not even produce that.
+    """
+    tables = sorted(path.name for path in ALIAS_TABLES.glob("*.toml"))
+    assert tables, f"no alias tables found in {ALIAS_TABLES}"
+    assert {path.removesuffix(".toml") for path in tables} <= set(ENGINES), tables
+
+
+@pytest.mark.parametrize(
+    "table", sorted(ALIAS_TABLES.glob("*.toml")), ids=lambda path: path.stem
+)
+def test_a_shipped_alias_table_parses_and_declares_something(table: Path):
+    """A table the server would refuse to boot on is one this suite should refuse.
+
+    `Catalog.for_engine` reads these at startup, so a malformed edit is exit 2 on
+    a real deployment. Caught here it is a red test instead, which is the same
+    failure at the only moment it is still cheap — and the emptiness check is the
+    positive control, since a table that parsed to nothing would satisfy every
+    other assertion about it while answering for no id at all.
+    """
+    published = tomllib.loads(table.read_text(encoding="utf-8")).get("elevenlabs", {})
+    assert published, f"{table.name} declares no aliases"
 
 
 #: The two modules an outside engine implements against. Everything they define

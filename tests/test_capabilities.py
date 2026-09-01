@@ -35,6 +35,10 @@ def _settings(withheld: frozenset[Capability] = frozenset()) -> Settings:
         # nothing in this file would answer differently if this field were
         # removed.
         engine=DeclaredPrepared(),
+        # Named, but named nothing this package ships a table for — these tests
+        # are about capabilities, and an engine with no declarations gets an
+        # empty alias table rather than a failure.
+        engine_name="declared",
         withheld=withheld,
         fallback=VOICE.id,
         api_key=None,
