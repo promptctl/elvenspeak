@@ -178,12 +178,20 @@ def test_the_baked_default_voice_is_the_projects_default_voice():
     Left to drift, "the default voice" means one thing for an image built with no
     --build-arg and another for `uv run main.py`, and the way that gets noticed is
     by listening to the wrong voice.
+
+    The ARG bakes more voices than the constant names, because the alias table
+    needs both registers and the constant names one voice. So the invariant is
+    about the FIRST entry, which is the one that carries the meaning: an engine
+    offers its voices in configured order and a deployment that names no
+    fallback speaks unknown ids in whichever it offers first. Compared against
+    the whole value this test would only pass if the image baked a single voice,
+    which is the state that made every ElevenLabs id resolve to nothing.
     """
     from elvenspeak.piper import DEFAULT_VOICE
 
     declared = re.search(r"^\s*ARG\s+PIPER_VOICES=(\S+)", DOCKERFILE.read_text(), re.MULTILINE)
     assert declared, "no ARG PIPER_VOICES found"
-    assert declared.group(1) == DEFAULT_VOICE
+    assert declared.group(1).split(",")[0] == DEFAULT_VOICE
 
 
 def test_the_baked_default_engine_is_the_registrys_default_engine():

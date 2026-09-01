@@ -1,0 +1,51 @@
+# Which Piper voice answers for a voice id this server does not own.
+#
+# Read only by a deployment running the `piper` engine — the file is named after
+# that engine's registry key, and `elvenspeak.voices.load_aliases` opens the one
+# file named after the engine that is running. Why the table is scoped that way
+# is written there, once.
+#
+# The keys are ElevenLabs' own voice IDs. Callers written against ElevenLabs
+# hold these in config, in settings screens, in saved user preferences; a server
+# claiming to speak that API has to answer to them. The values are Piper voices
+# chosen for a comparable REGISTER, not for likeness — nothing here reproduces
+# an ElevenLabs voice, and a caller that needs a specific timbre should ask for
+# the Piper voice by name instead.
+#
+# Register was measured rather than read, because it is not written down
+# anywhere: the upstream voice index carries key, name, language, quality and
+# speaker count, and no gender. The same line was synthesised through each voice
+# and its median pitch taken, with en_US-hfc_male-medium as the labelled control
+# — its own name states its register, so it says whether the method can tell.
+#
+#   en_US-lessac-high      172 Hz
+#   en_US-ljspeech-high    179 Hz
+#   en_US-hfc_male-medium  121 Hz   the control, and where a male speaker belongs
+#
+# Every target here is a voice `ARG PIPER_VOICES` bakes into the image. That is
+# the whole point of the pairing and the reason this file was rewritten: an
+# alias whose target is not installed is dropped at startup, so a table naming
+# voices the image does not carry answers nothing at all, in every image built.
+#
+# An ID absent from this table is not an error: see `fallback` in settings and
+# the `x-elvenspeak-voice` response header, which names whatever actually spoke.
+
+[elevenlabs]
+# The nine voices from ElevenLabs' original default set, the ones most likely
+# to be hardcoded in a client written before voice pickers existed.
+#
+# The two female voices alternate rather than one taking all four ids: a client
+# using Rachel for one speaker and Domi for another is telling them apart by id,
+# and collapsing both onto one voice would silently make those speakers
+# indistinguishable. The five male ids do collapse, because the image bakes one
+# male voice — if that reads as too thin, the fix is a second male voice in
+# PIPER_VOICES and a line here, not a low-quality one.
+"21m00Tcm4TlvDq8ikWAM" = "en_US-lessac-high"      # Rachel
+"AZnzlk1XvdvUeBnXmlld" = "en_US-ljspeech-high"    # Domi
+"EXAVITQu4vr4xnSDxMaL" = "en_US-lessac-high"      # Bella
+"MF3mGyEYCl7XYWbV9V6O" = "en_US-ljspeech-high"    # Elli
+"ErXwobaYiN019PkySvjV" = "en_US-hfc_male-medium"  # Antoni
+"TxGEqnHWrfWFTfGW9XjX" = "en_US-hfc_male-medium"  # Josh
+"VR6AewLTigWG4xSOukaG" = "en_US-hfc_male-medium"  # Arnold
+"pNInz6obpgDQGcFmaJgB" = "en_US-hfc_male-medium"  # Adam
+"yoZ06aMxZJJ28mfd3POQ" = "en_US-hfc_male-medium"  # Sam
