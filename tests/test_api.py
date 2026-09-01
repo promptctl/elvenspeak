@@ -14,12 +14,15 @@ import base64
 import json
 
 import pytest
+from conftest import DECLARED_VOICES, DeclaredEngine
 from conftest import INSTALLED_VOICE as VOICE
 from conftest import MODELS_DIR as MODELS
 from conftest import piper_prepared
 from fastapi.testclient import TestClient
 
 from elvenspeak import create_app
+from elvenspeak import voices as voices_mod
+from elvenspeak.engine import Capability
 from elvenspeak.settings import Settings
 
 #: Every test here synthesizes with the real Piper voice, so the whole module
@@ -119,6 +122,46 @@ def test_unknown_voice_substitutes_and_says_so(client):
     assert response.status_code == 200
     assert response.headers["x-elvenspeak-voice"] == VOICE
     assert response.headers["x-elvenspeak-voice-requested"] == FOREIGN_ID
+
+
+def test_the_alias_table_loaded_is_the_one_the_engines_name_picks(
+    tmp_path, monkeypatch
+):
+    """[LAW:one-source-of-truth] The name on the settings picks the table, here.
+
+    Two tables claiming the same foreign id, so the answer says which one was
+    read. `decoy` sends it to the voice that is also the fallback, which is the
+    whole point: the three ways this can go wrong — the wrong table, no table at
+    all, and a name that reaches no file — every one of them ends at the
+    fallback, so a test that asserted substitution would pass under all of them.
+    Only the correct table produces the second voice.
+
+    That is the gap the test above cannot cover. It observes a fallback, and a
+    fallback is what a correct table, a wrong table and an absent table all
+    look like from outside.
+
+    No real voice, because the discriminator is the wiring and not the audio:
+    the request goes through the same `create_app` a deployment builds.
+    """
+    (tmp_path / "named.toml").write_text(
+        f'[elevenlabs]\n"foreign-id" = "{DECLARED_VOICES[1].id}"\n', encoding="utf-8"
+    )
+    (tmp_path / "decoy.toml").write_text(
+        f'[elevenlabs]\n"foreign-id" = "{DECLARED_VOICES[0].id}"\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(voices_mod, "_DECLARATIONS", tmp_path)
+
+    app = create_app(
+        settings_for(engine_name="named", fallback=DECLARED_VOICES[0].id),
+        DeclaredEngine(frozenset(Capability)),
+    )
+    response = TestClient(app).post(
+        "/v1/text-to-speech/foreign-id/stream", json={"text": "hello"}
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-elvenspeak-voice"] == DECLARED_VOICES[1].id
+    assert response.headers["x-elvenspeak-voice-requested"] == "foreign-id"
 
 
 def test_known_voice_reports_no_substitution(client):
