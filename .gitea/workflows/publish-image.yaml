@@ -1,9 +1,9 @@
 name: Publish the elvenspeak images
 
 # Builds one image per engine from a commit the runner fetched itself, publishes each to
-# the homelab registry under a `YYYY.MM.DD.N` tag and `:latest`, and refuses to report
-# success until the registry can be read back and shown to hold exactly what was pushed
-# (piper-deploy-gqz).
+# the homelab registry under a `YYYY.MM.DD.N` tag — plus `:latest` when the ref is master
+# — and refuses to report success until the registry can be read back and shown to hold
+# exactly what was pushed (piper-deploy-gqz).
 #
 # The first job proves the builder; the second uses it. They are separate because the
 # proof is worth having on a commit that will not be published — a Dockerfile change on a
@@ -369,10 +369,10 @@ jobs:
     # because a human choosing a ref by hand is the deliberate act the ban was always
     # about distinguishing from an accident.
     #
-    # Everything else gets `reachability` and no image, which is also what keeps `:latest`
-    # honest: a break-glass `nomad job run` with no `-var` lands on `:latest`, so an
-    # experimental branch that could move that alias would put an unreviewed build one
-    # outage away from production.
+    # Everything else gets `reachability` and no image. `:latest` is kept honest one step
+    # further in, by the tag step: a dispatch on a branch publishes its dated tag and
+    # cannot move the alias, so the break-glass `nomad job run` with no `-var` can only
+    # land on a build from master.
     #
     # The branch is written out rather than read from
     # `github.event.repository.default_branch` because an expression that resolves to
@@ -499,6 +499,12 @@ jobs:
           today_re="${today//./\\.}"
 
           body="$(mktemp)"
+          # Before the request, not after the parse: three of the paths out of this step
+          # are the `exit 1`s below, and `set -e` aborts past any cleanup written after
+          # the thing that failed. A trailing `rm` would run on exactly the path where
+          # nothing went wrong. Same reason the BuildKit probe traps rather than tidies up
+          # at the end. [LAW:no-ambient-temporal-coupling]
+          trap 'rm -f "$body"' EXIT
           code="$(curl -sS --max-time 30 -o "$body" -w '%{http_code}' \
             "http://$REGISTRY/v2/$IMAGE/tags/list")"
 
@@ -545,8 +551,39 @@ jobs:
           # bash reads a leading zero as octal, so a published `.08` would abort every
           # publish for the day and `.010` would quietly resolve to 9.
           tag="$today.$(( 10#${highest:-0} + 1 ))"
-          echo "publishing as $IMAGE:$tag"
+
+          # ---------------------------------------------------------------------------
+          # Every name this build will claim, decided once, here.
+          #
+          # [LAW:one-source-of-truth] The build, the push, the digest verification and the
+          # local cleanup all read this list. `latest` used to be hand-written in five
+          # places, which made the alias the copy most likely to be forgotten — and the
+          # alias is the one that must not be wrong.
+          #
+          # [LAW:dataflow-not-control-flow] Which names get published is a VALUE the steps
+          # below iterate, never a branch that skips a push. So `latest` cannot become the
+          # ref that is published but not verified, or cleaned up but not pushed: there is
+          # one list and every step walks all of it.
+          #
+          # `latest` only from master, and this is the enforcement of a rule the workflow
+          # previously only argued for. A break-glass `nomad job run` with no `-var` lands
+          # on `:latest`, so the alias is one outage away from production and may only ever
+          # name a reviewed build. `workflow_dispatch` exists to prove a Dockerfile change
+          # on a branch before it lands, which is a real need — but proving a build and
+          # blessing it as the default are different acts, and only prose used to separate
+          # them. It was not enough: dispatching this branch during development published
+          # both images and moved both `:latest` aliases to an unreviewed commit, which
+          # CLAUDE.md said was impossible. Now the ref decides, and a branch dispatch gets
+          # its dated tag and cannot touch the alias. [LAW:types-are-the-program]
+          # ---------------------------------------------------------------------------
+          refs="$tag"
+          if [ "$GITHUB_REF" = "refs/heads/master" ]; then
+            refs="$refs latest"
+          fi
+
+          echo "publishing $IMAGE as: $refs"
           echo "image-tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "refs=$refs" >> "$GITHUB_OUTPUT"
 
       # ---------------------------------------------------------------------------
       # What the image says about itself.
@@ -654,14 +691,24 @@ jobs:
             echo "LABELS"
           } >> "$GITHUB_OUTPUT"
 
-      # Tagged `latest` alongside the dated tag in the same build, so the alias can only
-      # ever name an image that was actually produced here.
+      # Every name in `REFS` is applied in the one `docker build`, so an alias can only ever
+      # point at an image that was actually produced here — there is no retag of something
+      # built earlier, and nothing is pushed that this run did not make.
       - name: Build and push
         env:
-          TAG: ${{ steps.tag.outputs.image-tag }}
+          REFS: ${{ steps.tag.outputs.refs }}
           STAMP: ${{ steps.labels.outputs.stamp }}
         run: |
           set -euo pipefail
+
+          # [LAW:no-silent-failure] Same reasoning as STAMP below: this crossed a step
+          # boundary, and empty would build an image with no name at all and push nothing,
+          # while every step reported success.
+          if [ -z "$REFS" ]; then
+            echo "ERROR: no refs arrived from the tag step, so this build would produce" >&2
+            echo "       an image under no name. Check that step's output." >&2
+            exit 1
+          fi
 
           # [LAW:no-silent-failure] The list crossed a step boundary to get here. Empty
           # would reach docker as `--label ""` and fail on an argument error that says
@@ -684,14 +731,20 @@ jobs:
           # the download switches — has a default in the Dockerfile, which is where those
           # defaults belong: passing them here would make an image built by hand differ
           # from one built by CI in ways neither file records.
+          # The names from the tag step, applied the same way the labels are: as data the
+          # build loops over. [LAW:dataflow-not-control-flow]
+          for ref in $REFS; do
+            args+=(--tag "$REGISTRY/$IMAGE:$ref")
+          done
+
           DOCKER_BUILDKIT=1 docker build --progress=plain \
             --build-arg "ELVENSPEAK_ENGINE=$ENGINE" \
             "${args[@]}" \
-            --tag "$REGISTRY/$IMAGE:$TAG" \
-            --tag "$REGISTRY/$IMAGE:latest" \
             .
-          docker push "$REGISTRY/$IMAGE:$TAG"
-          docker push "$REGISTRY/$IMAGE:latest"
+
+          for ref in $REFS; do
+            docker push "$REGISTRY/$IMAGE:$ref"
+          done
 
       # A push that reported success and left nothing behind is a deploy that fails minutes
       # later on an image pull, far from here and hard to trace back.
@@ -704,11 +757,12 @@ jobs:
       - name: Verify the registry holds what this run pushed
         env:
           TAG: ${{ steps.tag.outputs.image-tag }}
+          REFS: ${{ steps.tag.outputs.refs }}
         run: |
           set -euo pipefail
 
-          # What the daemon recorded when the registry acknowledged the push. Both tags
-          # name one image, so this is one digest listed twice.
+          # What the daemon recorded when the registry acknowledged the push. Every ref
+          # names one image, so this is one digest listed once per name.
           pushed="$(docker image inspect \
             --format '{{range .RepoDigests}}{{println .}}{{end}}' "$REGISTRY/$IMAGE:$TAG" \
             | sed -n 's/.*@//p' | sort -u)"
@@ -732,10 +786,11 @@ jobs:
               | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }'
           }
 
-          # [LAW:dataflow-not-control-flow] The dated tag and the alias are two values
-          # through one check, not two checks — so the alias can never be the one that
-          # quietly goes unverified.
-          for ref in "$TAG" latest; do
+          # [LAW:dataflow-not-control-flow] Every name this run claimed goes through one
+          # check, driven by the same list that produced them — so a ref cannot be pushed
+          # and left unverified, and the alias in particular can never be the one that
+          # quietly goes unchecked.
+          for ref in $REFS; do
             found="$(registry_digest "$ref")" || {
               echo "ERROR: $REGISTRY did not serve a manifest for $IMAGE:$ref after a" >&2
               echo "       push that claimed to succeed." >&2
@@ -764,14 +819,15 @@ jobs:
       - name: Verify the published image names its source commit and its engine
         env:
           TAG: ${{ steps.tag.outputs.image-tag }}
+          REFS: ${{ steps.tag.outputs.refs }}
           MUST_SAY: ${{ steps.labels.outputs.must-say }}
         run: |
           set -euo pipefail
 
           # Read down to the config blob the way anyone holding only the image would:
-          # manifest, then the config it names, then the labels inside it. Both tags were
-          # just shown to resolve to one digest, so checking the dated tag checks `latest`
-          # too — there is one config blob under both.
+          # manifest, then the config it names, then the labels inside it. Every ref this
+          # run claimed was just shown to resolve to one digest, so reading the dated tag
+          # reads all of them — there is one config blob under the lot.
           config="$(curl -sS --fail --max-time 60 \
             -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
             -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
@@ -804,8 +860,8 @@ jobs:
             echo "image says $key=$got"
           done <<< "$MUST_SAY"
 
-          echo "published $REGISTRY/$IMAGE:$TAG (also :latest) from ${GITHUB_SHA}, and the"
-          echo "image itself names that commit and the $ENGINE engine it carries."
+          echo "published $IMAGE as [$REFS] from ${GITHUB_SHA}, and the image itself names"
+          echo "that commit and the $ENGINE engine it carries."
 
       # The registry now holds the bytes, so the daemon's copy is a duplicate on a disk
       # this workflow has to share. Two images per run, each carrying a python base, an
@@ -823,18 +879,31 @@ jobs:
       - name: Release the local copy of what was published
         if: always()
         env:
-          TAG: ${{ steps.tag.outputs.image-tag }}
+          REFS: ${{ steps.tag.outputs.refs }}
         run: |
           set -euo pipefail
-          # Both expanded with defaults: this step runs on every exit path, including one
-          # taken before either was set, and `set -u` aborting here would replace docker's
-          # account of what it could not remove with a shell error about the cleanup.
-          for ref in "$REGISTRY/${IMAGE:-}:${TAG:-}" "$REGISTRY/${IMAGE:-}:latest"; do
-            # No reason invented for the failure: an early abort leaves TAG unset and the
-            # first ref malformed, a late one leaves it simply absent, and docker has
-            # already printed which. A note claiming "not present" would be wrong half
-            # the time and would read as the whole story.
-            docker image rm "$ref" \
-              || echo "note: could not remove $ref — docker's reason is above" >&2
+
+          # Driven by the same list that named the build, so this removes exactly what was
+          # created and can never miss a ref that the push added. Expanded with defaults
+          # because this step runs on every exit path, including one taken before the tag
+          # step set anything, and `set -u` aborting here would replace docker's account of
+          # what it could not remove with a shell error about the cleanup.
+          #
+          # [LAW:no-silent-failure] An empty list is reported rather than iterated over in
+          # silence: it means the run died before it had a name to build under, which is a
+          # different fact from "nothing was left behind" and should not read as the same
+          # tidy success.
+          if [ -z "${REFS:-}" ]; then
+            echo "note: no refs were resolved, so nothing was tagged locally to release" >&2
+            df -h / | tail -1
+            exit 0
+          fi
+
+          for ref in $REFS; do
+            # No reason invented for the failure: a run that failed before the build leaves
+            # the image simply absent, and docker has already printed which. A note claiming
+            # "not present" would be wrong half the time and would read as the whole story.
+            docker image rm "$REGISTRY/${IMAGE:-}:$ref" \
+              || echo "note: could not remove $REGISTRY/${IMAGE:-}:$ref — docker's reason is above" >&2
           done
           df -h / | tail -1
