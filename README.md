@@ -390,6 +390,21 @@ exists on the real API precisely to make output reproducible, is in the ignored
 list rather than implemented. And `test_word_count_mismatch_is_reported_not_hidden`
 pins the alignment fallback's honesty, not its numbers.
 
+CI runs that command with `--locked` on every pull request and on pushes to
+master, so a drifted `uv.lock` fails the run rather than quietly resolving
+something else, and master's branch protection requires that check — named
+`pytest` — to pass on a branch up to date with master, so a commit that breaks
+a test cannot merge. The workflow installs ffmpeg and espeak-ng from apt, which
+no Python metadata can declare; it leaves the espeak library path unnamed,
+because `tests/conftest.py` already finds it.
+
+Nothing retries. Roughly one full-suite run in five has aborted at interpreter
+teardown from ONNX Runtime after every test passed (piper-tests-ona). A check
+that reran until green would hide the only signal that the bug is still there,
+and a step that cannot fail cannot block a merge. `tests/test_merge_gate.py`
+refuses two edits: narrowing what pytest collects, and silencing what it
+returns.
+
 ## Voice licensing
 
 The two engines differ in whether this needs checking per voice.

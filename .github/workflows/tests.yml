@@ -1,0 +1,80 @@
+# Runs the test suite on every pull request, so a commit that breaks a test
+# cannot reach master.
+#
+# This is the MERGE gate, and it belongs on GitHub because GitHub is where
+# merging happens. It publishes nothing and reaches no registry: the rule that
+# an image comes only from a commit gitea's runner fetched itself is untouched
+# here, and this workflow could not break it if it tried.
+#
+# It is required by master's branch protection under the check name `pytest`,
+# which is the `name:` on the job below. Those two live apart -- one in this
+# file, one in GitHub's settings -- and there is no third place that could hold
+# a stale copy. Renaming the job without renaming the required check does not
+# quietly stop gating: the required context simply never reports, and every pull
+# request blocks on a check that will never arrive. Loud, which is why it is
+# safe to leave the two spellings to a human.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    # The suite fetches ~300 MB of models on a cold cache and synthesizes real
+    # audio; a warm run is about a minute. This is the "something hung" bound,
+    # not the expected duration.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # ffmpeg and espeak-ng are native and no Python metadata can declare
+      # them, so an installer cannot bring them and the suite cannot skip past
+      # them -- see README, "Requirements". `tests/conftest.py` finds the
+      # library this puts at /usr/lib/x86_64-linux-gnu/libespeak-ng.so.1 and
+      # points the phonemizer at it, so the path is named there and not here.
+      - name: Install the native libraries no wheel can carry
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg espeak-ng
+
+      - uses: astral-sh/setup-uv@v5
+
+      # [LAW:one-source-of-truth] `tests/conftest.py` decides which models the
+      # suite provisions, so its hash is what decides whether a cached set is
+      # still the right one. Keying on it over-invalidates -- an unrelated edit
+      # to that file re-downloads -- and that is the direction to be wrong in:
+      # the other one serves a stale asset set to a suite that asked for a new
+      # one, and reports it as a pass.
+      #
+      # A miss costs time, never correctness: the fixtures fetch what is absent
+      # through each engine's own `acquire`, which is the same door the image
+      # build uses. The cache only spares a required check from depending on
+      # HuggingFace being reachable on every run.
+      - name: Cache the models the suite provisions
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: models-${{ hashFiles('tests/conftest.py') }}
+
+      # One command rather than `uv sync` then `uv run`: a bare `uv run`
+      # re-syncs, and would uninstall the extras a preceding sync had just
+      # installed. `--locked` fails the run when uv.lock has drifted from
+      # pyproject.toml rather than quietly resolving something else, and
+      # `--all-extras` reads the engine set out of pyproject rather than
+      # repeating it here, so registering an engine does not also mean
+      # remembering to name it in this file.
+      #
+      # NOTHING RETRIES HERE, DELIBERATELY. Roughly one full-suite run in five
+      # has been seen to abort at interpreter teardown from ONNX Runtime, after
+      # every test has already passed (ticket piper-tests-ona). That is a real
+      # defect in how the suite tears live sessions down, and a required check
+      # that reran until it went green would be the smoke alarm with the battery
+      # out -- it would hide the one signal anybody has that the bug is still
+      # there. If this job goes red at random, fix the teardown; do not wrap
+      # this line in a loop.
+      - name: Run the suite
+        run: uv run --all-extras --locked pytest -q
