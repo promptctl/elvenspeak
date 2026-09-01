@@ -63,9 +63,8 @@ _LOGGER = logging.getLogger("elvenspeak.piper")
 #: The voice installed when none is named. Still lessac, which is the one Piper
 #: voice that is MIT at the repository level, so a default install carries no
 #: licence surprise — see README, "Voice licensing". `high` rather than `medium`
-#: because tier buys nothing below it: every en_US model is ~63 MB whether the
-#: index calls it low or medium, since the tier names synthesis quality and not
-#: model size, so a lower tier is a worse voice at the same price.
+#: buys the better synthesis the tier names for 114 MB against 63 MB, paid once
+#: per voice the image bakes.
 #:
 #: Load-bearing beyond the download. [`elvenspeak.voices.Substitution`]'s
 #: shipped default answers an unknown id in whichever voice the engine lists
