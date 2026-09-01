@@ -1,0 +1,905 @@
+name: Publish the elvenspeak images
+
+# Builds one image per engine from a commit the runner fetched itself, publishes each to
+# the homelab registry under a `YYYY.MM.DD.N` tag — plus `:latest` when the ref is master
+# — and refuses to report success until the registry can be read back and shown to hold
+# exactly what was pushed (piper-deploy-gqz).
+#
+# The first job proves the builder; the second uses it. They are separate because the
+# proof is worth having on a commit that will not be published — a Dockerfile change on a
+# branch gets its BuildKit requirements checked here, before merge, rather than at the far
+# end of a cold build on master.
+#
+# Why this exists at all: CLAUDE.md bans building this service's image from a working
+# tree, and until this file there was nothing that satisfied the rule — so it was enforced
+# by there being no builds rather than by there being correct ones. openconv, which calls
+# this service, is deployed and structurally mute for exactly that reason: there is no
+# elvenspeak image to run.
+#
+# The replacement must run where nothing outside the network can reach in — this repo is
+# pushed to Gitea and the self-hosted act_runner polls outbound, so no inbound connection
+# exists at any point (home-infra/CLAUDE.md: "No inbound internet exposure, ever").
+
+# Pushing to the Gitea remote IS the trigger. elvenspeak is developed on GitHub, which
+# cannot reach this network and must not drive anything inside it; MERGING A PULL REQUEST
+# ON GITHUB PUBLISHES NOTHING. A build happens when someone deliberately runs
+# `git push gitea master`, which is the only side that can reach the registry.
+#
+# No branch filter — pushing a ref here is the request to check that ref, and which refs
+# additionally get *published* is the `publish` job's own condition below.
+#
+# workflow_dispatch takes no inputs, and that is the design rather than an omission. The
+# one thing this workflow must never accept is an instruction about where its source comes
+# from: a path input, a "build this directory" override, or anything else that would let a
+# run publish an image no commit names. There is no such input to refuse because there is
+# no input at all. [LAW:types-are-the-program]
+on:
+  push:
+  workflow_dispatch:
+
+# [LAW:no-ambient-temporal-coupling] act_runner runs `capacity: 4` against a single Docker
+# daemon whose BuildKit layer cache is shared mutable state, on a 2-cpu host. Ordering is
+# owned here rather than left to whenever two runs happen to arrive. It is also what keeps
+# the registry read that picks N from racing another run's push — though the verification
+# at the end of `publish` is what makes a lost race loud, rather than trusting this alone.
+concurrency:
+  group: elvenspeak-builder
+  cancel-in-progress: false
+
+env:
+  # The registry as the cluster's Docker daemons name it — trusted cluster-wide via
+  # insecure-registries in home-infra/modules/docker/default.nix. The HTTPS name
+  # registry.sanctuary.gdn is the same store behind Caddy; every read here goes to the one
+  # a build actually pushes to, so the tag count and the verification are answered by the
+  # same store the push landed in and cannot disagree with it.
+  REGISTRY: 192.168.7.208:5000
+
+  # The forge under the name that will still mean something later, because the labels
+  # built from it go into an artifact that outlives this network's addressing.
+  #
+  # Deliberately NOT `$GITHUB_SERVER_URL`, which is the obvious reach and is wrong here:
+  # act_runner sets it to `http://192.168.7.208:28569`, the LAN address and ephemeral port
+  # the runner itself dials. That resolves from inside the cluster today and is useless in
+  # an image label — the reader of a published image is someone months from now asking
+  # what built it, and a port-pinned private IP answers them with a dead link.
+  # [FRAMING:representation] — the map has to stay true after the territory is re-addressed.
+  FORGE: https://gitea.sanctuary.gdn
+
+jobs:
+  reachability:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the commit under test
+        uses: actions/checkout@v4
+
+      - name: Assert the source is the commit the event named
+        uses: ./.gitea/actions/assert-source-is-event-commit
+
+      # The images are x86_64 Linux. A runner of any other architecture would build a
+      # silently-wrong image, or fall into hours of emulation.
+      - name: Assert the builder matches the image's target platform
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          # /proc/meminfo rather than `free`: procps is not in every job image, and a
+          # capacity report that vanishes with the container's base image is no report.
+          echo "runner: $(uname -s) $arch, $(nproc) cpu, $(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo)MB ram"
+          df -h / | tail -1
+          if [ "$arch" != "x86_64" ]; then
+            echo "ERROR: builder is $arch; elvenspeak's images are x86_64 Linux." >&2
+            exit 1
+          fi
+
+      # `x86_64` is not one platform. It spans a 2004 Opteron and this year's Zen, and
+      # the wheels this image installs do not run on all of it: NumPy's manylinux
+      # builds carry an x86-64-v2 baseline and abort at IMPORT — not at use — on a
+      # machine below it, and the ONNX runtimes underneath both engines are built the
+      # same way. So the property that decides whether this builder can produce a
+      # working image is the microarchitecture LEVEL, and the step above, which
+      # asserts only the name, admits a machine that cannot execute a line of what it
+      # is about to install. [LAW:types-are-the-program] — `uname -m` was the weaker
+      # theorem, and the gap between it and the true one is exactly where this failed.
+      #
+      # This is not hypothetical, which is why it is worth a step of its own. On
+      # 2026-08-31 both publish legs resolved a tag, composed their labels, installed
+      # their extra, and died ninety seconds into the build inside
+      # `elvenspeak.bake` on:
+      #
+      #     RuntimeError: NumPy was built with baseline optimizations: (X86_V2)
+      #     but your machine doesn't support: (X86_V2).
+      #
+      # A traceback that names a Python module and a package, for a fault that is
+      # entirely the builder's and has nothing to do with the commit under test. The
+      # cost of learning it there rather than here is a cold build per engine, and the
+      # cost of MISreading it is worse: it looks like a dependency problem, and the
+      # obvious repair is to pin NumPy down until it stops complaining — which would
+      # carve a defect in one VM's CPU model into this service's dependency graph
+      # forever. [LAW:no-silent-failure] — the failure was loud, in the wrong place,
+      # about the wrong thing.
+      #
+      # Asked of glibc's loader, which publishes the levels it will search on this
+      # CPU: the same determination the wheels' own runtime dispatch makes, so this
+      # measures the machine rather than restating a belief about it. Reported in
+      # full on every run, not only when it fails, so the builder's capability is on
+      # the record before anyone needs it.
+      - name: Assert the builder's CPU can run the wheels the image installs
+        env:
+          # The floor, named once. It is a fact about the wheel ecosystem this image
+          # installs from, not about this repo, so it is stated where the assertion
+          # can read it and nowhere else. When NumPy raises its baseline, this build
+          # fails here naming a level and a machine, which is a starting point; the
+          # traceback it replaces was not. [LAW:one-source-of-truth]
+          REQUIRED_LEVEL: x86-64-v2
+        run: |
+          set -euo pipefail
+
+          loader=/lib64/ld-linux-x86-64.so.2
+          if [ ! -x "$loader" ]; then
+            echo "ERROR: $loader is missing, so this job cannot ask glibc which" >&2
+            echo "       x86-64 levels this machine supports — and must not assume." >&2
+            exit 1
+          fi
+
+          # Only the levels the loader marks supported. It lists every level it knows
+          # and annotates the ones this CPU can run, so matching on the annotation is
+          # what separates capability from the catalogue.
+          levels="$("$loader" --help | sed -nE 's/^.*(x86-64-v[0-9]+) \(supported.*/\1/p')"
+          echo "builder supports: ${levels:-<nothing above the x86-64 baseline>}"
+
+          if ! printf '%s\n' "$levels" | grep -qx "$REQUIRED_LEVEL"; then
+            echo "ERROR: this builder does not support $REQUIRED_LEVEL, so the wheels" >&2
+            echo "       this image installs cannot execute on it. NumPy aborts at" >&2
+            echo "       import, which surfaces as a bake failure that blames the" >&2
+            echo "       package rather than the machine." >&2
+            echo "" >&2
+            echo "       This is a property of the BUILDER, not of the commit. The" >&2
+            echo "       runner is a Proxmox guest, and a guest reports the CPU its" >&2
+            echo "       VM was given: a model below $REQUIRED_LEVEL on a host well" >&2
+            echo "       above it is a masked CPU, not old hardware. Fix it in" >&2
+            echo "       home-infra by giving the VM a CPU model at or above" >&2
+            echo "       $REQUIRED_LEVEL and restarting it — and do not pin the" >&2
+            echo "       dependency down to fit, which would spread one VM's" >&2
+            echo "       misconfiguration into every image this repo ever builds." >&2
+            exit 1
+          fi
+
+      # `jq` is the one command the publish job needs that is not in coreutils and not
+      # exercised anywhere before it is relied on. It reads the published image's config
+      # blob at the very end of `publish`, which is the worst place in the run to discover
+      # a missing binary: the image is already built and already pushed, so the failure
+      # costs a full build and leaves a published tag whose provenance was never checked.
+      #
+      # Asserted here rather than beside the use, because this job is the one that answers
+      # "is this host fit to build and publish". [LAW:single-enforcer]
+      - name: Assert the tools the publish job depends on are installed
+        run: |
+          set -euo pipefail
+          # Run it rather than asking `command -v`: a `jq` on PATH that cannot execute —
+          # wrong architecture, broken install — answers the lookup and fails the use.
+          #
+          # On its own line, and that is the whole assertion. Wrapped as
+          # `echo "jq: $(jq --version)"` the step proves nothing: errexit reads the exit
+          # status of `echo`, which is 0 however the substitution inside it went, so a
+          # missing jq prints an empty version and passes.
+          jq --version
+
+      # BuildKit is not optional for this repo: the Dockerfile declares
+      # `# syntax=docker/dockerfile:1`, which the legacy builder cannot resolve. Proving
+      # the daemon is reachable AND BuildKit-capable here means the publish job fails on
+      # the build itself rather than on the builder it was handed.
+      - name: Assert a BuildKit-capable Docker daemon is reachable
+        run: |
+          set -euo pipefail
+          docker version --format 'daemon {{.Server.Version}}'
+
+          # [LAW:one-source-of-truth] Which frontend the build resolves is read out of the
+          # real Dockerfile rather than restated here. A probe holding its own copy of
+          # "what the build needs" goes stale the first time the Dockerfile gains a
+          # feature, and stays green while the real build breaks on it.
+          if ! head -n 1 Dockerfile | grep -q '^# syntax='; then
+            echo "ERROR: Dockerfile line 1 is not a syntax directive, so this probe" >&2
+            echo "       cannot know which frontend the real build resolves." >&2
+            exit 1
+          fi
+          syntax="$(head -n 1 Dockerfile)"
+
+          # Run-scoped tag: act_runner's capacity is 4, so a fixed name lets two
+          # concurrent runs remove each other's image mid-build.
+          probe="$(mktemp -d)"
+          tag="elvenspeak-buildkit-probe:${GITHUB_RUN_ID}"
+
+          # This is the step designed to fail whenever BuildKit is misconfigured, so its
+          # failure path is a normal case rather than an exceptional one — and `set -e`
+          # aborts past any cleanup written after the build. The trap runs on every exit
+          # path instead. It reports an image that was already gone rather than silencing
+          # the attempt: a quiet cleanup is how a leak stops being visible, and this
+          # runner's disk is the same scarce resource the real build needs.
+          cleanup_probe() {
+            rm -rf "$probe"
+            docker image rm -f "$tag" >/dev/null \
+              || echo "note: probe image $tag was not present to remove" >&2
+          }
+          trap cleanup_probe EXIT
+
+          {
+            echo "$syntax"
+            cat <<'PROBE'
+          FROM busybox
+          RUN --mount=type=cache,target=/probe-cache <<'SHELL'
+          set -eu
+          echo buildkit-ok > /probe-cache/marker
+          cat /probe-cache/marker
+          SHELL
+          PROBE
+          } > "$probe/Dockerfile"
+
+          # [LAW:one-source-of-truth] Both sides are READ, neither is written down. What
+          # the build needs comes from the real Dockerfile; what the probe covers comes
+          # from the probe just generated above — same extractor, two inputs. A ledger of
+          # covered kinds would be a third claim that drifts from both, and a maintainer
+          # meeting the failure below would satisfy a ledger by adding a word to it,
+          # leaving the daemon unchecked for the feature that failed. There is no word to
+          # add here — the only way to cover a kind is to make the probe exercise it.
+          #
+          # This Dockerfile currently uses no --mount at all, so the loop below runs over
+          # nothing. That is the point of extracting rather than asserting: the first
+          # `--mount=type=...` anyone adds is covered by having been added, with no
+          # memory of this file required.
+          #
+          # Reading type= out of each --mount token finds the kind wherever it sits among
+          # the comma-separated keys; matching `--mount=type=` in one pattern only sees it
+          # when written first. BuildKit defaults a mount with no type= to bind, so the
+          # else-branch keeps such a mount from contributing nothing and making the guard
+          # decorative. awk rather than a sed `t` branch, which BSD sed reads as a label
+          # name and rejects — this extractor is the part most likely to be tried by hand
+          # on a Mac when it rejects something.
+          mount_kinds() {
+            grep -oE -- '--mount=[^[:space:]]+' "$1" \
+              | awk '{
+                  if (match($0, /[=,]type=[a-z]+/))
+                    print substr($0, RSTART + 6, RLENGTH - 6)
+                  else
+                    print "bind"
+                }' \
+              | sort -u
+          }
+
+          covered=" $(mount_kinds "$probe/Dockerfile" | tr '\n' ' ')"
+          echo "probe exercises:$covered"
+          for kind in $(mount_kinds Dockerfile); do
+            case "$covered" in
+              *" $kind "*) ;;
+              *)
+                echo "ERROR: Dockerfile uses --mount=type=$kind, which the probe does not" >&2
+                echo "       exercise, so this daemon was never checked for it. Add a RUN" >&2
+                echo "       using type=$kind to the probe above." >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          DOCKER_BUILDKIT=1 docker build --progress=plain -t "$tag" "$probe"
+
+      # [LAW:no-silent-failure] The registry answering at all is not the property that
+      # matters — the property is that it answers as a registry. A Caddy error page or a
+      # captive portal returns a 200 body just as happily, so the response is required to
+      # carry the API version header the /v2/ endpoint is defined to send.
+      - name: Assert the registry answers as a registry
+        run: |
+          set -euo pipefail
+          headers="$(curl -sS --fail --max-time 20 -D - -o /dev/null "http://$REGISTRY/v2/")"
+          echo "$headers"
+          if ! grep -qi '^docker-distribution-api-version:' <<<"$headers"; then
+            echo "ERROR: $REGISTRY/v2/ answered without a Docker-Distribution-API-Version" >&2
+            echo "       header, so whatever replied is not the registry." >&2
+            exit 1
+          fi
+
+      # A read proves routing; only a write proves the builder can publish. This opens an
+      # upload session and immediately cancels it, so it exercises the write path without
+      # leaving a blob behind. A registry that accepts reads but refuses writes would
+      # otherwise be discovered mid-build, after the expensive part.
+      #
+      # Under a repository name that is neither published image, so this job needs to know
+      # nothing about which engines exist — the subject of the probe is the registry's
+      # write path, which this registry does not scope per repository (no auth, no policy).
+      # Probing under one of the two real names would make the other the one never checked.
+      - name: Assert the builder may write to the registry
+        env:
+          PROBE_IMAGE: elvenspeak-write-probe
+        run: |
+          set -euo pipefail
+          location="$(curl -sS --fail --max-time 20 -X POST -D - -o /dev/null \
+            "http://$REGISTRY/v2/$PROBE_IMAGE/blobs/uploads/" | tr -d '\r' \
+            | awk 'tolower($1) == "location:" { print $2 }')"
+
+          # [LAW:dataflow-not-control-flow] The spec lets Location come back either
+          # absolute or as a bare path, and a registry may name itself differently than we
+          # dialled it. Stripping ANY scheme+authority — not only the one assumed —
+          # normalises both spellings through one expression, leaving a bare path
+          # untouched. Matching only the expected host would degrade to a no-op and build
+          # a malformed URL from the leftover.
+          path="$(printf '%s' "$location" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]*##')"
+
+          # The trap goes up here, before the session is validated rather than after. curl
+          # returned 2xx, so the registry HAS opened a session by this line; every exit
+          # below it — including the one for a Location we could not parse — has to
+          # cancel. Installing it after the check left the single path where the session
+          # is hardest to account for as the one path that never cleaned up.
+          cleanup_upload() {
+            # Two real states, each reported honestly. An unparseable Location leaves
+            # nothing this script can address, so it says that rather than firing a DELETE
+            # at the registry root — a request that means nothing, fails, and reports a
+            # blank session id beside the error that already explained it.
+            if [ -z "$path" ]; then
+              echo "note: no cancellable upload session was parsed; registry GC must reap it" >&2
+              return
+            fi
+            curl -sS --fail --max-time 20 -X DELETE "http://$REGISTRY$path" \
+              || echo "note: upload session $path was not cancelled; registry GC must reap it" >&2
+          }
+          trap cleanup_upload EXIT
+
+          # Now safe to reject: the trap above already owns whatever was opened.
+          if [ -z "$path" ]; then
+            echo "ERROR: the registry opened an upload session but named none this" >&2
+            echo "       script could parse. It cannot be cancelled from here and must" >&2
+            echo "       be reaped by registry GC." >&2
+            exit 1
+          fi
+
+          echo "upload session opened at $path"
+
+      - name: Summary
+        run: |
+          echo "builder fetched ${GITHUB_SHA} itself, is x86_64 with BuildKit,"
+          echo "and can both read and write ${REGISTRY}."
+
+  publish:
+    needs: reachability
+    runs-on: ubuntu-latest
+
+    # Which commits become published images, stated once.
+    #
+    # `master` because a dated tag is a permanent claim about a commit: a branch can be
+    # force-pushed or deleted, and a published `2026.08.31.1` whose commit no longer
+    # exists on any ref is precisely an image whose source cannot be named — the failure
+    # CLAUDE.md's rule exists to end, reintroduced by a more respectable route. Dispatch
+    # because a human choosing a ref by hand is the deliberate act the ban was always
+    # about distinguishing from an accident.
+    #
+    # Everything else gets `reachability` and no image. `:latest` is kept honest one step
+    # further in, by the tag step: a dispatch on a branch publishes its dated tag and
+    # cannot move the alias, so the break-glass `nomad job run` with no `-var` can only
+    # land on a build from master.
+    #
+    # The branch is written out rather than read from
+    # `github.event.repository.default_branch` because an expression that resolves to
+    # empty on some event shape is false, and a false condition here publishes nothing and
+    # says nothing — the one failure mode this workflow must not have.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master' }}
+
+    # ---------------------------------------------------------------------------
+    # ONE IMAGE PER ENGINE, and one build description for both.
+    #
+    # [LAW:one-type-per-behavior] Piper and Kokoro are not two builds. They are one build
+    # whose only variable is a word: `ELVENSPEAK_ENGINE=x` selects the extra `elvenspeak[x]`,
+    # the assets `elvenspeak.bake` fetches, and the engine that boots. So the difference
+    # crosses a matrix as a value, rather than living in a second copy of every step below
+    # — the copy that would drift the first time only one of them was edited.
+    #
+    # [LAW:one-source-of-truth] This list is a third map of the engine set, after
+    # `elvenspeak.engines.ENGINES` and `pyproject.toml`'s extras. `tests/test_workflow.py`
+    # reads this file and fails if they disagree, the same way `tests/test_packaging.py`
+    # already ties the extras to the registry. An engine added without a line here would
+    # otherwise publish no image and report nothing wrong.
+    #
+    # max-parallel 1 is DECLARED AND NOT HONOURED, and is left here as the statement of
+    # intent it is rather than deleted as though the intent were wrong. Measured on run
+    # 5225 (2026-08-31): both legs started at the same second, 23:29:49, on an act_runner
+    # with capacity 4. Gitea's scheduler does not implement the key, so what is written
+    # above is a request this forge declines.
+    #
+    # What it asks for is still what this host wants: both legs share one Docker daemon
+    # on 2 cpu and 7.9GB, a cold build is ~10 minutes, and in sequence the second leg
+    # reuses the base layers the first just built rather than contending for the CPU the
+    # build is bound by. Enforcing it needs a mechanism act_runner actually reads — the
+    # workflow-level `concurrency` group below is the only one proved on this runner, and
+    # it scopes across runs rather than within one. Deliberately not replaced with an
+    # untested job-level `concurrency` expression: this file has no way to verify such a
+    # change until the builder can complete a build at all, and a serialisation that
+    # silently does nothing is what is already here. [LAW:no-ambient-temporal-coupling]
+    #
+    # fail-fast off for the same reason these get separate names and separate service
+    # keys: two services that share an API surface, not two attempts at one thing. One
+    # engine's build failing is not a reason to leave the other's deployment with no
+    # image — the run still goes red, and the half that could be published is.
+    # ---------------------------------------------------------------------------
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        engine: [piper, kokoro]
+
+    env:
+      ENGINE: ${{ matrix.engine }}
+
+    steps:
+      # [LAW:parse-dont-validate] The matrix value crosses from Gitea's expression layer
+      # into shell here, and leaves as something that did not exist before: the name this
+      # leg publishes under. Every step below reads `$IMAGE` and none of them re-asks
+      # whether an engine arrived, because an `$IMAGE` they could read is proof one did.
+      #
+      # The engine goes in the image NAME and never in the tag, so the tag stays a pure
+      # date sequence matching the rest of the fleet, and
+      # `service-versions.auto.tfvars.json` — the homelab's only registry of what is
+      # running — gets two keys that each name one territory. One key holding
+      # `elvenspeak:2026.09.01.3` could not say which engine was deployed without pulling
+      # the image and reading its labels. [FRAMING:representation]
+      #
+      # Shape-checked rather than merely non-empty, so a value arriving as an unexpanded
+      # `${{ ... }}` is caught too. Left unchecked, an engine that resolved to empty would
+      # reach the registry as `/v2//tags/list` and `docker build` as
+      # `--build-arg ELVENSPEAK_ENGINE=` — which builds the DEFAULT engine and publishes it
+      # under a name claiming it is the other one.
+      - name: Name the image this leg publishes
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$ENGINE" | grep -qE '^[a-z][a-z0-9_]*$'; then
+            echo "ERROR: the matrix engine came through as '${ENGINE}', which is not an" >&2
+            echo "       engine name. This job cannot know what it was asked to build." >&2
+            exit 1
+          fi
+          # Derived here rather than declared beside ENGINE above, so "the image is named
+          # after its engine" is written once and cannot be half-edited into an image
+          # filed under the wrong service key. [LAW:one-source-of-truth]
+          echo "IMAGE=elvenspeak-$ENGINE" >> "$GITHUB_ENV"
+          echo "building elvenspeak-$ENGINE for engine $ENGINE"
+
+      - name: Check out the commit to build
+        uses: actions/checkout@v4
+
+      # This job builds from its own checkout, so it proves its own provenance. The
+      # assertion in `reachability` was about a different workspace and carries nothing
+      # here. [LAW:parse-dont-validate] — the commit is checked at the one boundary where
+      # source enters this job, and nothing downstream re-asks.
+      - name: Assert the source is the commit the event named
+        id: source
+        uses: ./.gitea/actions/assert-source-is-event-commit
+
+      # ---------------------------------------------------------------------------
+      # The tag.
+      #
+      # `YYYY.MM.DD.N` is the homelab's format (home-infra docs/service-versions.md):
+      # sortable, and the date says when a bad version was cut.
+      #
+      # [LAW:one-source-of-truth] N comes from what the registry has already published,
+      # not from `github.run_number` the way homelab-infra's gen-image-tag action derives
+      # it. The registry is the authority on which tags exist; run_number is a second count
+      # kept in Gitea's database, and it resets when a workflow file is renamed or a repo
+      # is recreated — after which a build silently overwrites a published image under a
+      # tag someone has already deployed. Reading the registry cannot collide, and it makes
+      # N mean "the Nth image of THIS engine published today".
+      #
+      # Two image names are two counters, and that is correct rather than a wart: the two
+      # engines are separate services with separate version keys, so
+      # `elvenspeak-piper:2026.09.01.1` and `elvenspeak-kokoro:2026.09.01.1` being cut by
+      # the same run is two services each on their first build of the day.
+      # ---------------------------------------------------------------------------
+      - name: Resolve the next tag from what the registry has published
+        id: tag
+        run: |
+          set -euo pipefail
+
+          # The runner's zone, not UTC, to match gen-image-tag: the rest of the fleet's
+          # tags are cut that way and these strings are filed into the same
+          # service-versions contract they are.
+          today="$(date +%Y.%m.%d)"
+          today_re="${today//./\\.}"
+
+          body="$(mktemp)"
+          # Before the request, not after the parse: three of the paths out of this step
+          # are the `exit 1`s below, and `set -e` aborts past any cleanup written after
+          # the thing that failed. A trailing `rm` would run on exactly the path where
+          # nothing went wrong. Same reason the BuildKit probe traps rather than tidies up
+          # at the end. [LAW:no-ambient-temporal-coupling]
+          trap 'rm -f "$body"' EXIT
+          code="$(curl -sS --max-time 30 -o "$body" -w '%{http_code}' \
+            "http://$REGISTRY/v2/$IMAGE/tags/list")"
+
+          # [LAW:no-silent-failure] A missing repository is the first build and is fine —
+          # which is where both of these images start. Everything else — the registry down,
+          # a proxy in the way, a 500 — must not read as "first build" and restart the
+          # numbering over tags that already exist, quietly overwriting them.
+          case "$code" in
+            200) ;;
+            404)
+              if ! grep -q NAME_UNKNOWN "$body"; then
+                echo "ERROR: $REGISTRY answered 404 for the tag list, but not the" >&2
+                echo "       NAME_UNKNOWN that means no image has been published:" >&2
+                cat "$body" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "ERROR: $REGISTRY answered $code for the tag list:" >&2
+              cat "$body" >&2
+              exit 1
+              ;;
+          esac
+
+          # Read as JSON, because it is JSON. Splitting the body on brackets and commas
+          # assumes the registry never indents: a pretty-printed array leaves the leading
+          # whitespace on every tag, the anchored match below finds none, `highest` comes
+          # back empty, and the step numbers today from 1 over tags that already exist —
+          # the silent overwrite this whole step is built to prevent, arriving through
+          # formatting rather than through an HTTP error. Nothing downstream would catch
+          # it either: the verify steps compare the registry against what THIS run pushed,
+          # so they pass once the overwrite has happened. [LAW:no-silent-failure]
+          #
+          # `.tags[]?` also covers the case the old pipeline was written around — the
+          # `null` a repository returns when it exists with nothing published yields
+          # nothing and exits 0, so the first build stays the empty case rather than an
+          # error. A body that is not JSON at all now aborts here instead of parsing to
+          # empty, which is the correct direction for a value that decides what gets
+          # overwritten.
+          highest="$(jq -r '.tags[]? // empty' "$body" \
+            | sed -nE "s/^$today_re\.([0-9]+)$/\1/p" | sort -n | tail -n 1)"
+
+          # 10# because `highest` is a digit string from the registry and anyone may retag:
+          # bash reads a leading zero as octal, so a published `.08` would abort every
+          # publish for the day and `.010` would quietly resolve to 9.
+          tag="$today.$(( 10#${highest:-0} + 1 ))"
+
+          # ---------------------------------------------------------------------------
+          # Every name this build will claim, decided once, here.
+          #
+          # [LAW:one-source-of-truth] The build, the push, the digest verification and the
+          # local cleanup all read this list. `latest` used to be hand-written in five
+          # places, which made the alias the copy most likely to be forgotten — and the
+          # alias is the one that must not be wrong.
+          #
+          # [LAW:dataflow-not-control-flow] Which names get published is a VALUE the steps
+          # below iterate, never a branch that skips a push. So `latest` cannot become the
+          # ref that is published but not verified, or cleaned up but not pushed: there is
+          # one list and every step walks all of it.
+          #
+          # `latest` only from master, and this is the enforcement of a rule the workflow
+          # previously only argued for. A break-glass `nomad job run` with no `-var` lands
+          # on `:latest`, so the alias is one outage away from production and may only ever
+          # name a reviewed build. `workflow_dispatch` exists to prove a Dockerfile change
+          # on a branch before it lands, which is a real need — but proving a build and
+          # blessing it as the default are different acts, and only prose used to separate
+          # them. It was not enough: dispatching this branch during development published
+          # both images and moved both `:latest` aliases to an unreviewed commit, which
+          # CLAUDE.md said was impossible. Now the ref decides, and a branch dispatch gets
+          # its dated tag and cannot touch the alias. [LAW:types-are-the-program]
+          # ---------------------------------------------------------------------------
+          refs="$tag"
+          if [ "$GITHUB_REF" = "refs/heads/master" ]; then
+            refs="$refs latest"
+          fi
+
+          echo "publishing $IMAGE as: $refs"
+          echo "image-tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "refs=$refs" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------------------------
+      # What the image says about itself.
+      #
+      # The provenance goes inside the artifact, where it travels with the bytes and
+      # survives being retagged, copied to another registry, or pulled by digest with no
+      # tag at all. Naming the commit in a version file or a CI log does not do that: both
+      # are things you must already have access to, and the person who needs the answer is
+      # holding a container and nothing else.
+      #
+      # [LAW:one-source-of-truth] Composed once, here, and consumed twice — the build
+      # stamps `stamp` and the verification below reads the published image back against
+      # `must-say`, which is `stamp` plus the one label the Dockerfile writes for itself. A
+      # second list hand-written in the verify step would be a checker that agrees with
+      # itself while both drift away from what was actually pushed.
+      # ---------------------------------------------------------------------------
+      - name: Compose the provenance the image will carry
+        id: labels
+        env:
+          REVISION: ${{ steps.source.outputs.revision }}
+          TAG: ${{ steps.tag.outputs.image-tag }}
+        run: |
+          set -euo pipefail
+
+          # [LAW:no-silent-failure] `revision` reaches this step through composite-action
+          # outputs. If it ever yields nothing — a Gitea upgrade, the assertion step
+          # renamed, the `id:` dropped from the caller — the failure this guards against is
+          # not a crash but a published image carrying `revision=`, which is this ticket's
+          # own bug wearing a label. Shape-checked rather than merely non-empty, so a value
+          # that arrives as an expression Gitea declined to expand is caught too.
+          if ! printf '%s' "$REVISION" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "ERROR: the proven revision came through as '${REVISION}', which is not a" >&2
+            echo "       40-character commit sha. The assert-source-is-event-commit step" >&2
+            echo "       did not hand one back, so this build cannot name its own source" >&2
+            echo "       and must not publish an image claiming to." >&2
+            exit 1
+          fi
+
+          # OCI's standard keys where OCI defines one, so a reader with no knowledge of
+          # this repo — or a generic tool — finds the commit where the convention says it
+          # is.
+          #
+          # `image.created` is deliberately absent: the image config already carries a
+          # `created` timestamp Docker writes itself, and a label repeating it would be a
+          # second map of one fact. [LAW:one-source-of-truth]
+          #
+          # The ref and the build link get a reverse-DNS namespace because OCI has no key
+          # for either. `image.ref.name` is NOT that key despite the inviting name — the
+          # spec scopes it to descriptors in an image layout, so a git branch stored there
+          # would read as a lie to anyone who knows the spec and as truth to anyone who
+          # does not. The version is kept even though it repeats the registry tag: a tag is
+          # a pointer the registry owns and can move, while this travels in the image and
+          # still answers after a `pull` by digest.
+          #
+          # [LAW:no-silent-failure] `set -u` aborts on a variable that is unset, but not on
+          # one that is set and empty, which would publish `gdn.sanctuary.build.ref=` — a
+          # label that is present, looks answered, and says nothing. `:?` refuses at the
+          # point of interpolation, so an empty value cannot compose into a label rather
+          # than having to be spotted in one afterwards; a check on the finished block
+          # cannot do this, because by then a literal `/` and an interpolated one are the
+          # same character. [LAW:parse-dont-validate]
+          #
+          # [LAW:dataflow-not-control-flow] The guard rides on each use rather than a list
+          # naming the variables, so a label added later is covered by being written the
+          # same way, not by someone remembering to extend a list somewhere else.
+          empty='is empty, and would publish a label that looks answered and says nothing'
+          stamp="$(cat <<STAMP
+          org.opencontainers.image.revision=${REVISION:?$empty}
+          org.opencontainers.image.source=${FORGE:?$empty}/${GITHUB_REPOSITORY:?$empty}
+          org.opencontainers.image.version=${TAG:?$empty}
+          gdn.sanctuary.build.ref=${GITHUB_REF:?$empty}
+          gdn.sanctuary.build.run=${FORGE:?$empty}/${GITHUB_REPOSITORY:?$empty}/actions/runs/${GITHUB_RUN_ID:?$empty}
+          STAMP
+          )"
+
+          # What the PUBLISHED image must report, which is more than what CI stamps.
+          #
+          # `gdn.sanctuary.elvenspeak.engine` is written by the Dockerfile from the same
+          # ARG that installs the extra and bakes the assets, so the artifact answers "which
+          # engine is this" no matter who built it — including someone running `docker
+          # build` by hand, who would get no label at all if CI owned it.
+          # [LAW:one-source-of-truth] — the ARG already decides; the label is that one fact
+          # made readable, not a second copy to keep in step.
+          #
+          # Asserting it here is the opposite direction and is the assertion this repo most
+          # needs: CI checking that the image it is about to file under `elvenspeak-kokoro`
+          # actually contains Kokoro. A build arg that failed to reach the Dockerfile
+          # produces a working, healthy piper image published under the kokoro name — a
+          # deployment that starts, passes its healthcheck, serves audio, and rejects every
+          # voice id the caller was told to use.
+          must_say="$stamp
+          gdn.sanctuary.elvenspeak.engine=$ENGINE"
+
+          echo "$must_say"
+          {
+            echo "stamp<<LABELS"
+            echo "$stamp"
+            echo "LABELS"
+            echo "must-say<<LABELS"
+            echo "$must_say"
+            echo "LABELS"
+          } >> "$GITHUB_OUTPUT"
+
+      # Every name in `REFS` is applied in the one `docker build`, so an alias can only ever
+      # point at an image that was actually produced here — there is no retag of something
+      # built earlier, and nothing is pushed that this run did not make.
+      - name: Build and push
+        env:
+          REFS: ${{ steps.tag.outputs.refs }}
+          STAMP: ${{ steps.labels.outputs.stamp }}
+        run: |
+          set -euo pipefail
+
+          # [LAW:no-silent-failure] Same reasoning as STAMP below: this crossed a step
+          # boundary, and empty would build an image with no name at all and push nothing,
+          # while every step reported success.
+          if [ -z "$REFS" ]; then
+            echo "ERROR: no refs arrived from the tag step, so this build would produce" >&2
+            echo "       an image under no name. Check that step's output." >&2
+            exit 1
+          fi
+
+          # [LAW:no-silent-failure] The list crossed a step boundary to get here. Empty
+          # would reach docker as `--label ""` and fail on an argument error that says
+          # nothing about where the list was lost; this says it.
+          if [ -z "$STAMP" ]; then
+            echo "ERROR: no provenance arrived from the compose step, so this build would" >&2
+            echo "       publish an image that names nothing. Check that step's output." >&2
+            exit 1
+          fi
+
+          # [LAW:dataflow-not-control-flow] The labels are data the build loops over, not a
+          # hand-written flag per fact. Adding one to the list above is the whole of adding
+          # one to the image — there is no second place that enumerates them.
+          args=()
+          while IFS= read -r label; do
+            args+=(--label "$label")
+          done <<< "$STAMP"
+
+          # The one build arg. Everything else the image needs — the voices, the model,
+          # the download switches — has a default in the Dockerfile, which is where those
+          # defaults belong: passing them here would make an image built by hand differ
+          # from one built by CI in ways neither file records.
+          # The names from the tag step, applied the same way the labels are: as data the
+          # build loops over. [LAW:dataflow-not-control-flow]
+          for ref in $REFS; do
+            args+=(--tag "$REGISTRY/$IMAGE:$ref")
+          done
+
+          DOCKER_BUILDKIT=1 docker build --progress=plain \
+            --build-arg "ELVENSPEAK_ENGINE=$ENGINE" \
+            "${args[@]}" \
+            .
+
+          for ref in $REFS; do
+            docker push "$REGISTRY/$IMAGE:$ref"
+          done
+
+      # A push that reported success and left nothing behind is a deploy that fails minutes
+      # later on an image pull, far from here and hard to trace back.
+      #
+      # The check is not "a manifest exists" but "the manifest is the one this run built",
+      # compared by digest. Existence alone is satisfied by another run that won the same
+      # tag, and by a `:latest` still pointing at last week's build because a push was
+      # silently dropped — both of which look exactly like success to a check that only
+      # asks whether something is there.
+      - name: Verify the registry holds what this run pushed
+        env:
+          TAG: ${{ steps.tag.outputs.image-tag }}
+          REFS: ${{ steps.tag.outputs.refs }}
+        run: |
+          set -euo pipefail
+
+          # What the daemon recorded when the registry acknowledged the push. Every ref
+          # names one image, so this is one digest listed once per name.
+          pushed="$(docker image inspect \
+            --format '{{range .RepoDigests}}{{println .}}{{end}}' "$REGISTRY/$IMAGE:$TAG" \
+            | sed -n 's/.*@//p' | sort -u)"
+          if [ "$(printf '%s' "$pushed" | grep -c .)" != 1 ]; then
+            echo "ERROR: the daemon reports $(printf '%s' "$pushed" | grep -c .) digests" >&2
+            echo "       for $REGISTRY/$IMAGE:$TAG, so there is no single image to" >&2
+            echo "       verify against: $pushed" >&2
+            exit 1
+          fi
+          echo "pushed digest: $pushed"
+
+          # Every media type the daemon might have written, so a manifest that exists is
+          # never reported as absent merely because this request did not ask for its kind.
+          registry_digest() {
+            curl -sS --fail --max-time 60 -I \
+              -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+              -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+              -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+              -H 'Accept: application/vnd.oci.image.index.v1+json' \
+              "http://$REGISTRY/v2/$IMAGE/manifests/$1" \
+              | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }'
+          }
+
+          # [LAW:dataflow-not-control-flow] Every name this run claimed goes through one
+          # check, driven by the same list that produced them — so a ref cannot be pushed
+          # and left unverified, and the alias in particular can never be the one that
+          # quietly goes unchecked.
+          for ref in $REFS; do
+            found="$(registry_digest "$ref")" || {
+              echo "ERROR: $REGISTRY did not serve a manifest for $IMAGE:$ref after a" >&2
+              echo "       push that claimed to succeed." >&2
+              exit 1
+            }
+            if [ "$found" != "$pushed" ]; then
+              echo "ERROR: $IMAGE:$ref resolves to ${found:-<no digest header>}, not to" >&2
+              echo "       the $pushed this run built. Another build won the tag, or the" >&2
+              echo "       push did not land." >&2
+              exit 1
+            fi
+            echo "verified $REGISTRY/$IMAGE:$ref -> $found"
+          done
+
+      # The step above proves the registry holds this run's bytes. This one proves those
+      # bytes answer the two questions anyone holding the container will ask: which commit
+      # produced it, and which engine is inside it. Asked of the published image rather
+      # than of the builder, because "docker build was passed --label" and "the image in
+      # the registry carries the label" are different claims, and only the second is what a
+      # person debugging a container months from now actually gets to read.
+      #
+      # [LAW:verifiable-goals] This is the ticket's acceptance criterion, run by CI on
+      # every publish rather than checked by hand once. A stamp that silently stopped
+      # landing would otherwise be discovered the next time someone needed it, which is
+      # precisely the moment it is too late.
+      - name: Verify the published image names its source commit and its engine
+        env:
+          TAG: ${{ steps.tag.outputs.image-tag }}
+          REFS: ${{ steps.tag.outputs.refs }}
+          MUST_SAY: ${{ steps.labels.outputs.must-say }}
+        run: |
+          set -euo pipefail
+
+          # Read down to the config blob the way anyone holding only the image would:
+          # manifest, then the config it names, then the labels inside it. Every ref this
+          # run claimed was just shown to resolve to one digest, so reading the dated tag
+          # reads all of them — there is one config blob under the lot.
+          config="$(curl -sS --fail --max-time 60 \
+            -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+            -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            "http://$REGISTRY/v2/$IMAGE/manifests/$TAG" | jq -r '.config.digest // empty')"
+
+          # [LAW:no-silent-failure] A manifest list has no `.config`, and so would leave
+          # this empty and send the next request to `blobs/`. Named here instead of
+          # surfacing as a confusing 404 one line later.
+          if [ -z "$config" ]; then
+            echo "ERROR: the manifest for $IMAGE:$TAG names no config blob, so the image's" >&2
+            echo "       own metadata cannot be read. A multi-platform index would look" >&2
+            echo "       like this, and this workflow builds a single image." >&2
+            exit 1
+          fi
+
+          published="$(curl -sS --fail --max-time 60 "http://$REGISTRY/v2/$IMAGE/blobs/$config")"
+
+          # [LAW:dataflow-not-control-flow] Every expectation composed above is checked by
+          # the same comparison — so a fact added to that list is verified by having been
+          # added, and none of them can become the one nobody looks at.
+          while IFS= read -r label; do
+            key="${label%%=*}"
+            want="${label#*=}"
+            got="$(printf '%s' "$published" | jq -r --arg k "$key" '.config.Labels[$k] // empty')"
+            if [ "$got" != "$want" ]; then
+              echo "ERROR: the published $IMAGE:$TAG carries $key=${got:-<absent>}," >&2
+              echo "       but this run required it to say $want." >&2
+              exit 1
+            fi
+            echo "image says $key=$got"
+          done <<< "$MUST_SAY"
+
+          echo "published $IMAGE as [$REFS] from ${GITHUB_SHA}, and the image itself names"
+          echo "that commit and the $ENGINE engine it carries."
+
+      # The registry now holds the bytes, so the daemon's copy is a duplicate on a disk
+      # this workflow has to share. Two images per run, each carrying a python base, an
+      # ONNX runtime and up to ~142 MB of baked assets, against a runner with ~11 GB free:
+      # kept, they fill it in a handful of commits and the symptom is a build failure with
+      # nothing to do with the commit that hit it.
+      #
+      # Only this run's tags, and only the final images — the BuildKit layer cache is what
+      # turns a 10-minute cold build into a 60-second warm one and is deliberately left
+      # alone. `always()` because a run that failed verification produced the same
+      # duplicate as one that passed, and the failure is already recorded above.
+      #
+      # [LAW:no-silent-failure] Reported rather than silenced: a cleanup that quietly does
+      # nothing is how the disk fills while every run still looks tidy.
+      - name: Release the local copy of what was published
+        if: always()
+        env:
+          REFS: ${{ steps.tag.outputs.refs }}
+        run: |
+          set -euo pipefail
+
+          # Driven by the same list that named the build, so this removes exactly what was
+          # created and can never miss a ref that the push added. Expanded with defaults
+          # because this step runs on every exit path, including one taken before the tag
+          # step set anything, and `set -u` aborting here would replace docker's account of
+          # what it could not remove with a shell error about the cleanup.
+          #
+          # [LAW:no-silent-failure] An empty list is reported rather than iterated over in
+          # silence: it means the run died before it had a name to build under, which is a
+          # different fact from "nothing was left behind" and should not read as the same
+          # tidy success.
+          if [ -z "${REFS:-}" ]; then
+            echo "note: no refs were resolved, so nothing was tagged locally to release" >&2
+            df -h / | tail -1
+            exit 0
+          fi
+
+          for ref in $REFS; do
+            # No reason invented for the failure: a run that failed before the build leaves
+            # the image simply absent, and docker has already printed which. A note claiming
+            # "not present" would be wrong half the time and would read as the whole story.
+            docker image rm "$REGISTRY/${IMAGE:-}:$ref" \
+              || echo "note: could not remove $REGISTRY/${IMAGE:-}:$ref — docker's reason is above" >&2
+          done
+          df -h / | tail -1

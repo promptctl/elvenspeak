@@ -100,6 +100,24 @@ ENV ELVENSPEAK_ENGINE="${ELVENSPEAK_ENGINE}" \
     KOKORO_ALLOW_DOWNLOAD=0 \
     PORT=5001
 
+# [LAW:one-source-of-truth] The same ARG that installs the extra and bakes the
+# assets, made readable on the artifact. Not a second copy of the fact: there is
+# no way to change which engine this image carries without changing what this
+# label says, because both come from the one word above.
+#
+# It lives here rather than in the CI workflow's `--label` list because it is a
+# fact about the image, not about the build that produced it — an image built by
+# hand carries it too, and the question it answers is asked by someone holding a
+# container and nothing else. The published tag is `elvenspeak-<engine>:<date>`,
+# but a tag is a pointer the registry owns and can be moved; this travels with
+# the bytes and still answers after a pull by digest.
+#
+# CI reads it back out of the *published* image and fails the run unless it names
+# the engine that run was asked to build. That is the check that catches a build
+# arg which never arrived: the image would build, boot, pass its healthcheck and
+# serve fluent audio while rejecting every voice id its callers were told to use.
+LABEL gdn.sanctuary.elvenspeak.engine="${ELVENSPEAK_ENGINE}"
+
 # A module in the package, not Python written into this file. The build arg
 # reaches it through the environment above, which is also why it cannot be
 # injected into: interpolating `'${PIPER_VOICES}'.split(',')` once put a
