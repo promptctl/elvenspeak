@@ -26,8 +26,8 @@ from elvenspeak.settings import Settings
 #: depends on the assets being installed rather than skipping when they are not.
 pytestmark = pytest.mark.usefixtures("piper_installed")
 
-#: An ElevenLabs voice id from aliases.toml. Used to prove substitution, which
-#: is the behaviour openconv depends on.
+#: An ElevenLabs voice id from `elvenspeak/aliases/piper.toml`. Used to prove
+#: substitution, which is the behaviour openconv depends on.
 FOREIGN_ID = "21m00Tcm4TlvDq8ikWAM"
 
 

@@ -55,7 +55,32 @@ def test_the_unnamed_engine_is_the_registry_s_first_entry():
         "first": lambda _env, _withheld: DeclaredPrepared(),
         "second": lambda *_: pytest.fail("the second entry is not the default"),
     }
-    assert isinstance(Settings.from_env(registry, {}).engine, DeclaredPrepared)
+    settings = Settings.from_env(registry, {})
+    assert isinstance(settings.engine, DeclaredPrepared)
+    assert settings.engine_name == "first"
+
+
+def test_the_engine_and_its_name_come_back_from_the_same_lookup():
+    """[LAW:one-source-of-truth] The name has to be the key that was looked up.
+
+    It decides which `elvenspeak/aliases/<engine>.toml` is read, and getting it
+    wrong is silent by construction: `load_aliases` returns an empty table for a
+    name it has no file for, so a server holding the wrong name resolves no
+    aliases and says nothing about it — quieter than the bug this whole change
+    exists to fix, which at least dropped its entries at INFO.
+
+    Named against a synthetic registry rather than the real one, because the
+    property is that the name is whichever key `_prepare` resolved, not which
+    engines this repository happens to ship. The second entry is the one chosen,
+    so a name that came from defaulting rather than from the lookup fails here.
+    """
+    registry: Registry = {
+        "first": lambda *_: pytest.fail("an explicitly named engine was not built"),
+        "second": lambda _env, _withheld: DeclaredPrepared(),
+    }
+    settings = Settings.from_env(registry, {"ELVENSPEAK_ENGINE": "second"})
+    assert isinstance(settings.engine, DeclaredPrepared)
+    assert settings.engine_name == "second"
 
 
 def test_a_blank_engine_name_is_refused_rather_than_taken_as_no_preference():
