@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import pytest
 from conftest import (
+    SERVES,
     declared,
+    serves,
     KOKORO_MODEL,
     KOKORO_TIMELESS_MODEL,
     KOKORO_VOICES,
@@ -231,7 +233,7 @@ def test_a_voice_is_described_from_its_id(key, name, language, gender):
     engine reading Spanish with English phonemes. One English example would have
     agreed with that mutation perfectly.
     """
-    voice = kokoro._describe(key)
+    voice = kokoro._describe(key, SERVES)
 
     assert voice.id == key
     assert voice.name == name
@@ -348,7 +350,7 @@ def test_a_measured_utterance_honours_speed_too(engine):
 
 
 def test_the_defaults_name_a_real_export_and_real_voices():
-    prepared = kokoro.configure({}, frozenset())
+    prepared = kokoro.configure({}, frozenset(), SERVES)
 
     assert prepared.model == kokoro.DEFAULT_MODEL
     assert prepared.keys == kokoro.DEFAULT_VOICES
@@ -367,7 +369,7 @@ def test_a_voice_id_it_cannot_read_a_language_out_of_is_refused(key):
     making. Refused at the parse rather than discovered at synthesis.
     """
     with pytest.raises(ConfigError, match="KOKORO_VOICES"):
-        kokoro.configure({"KOKORO_VOICES": key}, frozenset())
+        kokoro.configure({"KOKORO_VOICES": key}, frozenset(), SERVES)
 
 
 @pytest.mark.parametrize("typo", ["tru", "yess", "0.0", "maybe"])
@@ -380,7 +382,7 @@ def test_a_boolean_that_is_not_one_is_reported_rather_than_read_as_off(typo):
     from the audio.
     """
     with pytest.raises(ConfigError, match="KOKORO_ALLOW_DOWNLOAD"):
-        kokoro.configure({"KOKORO_ALLOW_DOWNLOAD": typo}, frozenset())
+        kokoro.configure({"KOKORO_ALLOW_DOWNLOAD": typo}, frozenset(), SERVES)
 
 
 @pytest.mark.parametrize(
@@ -396,7 +398,7 @@ def test_a_present_but_blank_setting_is_not_an_absent_one(name, value):
     reported nothing.
     """
     with pytest.raises(ConfigError, match=name):
-        kokoro.configure({name: value}, frozenset())
+        kokoro.configure({name: value}, frozenset(), SERVES)
 
 
 def test_every_problem_in_this_engine_s_configuration_is_reported_together():
@@ -409,6 +411,7 @@ def test_every_problem_in_this_engine_s_configuration_is_reported_together():
                 "KOKORO_ALLOW_DOWNLOAD": "maybe",
             },
             frozenset(),
+            SERVES,
         )
 
     joined = " ".join(raised.value.problems)
@@ -533,6 +536,16 @@ def test_acquire_describes_what_it_installed(kokoro_installed):
         voice.id: voice.capabilities for voice in prepared.open().voices()
     }
     assert all(Capability.TIMESTAMPS in voice.capabilities for voice in voices)
+
+    # The other thing a `Voice` states about its speaker, held to the same
+    # standard: `_declaring` runs on both paths, so a `serves` dropped at one of
+    # them describes a voice the build can reach by engine name and the boot
+    # cannot. Compared against the real declaration too, since agreeing on the
+    # wrong set is what a dropped argument would also look like.
+    assert {voice.id: voice.models for voice in voices} == {
+        voice.id: voice.models for voice in prepared.open().voices()
+    }
+    assert all(voice.models == serves("kokoro") for voice in voices)
 
 
 def test_a_voice_that_is_not_in_the_pack_is_caught_at_install(kokoro_installed):

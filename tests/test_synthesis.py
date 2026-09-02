@@ -16,11 +16,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+from conftest import SERVES
 from elvenspeak import piper
 from elvenspeak.engine import Capability, Prosody, Voice
 
 RATE = 22050
-VOICE = Voice(id="test", name="test", description="test")
+VOICE = Voice(id="test", name="test", description="test", models=SERVES)
 
 
 @dataclass

@@ -120,48 +120,56 @@ substitute — discovery must only report what is really installed.
 ### Model IDs, and which engine they reach
 
 On the real API `model_id` picks the synthesis model, so here it picks the
-engine — and an image holds exactly one engine, so there are three answers
-depending on what you named.
+engine. Which of three answers you get turns on the engine that speaks the voice
+you asked for — not on which image is answering. The two axes resolve in that
+order: `voice_id` decides who speaks, and `model_id` is then read against that
+speaker.
 
-- **It names the engine this deployment runs**, either by that engine's own
-  name (`piper`, `kokoro`) or by one of the ElevenLabs model ids that engine
+- **It names the engine speaking your voice**, either by that engine's own name
+  (`piper`, `kokoro`) or by one of the ElevenLabs model ids that engine
   declares. The request is served, and `model_id` is not in
   `x-elvenspeak-ignored`.
-- **It names an engine this build has but this deployment is not running** —
-  `model_id: "kokoro"` sent to a piper deployment. That is a `422` quoting the
-  value and listing what this deployment does serve. It is never quietly
-  answered by the engine that is running: that would be a caller hearing a
-  different engine than the one they asked for, with nothing in the response
-  saying so.
+- **It names a different engine** — one this build has and this deployment is
+  not running, or one running right here whose voices you did not ask for. That
+  is a `422` quoting the value, naming the voice it disagrees with, and listing
+  what this deployment does serve. `model_id` never overrides `voice_id`: when
+  the two axes name different engines the request is refused rather than
+  answered by one of them, because a caller hearing an engine other than the one
+  they named cannot tell from the response that it happened.
 - **It names no engine here** — `eleven_turbo_v2`, or any other value. The
   request is served, the voice decides as it does when `model_id` is omitted,
   and `model_id` comes back in `x-elvenspeak-ignored`. Deliberately not a
   `422`: every stock ElevenLabs client sends a `model_id`, and refusing the
   unrecognised ones would turn most real callers away on their first request.
 
-A router deployment answers to `router` and to nothing else, including the
-engines it is actually fronting, and the two ways of naming a backend fail
-differently:
+Behind the router it is the same rule, read per voice. `GET /v1/models` on a
+router lists every engine it fronts and every id those engines declare —
+`piper`, `kokoro`, `eleven_flash_v2_5` and the rest — and never `router`, which
+names a process rather than anything that can synthesise. So
+`model_id: "eleven_flash_v2_5"` with a piper voice is served and not ignored,
+exactly as it is against a piper deployment directly, and the same id with a
+kokoro voice is the `422`. A client that reads `x-elvenspeak-ignored` sees the
+same answer either way.
 
-- `model_id: "piper"` to a router in front of a piper backend is the **second**
-  case above — a `422` naming an engine this deployment is not running — even
-  though the router does route to exactly that engine.
-- `model_id: "eleven_flash_v2_5"`, one of the ids piper declares, is the
-  **third** case: served, with the voice deciding, and `model_id` returned in
-  `x-elvenspeak-ignored`. The same request to a piper deployment directly is
-  served *and* not ignored, so a client that reads that header sees a different
-  answer depending only on whether a router was in the way.
-
-Both have one cause — the three answers are decided by what this *deployment*
-runs, and a router runs the router — and one ticket: `piper-routing-7e2.6`, where
-the chosen engine travels with the request.
+The router holds no table of who serves what. Every voice it collects arrives
+from its backend already naming the ids that backend answers to, and the listing
+is the union over the voices on offer — so adding a backend adds its ids, with
+nothing beside it to edit.
 
 Which ElevenLabs ids reach an engine is declared by that engine, in the same
 `elvenspeak/aliases/<engine>.toml` file that holds its voice aliases, under the
 top-level `elevenlabs_models` key. Piper declares `eleven_flash_v2_5` and
 `eleven_turbo_v2_5` — ElevenLabs' fast half, which is what piper is here — and
-kokoro declares `eleven_multilingual_v2`, the quality half. No id may be claimed
-by two engines; a test refuses that before any image is built.
+kokoro declares `eleven_multilingual_v2`, the quality half. A declared id may
+not name an engine at all — not another one, which would let it answer for a
+server the caller plainly did not ask for, and not its own, which would list it
+twice. Startup refuses either.
+
+Until `piper-routing-7e2.17` the three answers turned on what the *deployment*
+ran, and a router runs the router: it answered to `router` and nothing else, so
+`model_id: "piper"` to a router fronting piper was a `422`, and every ElevenLabs
+id came back ignored. That ticket moved the served set onto the voice, where it
+can differ from one request to the next.
 
 ### Timestamps, and what is measured
 

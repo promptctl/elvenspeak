@@ -281,7 +281,9 @@ class _Prepared:
 
 
 def configure(
-    env: "Mapping[str, str]", withheld: frozenset[engine.Capability]
+    env: "Mapping[str, str]",
+    withheld: frozenset[engine.Capability],
+    serves: frozenset[str],
 ) -> _Prepared:
     """Reads the router's own environment, or says everything wrong with it at once.
 
@@ -296,6 +298,17 @@ def configure(
     whatever they made before this process started. The subtraction still happens
     once, in [`elvenspeak.api.create_app`], so a withheld capability is never
     offered no matter what the fleet declared.
+
+    `serves` is accepted and unused for a sharper version of the same reason, and
+    it is the argument this engine is the shape of. It is what a deployment
+    running *this* engine answers to by name — `{"router"}`, since a router ships
+    no declaration file and never will. Stamping it onto the fleet's voices is
+    precisely the bug `piper-routing-7e2.17` was filed for: it would republish
+    every backend as `router` and refuse `piper` as an engine this deployment is
+    not running, while running it. The voices arrive from
+    [`elvenspeak.remote`] already carrying their own backend's answer, which is
+    the one that can be right ([LAW:one-source-of-truth]), and the union over them
+    is what [`elvenspeak.api`] advertises.
     """
     problems: list[str] = []
 
