@@ -66,7 +66,8 @@ from .settings import Settings
 
 _LOGGER = logging.getLogger("elvenspeak.api")
 
-#: What an engine has to declare before a request parameter can be honoured.
+#: What the speaking voice has to declare before a request parameter can be
+#: honoured.
 #: The one place ElevenLabs' vocabulary is mapped onto the engine seam's, which
 #: is work only this module can do: an engine has never heard of a body field,
 #: and [`elvenspeak.engine`] must not learn one to stay reusable.
@@ -284,14 +285,16 @@ def _honoured(
 
     [LAW:one-source-of-truth] The one derivation of "honoured", read by
     [`SpeechRequest.ignored`] and by nothing else. Both halves are read off the
-    facts rather than listed: the capability half from the engine's declaration
-    through [`_NEEDS_CAPABILITY`], the model half from where the request's
-    `model_id` actually reaches.
+    facts rather than listed: the capability half from the declaration of the
+    voice that is about to speak, through [`_NEEDS_CAPABILITY`], the model half
+    from where the request's `model_id` actually reaches.
 
-    Per request rather than once at startup, because the model half is a fact
-    about the request. The capability half genuinely is fixed, and recomputing it
-    costs a set comprehension over one entry — cheaper than the second, stale
-    copy that caching it beside the fixed one would create.
+    Per request, because both halves are. The model half is a fact about the
+    request; the capability half is fixed for a given voice but not for the
+    deployment — behind [`elvenspeak.router`] the same parameter is honoured for
+    one voice and reported ignored for the next, in the same process. That is why
+    the caller passes what the resolved voice declared rather than one set decided
+    at startup, and why this cannot be computed once and kept.
     """
     return (
         frozenset(
@@ -704,8 +707,12 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         /v1/voices` wraps its list because ElevenLabs wraps that one; the
         difference is theirs, and mirroring it is the whole job.
         """
+        # Derived once per request rather than once per entry: it is a union over
+        # every installed voice, and every model id here gets the same answer.
+        deployment_wide = offered()
         return [
-            _model_json(model_id, offered()) for model_id in directory.listed()
+            _model_json(model_id, deployment_wide)
+            for model_id in directory.listed()
         ]
 
     # ------------------------------------------------------------------ voices

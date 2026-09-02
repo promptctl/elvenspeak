@@ -46,8 +46,12 @@ def engine(kokoro_installed):
 
 def test_the_export_that_reports_durations_declares_it(engine):
     """The default deployment, whose export carries a `duration` output."""
-    assert Capability.TIMESTAMPS in declared(engine)
-    assert Capability.SPEED in declared(engine)
+    # Per voice, not merely somewhere in the union: `open()` claims every voice
+    # this export speaks carries the same set, and a stamp applied to only one of
+    # the four would satisfy `declared()` while leaving three voices silently
+    # incapable.
+    assert all(Capability.TIMESTAMPS in v.capabilities for v in engine.voices())
+    assert all(Capability.SPEED in v.capabilities for v in engine.voices())
 
 
 def test_the_export_without_durations_does_not_declare_the_capability(

@@ -303,13 +303,15 @@ class DeclaredEngine:
         voices: tuple[Voice, ...] = DECLARED_VOICES,
     ) -> None:
         self._capabilities = capabilities
-        # Stamped onto the voices, because that is where a capability lives. Taken
-        # as one argument rather than per voice because every voice this stand-in
-        # offers is spoken the same way — which is true of the real single-engine
-        # implementations too, and is exactly why the per-voice shape costs them
-        # nothing.
+        # `capabilities` is what a voice does *unless it says otherwise*: one rule
+        # applied to every voice, so an engine whose voices differ is expressed by
+        # the voices differing rather than by a second way of building one. Stamp
+        # the voice that diverges, leave the rest, and set this to what the rest
+        # should have. [LAW:one-type-per-behavior] — what varies between the
+        # engines these tests need is a value, and this is the richer value.
         self._voices = tuple(
-            replace(voice, capabilities=capabilities) for voice in voices
+            voice if voice.capabilities else replace(voice, capabilities=capabilities)
+            for voice in voices
         )
 
     def voices(self) -> tuple[Voice, ...]:
@@ -317,7 +319,7 @@ class DeclaredEngine:
 
     def speak(self, voice: Voice, text: str, prosody: Prosody) -> Speech:
         return Speech(
-            sample_rate=_DECLARED_RATE, audio=_silence(self._length(text, prosody))
+            sample_rate=_DECLARED_RATE, audio=_silence(self._length(voice, text, prosody))
         )
 
     def speak_timed(self, voice: Voice, text: str, prosody: Prosody) -> TimedSpeech:
@@ -329,28 +331,33 @@ class DeclaredEngine:
         obliged anyway would leave that promise resting on a gate no test failure
         would ever be traced back to.
         """
-        if Capability.TIMESTAMPS not in self._capabilities:
+        if Capability.TIMESTAMPS not in voice.capabilities:
             raise AssertionError(
-                "speak_timed was called on an engine that did not declare "
-                f"{Capability.TIMESTAMPS.name}"
+                f"speak_timed was called for voice {voice.id!r}, which did not "
+                f"declare {Capability.TIMESTAMPS.name}"
             )
-        samples = self._length(text, prosody)
+        samples = self._length(voice, text, prosody)
         return TimedSpeech(
             pcm=b"".join(_silence(samples)),
             sample_rate=_DECLARED_RATE,
             timings=(Timing(samples=samples, separates_words=False),),
         )
 
-    def _length(self, text: str, prosody: Prosody) -> int:
+    def _length(self, voice: Voice, text: str, prosody: Prosody) -> int:
         """How many samples this utterance runs to.
 
-        `prosody.speed` is read only when [`Capability.SPEED`] was declared. An
-        engine that applied a speed it never claimed would be the dishonest one
-        the ignored header cannot describe — and reading it unconditionally here
-        would make this stand-in that engine, silently, for every test that
-        constructs it declaring nothing.
+        `prosody.speed` is read only when the *speaking voice* declared
+        [`Capability.SPEED`]. A voice that applied a speed it never claimed would
+        be the dishonest one the ignored header cannot describe — and reading it
+        unconditionally would make this stand-in that engine, silently, for every
+        test that constructs it declaring nothing.
+
+        Per voice rather than per engine for the same reason the server asks per
+        voice: this stand-in is honest in both directions or it is not a subject
+        the conformance suite can trust, and an engine offering a measured voice
+        beside an unmeasured one is now expressible.
         """
-        speed = prosody.speed if Capability.SPEED in self._capabilities else 1.0
+        speed = prosody.speed if Capability.SPEED in voice.capabilities else 1.0
         return int(len(text) * _SAMPLES_PER_CHARACTER / speed)
 
 

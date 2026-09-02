@@ -26,6 +26,7 @@ from elvenspeak import api, models
 from elvenspeak.engine import Capability, Prosody, Speech, Voice
 from elvenspeak.engines import ENGINES
 from elvenspeak.settings import Settings
+from elvenspeak.voices import Substitution
 
 VOICE = DECLARED_VOICES[0]
 
@@ -374,3 +375,52 @@ def test_every_reach_says_what_it_honours():
     dropped for a request the router had just used it to steer.
     """
     assert set(api._HONOURED_BY_REACH) == set(models.Reach)
+
+
+def test_one_engine_whose_voices_differ_is_answered_per_voice():
+    """The seam-level case, without a router or a socket in the way.
+
+    `test_router` proves per-voice capability across a fleet, which travels over
+    HTTP and through `elvenspeak.remote`'s parsing — a different path from the one
+    `api.py` takes when a single `Engine.voices()` call returns voices that
+    disagree. Nothing else exercised that, so the surface's own `honoured(voice)`
+    and `require(capability, voice)` were only ever tested against engines whose
+    voices were all alike.
+
+    Nothing forbids an engine from offering a measured voice beside an unmeasured
+    one; the interface stopped having anywhere to say so only because the answer
+    used to live on the engine.
+    """
+    timed = Voice(
+        id="measured",
+        name="Measured",
+        description="carries timings",
+        capabilities=frozenset(Capability),
+    )
+    plain = Voice(id="plain", name="Plain", description="does not")
+
+    # `plain` declares nothing and inherits the engine's set, which is empty.
+    engine = DeclaredEngine(frozenset(), voices=(timed, plain))
+    # First-offered rather than this file's usual named fallback, which names a
+    # voice this engine does not have.
+    settings = replace(_settings(), fallback=Substitution.FIRST_OFFERED)
+    with TestClient(api.create_app(settings, engine)) as client:
+        answers = {
+            voice_id: client.post(
+                f"/v1/text-to-speech/{voice_id}/with-timestamps",
+                json={"text": "hello there"},
+            )
+            for voice_id in ("measured", "plain")
+        }
+        speeds = {
+            voice_id: client.post(
+                f"/v1/text-to-speech/{voice_id}/stream",
+                json={"text": "hello", "voice_settings": {"speed": 2.0}},
+            ).headers.get("x-elvenspeak-ignored", "")
+            for voice_id in ("measured", "plain")
+        }
+
+    assert answers["measured"].status_code == 200, answers["measured"].text
+    assert answers["plain"].status_code == 501, answers["plain"].text
+    assert "voice_settings.speed" not in speeds["measured"]
+    assert "voice_settings.speed" in speeds["plain"]

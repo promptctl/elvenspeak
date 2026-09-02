@@ -82,8 +82,10 @@ class RouterEngine:
 
     Satisfies [`elvenspeak.engine.Engine`] in full. Every field was decided at
     [`_Prepared.open`], which is where discovery happened, so nothing here does
-    I/O to answer a question about itself — [`voices`] and [`capabilities`] are
-    reads, exactly as they are for an engine holding ONNX sessions.
+    I/O to answer a question about itself — [`voices`] is a read, exactly as it is
+    for an engine holding ONNX sessions. What each of those voices can do is on
+    the voice ([`elvenspeak.engine.Voice.capabilities`]); this engine holds no
+    capability answer of its own and so has none to be wrong with.
     """
 
     #: Every voice the fleet offers, backends in discovery order and each
