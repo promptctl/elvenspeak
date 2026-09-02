@@ -40,6 +40,12 @@ piper = ["piper-tts[alignment]>=1.7.0"]
 # Pulls onnxruntime, numpy and phonemizer. Also needs espeak-ng, which is a
 # native library no Python metadata can install; see the README.
 kokoro = ["kokoro-onnx>=0.6.1"]
+# Empty, and true rather than a placeholder: the router's backends are other
+# elvenspeak servers, reached over HTTP with `urllib` from the standard library,
+# so it needs nothing beyond `fastapi` and `uvicorn` above. `pip install
+# elvenspeak[router]` therefore installs exactly what a router deployment runs —
+# which is the same statement every other extra here makes.
+router = []
 dev = [
     "httpx>=0.28",
     "pytest>=8.3",

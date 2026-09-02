@@ -65,9 +65,11 @@ An id this server does not know still gets audio, in the fallback voice, because
 clients hold ElevenLabs voice ids in saved settings and a server that 404s all
 of them replaces nothing.
 
-`elvenspeak/aliases/` holds one table per engine — `piper.toml`, `kokoro.toml` —
-each named after that engine's key in the registry, and an engine reads only the
-file named after itself. Every table maps the nine original ElevenLabs voices
+`elvenspeak/aliases/` holds one table per engine that declares any —
+`piper.toml`, `kokoro.toml` — each named after that engine's key in the registry,
+and an engine reads only the file named after itself. An engine with nothing to
+declare has no file: the router has none, because the voices it answers for are
+other engines' and so are their aliases. Every table maps the nine original ElevenLabs voices
 onto that engine's own voices, comparable in register, **not** in likeness. The
 scoping is what keeps them honest: one shared table can only name one engine's
 voices, and a Piper voice name is meaningless inside the Kokoro image. An engine
@@ -176,7 +178,9 @@ library that works would be a silent fallback inside the component whose job is
 to fail loudly.
 
 ```
-uv run --extra piper main.py            # or --extra kokoro, to run the other one
+uv run --extra piper main.py            # or --extra kokoro, to run that one.
+                                        # --extra router installs nothing: its
+                                        # backends are other elvenspeak servers.
 ```
 
 The extra is not optional in practice, it is the engine. Each engine's libraries
@@ -193,8 +197,8 @@ nothing here touches the network.
 
 ```
 # The server's own, true whichever engine runs:
-ELVENSPEAK_ENGINE=piper            # or kokoro; any other name refuses to start,
-                                   # and says which names are real
+ELVENSPEAK_ENGINE=piper            # or kokoro, or router; any other name refuses
+                                   # to start, and says which names are real
 ELVENSPEAK_FALLBACK_VOICE=…        # default: the first voice the engine offers.
                                    # Empty string turns substitution off (404s).
 ELVENSPEAK_API_KEY=                # unset accepts every request
@@ -221,6 +225,14 @@ KOKORO_VOICES=af_heart,am_michael,bf_emma,bm_george
 KOKORO_MODELS_DIR=./models
 KOKORO_MODEL=kokoro-v1.0.int8.onnx # which published ONNX export to open
 KOKORO_ALLOW_DOWNLOAD=1            # 0 to require assets be present already
+
+# The router engine's own, read only when it is the engine:
+ROUTER_CONSUL_URL=                 # required, e.g. http://10.0.0.4:8500. Where
+                                   # to ask which engines are running. Never
+                                   # defaulted: guessing the local agent is right
+                                   # only on a host network, and on a bridge
+                                   # network it would discover nothing and blame
+                                   # the fleet.
 ```
 
 `ELVENSPEAK_WITHHOLD` is in the server's group and stays there whichever engine
