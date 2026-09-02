@@ -170,9 +170,15 @@ EXPOSE ${PORT}
 # sessions were built — not merely that the process is alive. It does not
 # synthesize: inference every 30s would compete with real requests for the CPU
 # this service is bound by.
+#
+# [LAW:single-enforcer] Reads the status line and nothing else. This used to
+# parse the body and decide for itself that an empty `voices` list was a
+# failure, which made it a second opinion about fitness — right, but private to
+# this file, and Nomad's docker driver never runs it. `/health` owns the verdict
+# now, so this and the cluster's own check reach the same answer by reading the
+# same thing.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s \
-  CMD python -c "import urllib.request,json,os,sys; \
-b=json.load(urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ['PORT'])); \
-sys.exit(0 if b['voices'] else 1)"
+  CMD python -c "import urllib.request,os; \
+urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ['PORT'])"
 
 CMD ["uv", "run", "--no-dev", "main.py"]

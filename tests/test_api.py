@@ -88,9 +88,16 @@ def speak(client, path="", **params):
 
 
 def test_health_lists_installed_voices(client):
-    body = client.get("/health").json()
-    assert body["status"] == "ok"
-    assert VOICE in body["voices"]
+    """A server that can speak says so in the status line and names the voices.
+
+    The body carries no `status` field any more: it repeated the status line,
+    which is one verdict with two representations free to disagree. What a
+    checker needs is the code, and the code is what every checker now reads —
+    `tests/test_router.py` covers the same endpoint answering 503.
+    """
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert VOICE in response.json()["voices"]
 
 
 @pytest.mark.parametrize(

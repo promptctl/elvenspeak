@@ -536,11 +536,34 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     # ----------------------------------------------------------------- health
 
     @app.get("/health")
-    def health() -> dict:
-        # An empty `voices` list is the healthcheck's signal for "this server
-        # cannot speak" — reachable, because an engine is entitled to offer
-        # nothing, and reported rather than dressed up as a 500.
-        return {"status": "ok", "voices": [voice.id for voice in cat.installed]}
+    def health(response: Response) -> dict:
+        """Whether this server is fit to receive traffic, and what it can say.
+
+        [LAW:single-enforcer] The one place that decides. This used to answer 200
+        unconditionally and leave "is an empty voice list healthy?" to whoever was
+        checking, which is a cross-cutting invariant with no owner: the image's
+        `HEALTHCHECK` read `voices` and said no, Nomad's `check` read the status
+        code and said yes, and on 2026-09-02 a router that discovered no engines
+        registered in Consul as passing and served silence. Nomad's docker driver
+        never runs the image's `HEALTHCHECK`, so the only rule that was right was
+        also the only one nobody consulted. The verdict belongs here, where every
+        checker gets it by reading the status code it was already reading.
+
+        No server with an empty catalog is fit for traffic. An engine with assets
+        cannot reach that state — [`elvenspeak.provisioning`] refuses an empty
+        voice list while parsing — so the case is a router that found no fleet,
+        and for that one "I can speak nothing" and "send me requests" are never
+        both true. A 503 is also honest about the tense: the router is starting
+        beside its engines and will discover them on the restart its budget is
+        there to pay for, which is unavailable rather than broken.
+
+        The body still reports the fact rather than repeating the verdict. A
+        `status` field would be a second copy of the status line, free to
+        disagree with it; `voices` is what the status line cannot carry.
+        """
+        voices = [voice.id for voice in cat.installed]
+        response.status_code = 200 if voices else 503
+        return {"voices": voices}
 
     # --------------------------------------------------------------- synthesis
 
