@@ -30,6 +30,7 @@ from __future__ import annotations
 import base64
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -52,7 +53,14 @@ _CHUNK = 64 * 1024
 #: timestamp endpoints answer, and a long paragraph on a busy engine legitimately
 #: takes a while. Finite, because a wedged backend must fail the one request it
 #: wedged rather than hold a router thread forever.
-_TIMEOUT_SECONDS = 300.0
+_SPEAKING_TIMEOUT_SECONDS = 300.0
+
+#: What a backend gets to answer a question about *itself*, which is a read it
+#: does no work for. Short for the same reason [`elvenspeak.discovery`]'s is: this
+#: one is spent during boot, before the port is bound, so a backend that is
+#: reachable but wedged has to fail the boot rather than hang it — and the router
+#: asks two of these per backend, so a long limit here is paid twice over.
+_ASKING_TIMEOUT_SECONDS = 5.0
 
 
 class RemoteFailure(RuntimeError):
@@ -66,11 +74,17 @@ class RemoteFailure(RuntimeError):
     """
 
 
-def _request(url: str, body: dict | None, accept: str) -> Any:
+def _request(url: str, body: dict | None, accept: str, timeout: float) -> Any:
     """Opens `url`, returning the live response for the caller to drain.
 
     Left open on purpose: the streaming path needs the socket while it reads, so
     closing is the caller's job and every caller here does it with `with`.
+
+    `timeout` is passed rather than read from a constant because the two things
+    this module does want two limits — a backend describing itself should answer
+    at once, and a backend synthesising a paragraph should not be cut off. One
+    number for both would have to be the longer, which is how the boot path came
+    to be allowed to hang for ten minutes per backend.
     """
     payload = None if body is None else json.dumps(body).encode("utf-8")
     headers = {"accept": accept} | (
@@ -83,9 +97,25 @@ def _request(url: str, body: dict | None, accept: str) -> Any:
         method="GET" if payload is None else "POST",
     )
     try:
-        return urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS)
+        return urllib.request.urlopen(request, timeout=timeout)
     except (urllib.error.URLError, TimeoutError) as failure:
         raise RemoteFailure(f"{url}: {failure}") from None
+
+
+def _spoken_at(base_url: str, voice: engine.Voice, suffix: str) -> str:
+    """Where to ask `base_url` to speak in `voice`.
+
+    [LAW:parse-dont-validate] The one place a voice id becomes part of a URL. Ids
+    are operator-supplied and constrained only to being non-empty, so one holding
+    `#` or `?` would truncate the path or collide with the query string that is
+    appended right after it. `safe=""` encodes `/` too: a voice id may not invent
+    a path segment.
+    """
+    quoted = urllib.parse.quote(voice.id, safe="")
+    return (
+        f"{base_url}/v1/text-to-speech/{quoted}{suffix}"
+        f"?output_format={WIRE_FORMAT}"
+    )
 
 
 def _voice(published: Any, service: str) -> engine.Voice:
@@ -161,7 +191,9 @@ class Remote:
         """
         try:
             url = f"{self.backend.base_url}{path}"
-            with _request(url, None, "application/json") as response:
+            with _request(
+                url, None, "application/json", _ASKING_TIMEOUT_SECONDS
+            ) as response:
                 return json.load(response)
         except (RemoteFailure, ValueError) as failure:
             raise ConfigError([f"{self.backend.service}: {what} ({failure})"]) from None
@@ -231,20 +263,24 @@ class Remote:
         first chunk, so the caller hears the backend's first words while the
         backend is still making its last.
         """
-        url = (
-            f"{self.backend.base_url}/v1/text-to-speech/{voice.id}/stream"
-            f"?output_format={WIRE_FORMAT}"
-        )
-        response = _request(url, _body(text, prosody), "audio/pcm")
+        url = _spoken_at(self.backend.base_url, voice, "/stream")
+        body = _body(text, prosody)
 
         def chunks() -> Iterator[bytes]:
-            with response:
+            # Opened by the first `next()`, not by `speak`. `Speech` promises "a
+            # generator handed over unstarted costs nothing if the caller goes
+            # away", and a connection opened before the generator exists is a
+            # socket held open by a `Speech` nobody ever drains — reclaimed by the
+            # garbage collector rather than by leaving this block.
+            with _request(url, body, "audio/pcm", _SPEAKING_TIMEOUT_SECONDS) as live:
                 while True:
-                    block = response.read(_CHUNK)
+                    block = live.read(_CHUNK)
                     if not block:
                         return
                     yield block
 
+        # Known before any audio and before any connection: the rate is this
+        # module's own choice of wire format, not something a backend reports.
         return engine.Speech(sample_rate=WIRE_RATE, audio=chunks())
 
     def speak_timed(
@@ -257,11 +293,10 @@ class Remote:
         anything. Deriving fresh timings here from the samples would be inventing
         an alignment and presenting it as one.
         """
-        url = (
-            f"{self.backend.base_url}/v1/text-to-speech/{voice.id}/with-timestamps"
-            f"?output_format={WIRE_FORMAT}"
-        )
-        with _request(url, _body(text, prosody), "application/json") as response:
+        url = _spoken_at(self.backend.base_url, voice, "/with-timestamps")
+        with _request(
+            url, _body(text, prosody), "application/json", _SPEAKING_TIMEOUT_SECONDS
+        ) as response:
             published = json.load(response)
         if not isinstance(published, dict) or "audio_base64" not in published:
             raise RemoteFailure(f"{url}: no timed audio in the response")
@@ -291,12 +326,20 @@ def _timings(alignment: Any, total_samples: int) -> tuple[engine.Timing, ...]:
     """The backend's character alignment as the durations this seam carries.
 
     [LAW:one-source-of-truth] `TimedSpeech` promises its timings sum to the audio's
-    sample count, and that promise is kept here by construction: each duration is
-    the gap between consecutive rounded boundaries, so the rounding cannot
-    accumulate, and the last one absorbs whatever the backend's final timestamp
-    and the actual byte count disagree about. Rounding each duration
-    independently would drift, and the alignment built from it would end before
-    or after the audio it describes.
+    sample count, and that promise is kept here by construction. Each duration is
+    the gap between consecutive boundaries, so rounding cannot accumulate; each
+    boundary is clamped to the audio's own length, so the running sum can never
+    exceed it; and the leftover is therefore never negative, so adding it to the
+    last stretch closes the sum exactly.
+
+    The clamp is what makes "by construction" true rather than usual. Without it
+    a backend whose alignment overshoots the audio — a resampler padding on the
+    way up to 48 kHz, a trailing character measured past the last sample — would
+    leave a negative leftover that a final `max(0, ...)` would silently discard,
+    and the sum would come up short. The audio is the fact and the timestamps
+    describe it, so where they disagree the audio wins; expressing that as a
+    bound on each boundary rather than as a correction at the end removes the
+    case instead of handling it.
 
     A response with no alignment yields no timings, which is the same thing an
     engine that measured nothing reports, and the caller learns it from
@@ -314,22 +357,23 @@ def _timings(alignment: Any, total_samples: int) -> tuple[engine.Timing, ...]:
     timings: list[engine.Timing] = []
     previous = 0
     for character, end in zip(characters, ends):
-        boundary = round(float(end) * WIRE_RATE)
+        # Non-decreasing and never past the end of the audio, which is what makes
+        # every duration below non-negative and their sum at most `total_samples`.
+        boundary = min(total_samples, max(previous, round(float(end) * WIRE_RATE)))
         timings.append(
             engine.Timing(
-                samples=max(0, boundary - previous),
+                samples=boundary - previous,
                 separates_words=str(character).isspace(),
             )
         )
-        previous = max(previous, boundary)
+        previous = boundary
 
-    # The audio is the fact; the timestamps describe it. Where they disagree the
-    # audio wins, and the difference is charged to the last stretch rather than
-    # spread, so no individual measurement is quietly altered.
-    shortfall = total_samples - sum(timing.samples for timing in timings)
+    # Whatever the backend's last timestamp left unaccounted for, charged to the
+    # last stretch rather than spread, so no individual measurement is altered.
+    # Never negative: `previous` cannot have passed `total_samples`.
     last = timings[-1]
     timings[-1] = engine.Timing(
-        samples=max(0, last.samples + shortfall),
+        samples=last.samples + (total_samples - previous),
         separates_words=last.separates_words,
     )
     return tuple(timings)

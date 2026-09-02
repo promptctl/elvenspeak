@@ -68,8 +68,16 @@ of them replaces nothing.
 `elvenspeak/aliases/` holds one table per engine that declares any —
 `piper.toml`, `kokoro.toml` — each named after that engine's key in the registry,
 and an engine reads only the file named after itself. An engine with nothing to
-declare has no file: the router has none, because the voices it answers for are
-other engines' and so are their aliases. Every table maps the nine original ElevenLabs voices
+declare has no file.
+
+**The router has none, and aliases do not resolve through it.** A voice id from
+the list above reaches a substitute on a piper or kokoro deployment; sent to a
+router in front of those same engines it lands on the fallback voice instead,
+exactly as a completely unknown id would. The router's own table is empty, and a
+backend is only ever asked for an already-resolved local voice id, so its table
+is never consulted either. Tracked as `piper-routing-7e2.15`; until it is done, a
+routed deployment is not a drop-in for a direct one where saved ElevenLabs voice
+ids are concerned. Every table maps the nine original ElevenLabs voices
 onto that engine's own voices, comparable in register, **not** in likeness. The
 scoping is what keeps them honest: one shared table can only name one engine's
 voices, and a Piper voice name is meaningless inside the Kokoro image. An engine
@@ -111,6 +119,14 @@ depending on what you named.
   and `model_id` comes back in `x-elvenspeak-ignored`. Deliberately not a
   `422`: every stock ElevenLabs client sends a `model_id`, and refusing the
   unrecognised ones would turn most real callers away on their first request.
+
+A router deployment answers to `router` and to nothing else, including the
+engines it is actually fronting. `model_id: "piper"` sent to a router in front of
+a piper backend is the second case above — a `422` naming an engine this
+deployment is not running — even though the router does route to exactly that
+engine. The three answers are decided by what this *deployment* runs, and a
+router runs the router. Making `model_id` name a backend is
+`piper-routing-7e2.6`, where the chosen engine travels with the request.
 
 Which ElevenLabs ids reach an engine is declared by that engine, in the same
 `elvenspeak/aliases/<engine>.toml` file that holds its voice aliases, under the

@@ -145,20 +145,27 @@ def _fleet(consul_url: str) -> tuple[_Found, ...]:
     )
 
 
-def _collisions(
-    offered: Mapping[str, list[str]],
-) -> list[str]:
-    """One message per voice id that more than one backend claims.
+def _collisions(offered: Mapping[str, set[str]]) -> list[str]:
+    """One message per voice id that more than one *deployment* claims.
 
-    Named by engine rather than by address: an operator reading this has to
-    decide which deployment to change, and `piper` and `kokoro` are the words
-    that decision is made in.
+    [LAW:types-are-the-program] Deployment, not backend and not engine, and the
+    distinction is the whole correctness of this check. A service scaled to two
+    allocations is two backends offering identical voices, which is not an
+    ambiguity — either replica is the same answer — so counting backends would
+    refuse the boot of any fleet that scaled an engine past one instance, which
+    [`elvenspeak.discovery`] explicitly supports. Counting *engine names* fails
+    the other way: two separate deployments can both run piper with different
+    voices, and collapsing them by engine name would hide a real ambiguity.
+
+    A Consul service name is exactly the identity that replicas share and that
+    distinct deployments do not, so it is what the set holds — and it is also
+    what an operator edits, which is why the message quotes it.
     """
     return [
-        f"voice {voice_id!r} is offered by more than one engine: "
-        f"{', '.join(sorted(claimants))}"
-        for voice_id, claimants in sorted(offered.items())
-        if len(claimants) > 1
+        f"voice {voice_id!r} is offered by more than one deployment: "
+        f"{', '.join(sorted(services))}"
+        for voice_id, services in sorted(offered.items())
+        if len(services) > 1
     ]
 
 
@@ -204,10 +211,10 @@ class _Prepared:
         """
         found = _fleet(self.consul_url)
 
-        offered: dict[str, list[str]] = {}
+        offered: dict[str, set[str]] = {}
         for backend in found:
             for voice in backend.voices:
-                offered.setdefault(voice.id, []).append(backend.description.engine_name)
+                offered.setdefault(voice.id, set()).add(backend.remote.backend.service)
 
         collisions = _collisions(offered)
         if collisions:
@@ -221,13 +228,24 @@ class _Prepared:
                 backend.remote.backend.base_url,
             )
 
+        # One pass, because the voice list and the routing table are two views of
+        # one decision: which backend answers for each id. Replicas of a
+        # deployment offer identical voices and are interchangeable — the check
+        # above is what makes that true — so the first in discovery order wins and
+        # the rest add nothing. Taking them separately would let a scaled fleet
+        # list the same voice twice, which the conformance suite forbids.
+        # Spreading requests across replicas is load balancing: a different job.
+        speakers: dict[str, Remote] = {}
+        offered_voices: list[engine.Voice] = []
+        for backend in found:
+            for voice in backend.voices:
+                if voice.id not in speakers:
+                    speakers[voice.id] = backend.remote
+                    offered_voices.append(voice)
+
         return RouterEngine(
-            _voices=tuple(voice for backend in found for voice in backend.voices),
-            _speakers={
-                voice.id: backend.remote
-                for backend in found
-                for voice in backend.voices
-            },
+            _voices=tuple(offered_voices),
+            _speakers=speakers,
             # An empty fleet has no intersection to take, and `frozenset` is the
             # right answer rather than a special case: a router with no backends
             # honours nothing, which is exactly what it can do.

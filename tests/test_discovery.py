@@ -16,8 +16,15 @@ from elvenspeak import discovery
 from elvenspeak.provisioning import ConfigError
 
 
-def catalog_serving(catalog: dict, health: dict) -> FastAPI:
-    """A Consul answering exactly what it is told to, however wrong."""
+def catalog_serving(catalog: dict, health: dict, unhealthy: dict | None = None) -> FastAPI:
+    """A Consul answering exactly what it is told to, however wrong.
+
+    `unhealthy` holds instances that exist but are failing their check. They are
+    withheld when the lookup filters to passing and returned when it does not,
+    which is what makes the filter observable — a stub that always returned
+    everything would let `?passing=true` be dropped without a test noticing.
+    """
+    failing = unhealthy or {}
     app = FastAPI()
 
     @app.get("/v1/catalog/services")
@@ -25,8 +32,9 @@ def catalog_serving(catalog: dict, health: dict) -> FastAPI:
         return catalog
 
     @app.get("/v1/health/service/{name}")
-    def instances(name: str):
-        return health.get(name, [])
+    def instances(name: str, passing: bool = False):
+        listed = list(health.get(name, []))
+        return listed if passing else listed + list(failing.get(name, []))
 
     return app
 
@@ -101,6 +109,28 @@ def test_every_healthy_instance_of_one_service_is_a_backend():
         "http://10.0.0.4:29280",
         "http://10.0.0.5:29281",
     ]
+
+
+def test_an_instance_that_is_not_passing_its_check_is_not_a_backend():
+    """Healthy, not merely registered — and the filter is what says which.
+
+    Each engine's own check passes only once its voices are open, so an instance
+    that is still loading its models is registered and cannot speak. Routing to
+    it would 503 every clause of a conversation.
+
+    This fails if `?passing=true` is ever dropped from the lookup URL, which was
+    previously unprotected: the stub returned every instance regardless, so the
+    filter could have been deleted with the whole suite still green.
+    """
+    app = catalog_serving(
+        catalog={"elvenspeak-piper": [discovery.ENGINE_TAG]},
+        health={"elvenspeak-piper": [instance("10.0.0.4", 29280)]},
+        unhealthy={"elvenspeak-piper": [instance("10.0.0.9", 29289)]},
+    )
+    with serving(app) as consul:
+        found = discovery.engines(consul)
+
+    assert [backend.base_url for backend in found] == ["http://10.0.0.4:29280"]
 
 
 def test_a_cluster_running_no_engines_is_an_empty_answer_not_a_failure():

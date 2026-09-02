@@ -62,6 +62,11 @@ def serving(app: FastAPI) -> Iterator[str]:
     finally:
         server.should_exit = True
         thread.join(timeout=_STARTUP_DEADLINE_SECONDS)
+        # [LAW:no-silent-failure] An unchecked join is the leak nobody sees: the
+        # thread and its bound socket would outlive the test that started them,
+        # accumulating across every case that serves anything, and the suite
+        # would go green the whole way.
+        assert not thread.is_alive(), "the test server did not stop in time"
 
 
 def engine_app(
@@ -97,6 +102,11 @@ class Registered:
     service: str
     base_url: str
     tags: list[str] = field(default_factory=lambda: [ENGINE_TAG])
+    #: Whether this instance's health check is passing. A stub that returned
+    #: every instance regardless would let `?passing=true` be dropped from the
+    #: lookup without a single test noticing — and that filter is what separates
+    #: a server whose voices are open from one that is still loading them.
+    passing: bool = True
 
 
 def consul_app(registered: list[Registered]) -> FastAPI:
@@ -120,14 +130,21 @@ def consul_app(registered: list[Registered]) -> FastAPI:
         }
 
     @app.get("/v1/health/service/{name}")
-    def health(name: str) -> list:
+    def health(name: str, passing: bool = False) -> list:
+        """Honours `passing` exactly as the real agent does.
+
+        Not decoration: `discovery` appends `?passing=true` so that only servers
+        whose voices are already open are routed to, and a stub that ignored the
+        parameter would let that be deleted from the URL with the whole suite
+        still green.
+        """
         return [
             {
                 "Node": {"Address": _host(entry.base_url)},
                 "Service": {"Address": "", "Port": _port(entry.base_url)},
             }
             for entry in registered
-            if entry.service == name
+            if entry.service == name and (entry.passing or not passing)
         ]
 
     return app
@@ -144,6 +161,7 @@ def _port(base_url: str) -> int:
 @contextmanager
 def cluster(
     *engines: tuple[str, tuple[Voice, ...], frozenset[Capability]],
+    replicas: int = 1,
 ) -> Iterator[str]:
     """A running fleet and the Consul that knows it, yielding the Consul's URL.
 
@@ -151,6 +169,12 @@ def cluster(
     and tagged as an engine, which is the registration the real job files perform.
     What the router is handed is therefore the same string a deployment hands it:
     somewhere to ask.
+
+    `replicas` scales every deployment, registering that many separate servers
+    under the one service name — which is what Nomad does to a scaled job and
+    what a router therefore has to tolerate. Real servers rather than one address
+    listed twice, because the point is that the router sees several backends and
+    must still see one deployment.
     """
     with ExitStack() as stack:
         registered = [
@@ -161,5 +185,6 @@ def cluster(
                 ),
             )
             for name, voices, capabilities in engines
+            for _ in range(replicas)
         ]
         yield stack.enter_context(serving(consul_app(registered)))

@@ -101,6 +101,18 @@ ENV UV_NO_SYNC=1
 ARG PIPER_VOICES=en_US-lessac-high,en_US-ljspeech-high,en_US-hfc_male-medium
 ARG KOKORO_VOICES=af_heart,am_michael,bf_emma,bm_george
 ARG KOKORO_MODEL=kokoro-v1.0.int8.onnx
+
+# The one setting here that exists only to get through the build. The bake below
+# parses the whole environment before it can call `acquire`, and the router's
+# parse requires somewhere to ask — so without a value the router image fails to
+# build, even though a router acquires nothing and never contacts Consul here.
+#
+# An ARG and deliberately not an ENV: a default that survived into the image
+# would give a router deployed without `ROUTER_CONSUL_URL` a bogus address
+# instead of the refusal to boot that setting exists to produce. This one is
+# spent during the build and is gone from the artifact. The RFC 2606 `.invalid`
+# TLD can never resolve, so the value cannot quietly become somebody's endpoint.
+ARG ROUTER_CONSUL_URL=http://built-without-a-fleet.invalid:8500
 ENV ELVENSPEAK_ENGINE="${ELVENSPEAK_ENGINE}" \
     PIPER_MODELS_DIR=/app/models \
     PIPER_VOICES="${PIPER_VOICES}" \

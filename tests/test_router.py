@@ -100,8 +100,19 @@ def test_two_engines_offering_the_same_voice_id_stop_the_boot():
     bare voice id: the operator would learn about the ambiguity from audio that
     sounds like the wrong person.
 
-    The message names the engines and not their addresses, because the decision
-    an operator has to make afterwards is about a deployment.
+    The message names the deployments, because that is what an operator edits —
+    and two deployments can run the same engine, so the engine's name alone would
+    not tell them which job file to open.
+
+    Scoped to *local* voice ids. A shared ElevenLabs alias is deliberately not a
+    collision: every engine's table claims the same foreign ids by design, so
+    refusing on those would stop a router fronting both real engines on every
+    boot, always. Two engines each offering their own substitute for one
+    globally-unique foreign id is two compatibility mappings, not two answers to
+    one question. Nothing alias-shaped can reach this check today — the router
+    does not read backends' alias tables at all (`piper-routing-7e2.15`) — so the
+    rule is recorded here rather than as a test that could only assert the
+    absence of a code path.
     """
     shared = (Voice(id="contested", name="Contested", description="offered twice"),)
     with cluster(("alpha", shared, EVERYTHING), ("beta", shared, EVERYTHING)) as consul:
@@ -110,25 +121,27 @@ def test_two_engines_offering_the_same_voice_id_stop_the_boot():
 
     message = str(raised.value)
     assert "contested" in message
-    assert "alpha" in message and "beta" in message
+    assert "elvenspeak-alpha" in message and "elvenspeak-beta" in message
 
 
-def test_the_same_elevenlabs_alias_on_two_engines_is_not_a_collision():
-    """Decided on the ticket, and the reason the refusal is scoped to local ids.
+def test_a_deployment_scaled_to_two_replicas_is_not_a_collision():
+    """Replicas offer the same ids and are the same answer, not two answers.
 
-    Every engine's table claims the same foreign ElevenLabs ids by design, so a
-    rule that refused on a shared *alias* would stop a router fronting both real
-    engines on every boot, always. Two engines each offering their own local
-    substitute for one globally-unique foreign id is two compatibility mappings,
-    not two answers to one question.
+    `discovery` returns every healthy instance of a service on purpose, so a
+    fleet that scaled an engine past one allocation would hand the collision
+    check two claimants for every voice. Counting *backends* refuses that boot;
+    counting deployments — which is what a Consul service name identifies —
+    correctly sees one.
 
-    Modelled here the way it actually arises: distinct local voices, and nothing
-    about the foreign ids either engine maps enters the collision check at all.
+    The voice is also offered once rather than twice: the conformance suite
+    forbids two voices sharing an id, and a scaled fleet must not be the thing
+    that breaks it.
     """
-    with cluster(
-        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", BETA_VOICES, EVERYTHING)
-    ) as consul:
-        assert len(opened(consul).voices()) == 2
+    with cluster(("piper", ALPHA_VOICES, EVERYTHING), replicas=2) as consul:
+        engine = opened(consul)
+
+    assert [voice.id for voice in engine.voices()] == ["alpha-one"]
+    assert engine.speak(ALPHA_VOICES[0], "hello", Prosody()).sample_rate == WIRE_RATE
 
 
 def test_capabilities_are_what_every_backend_will_honour():
