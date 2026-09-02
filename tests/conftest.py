@@ -58,6 +58,7 @@ _ENVIRONMENT = (
     # read; this one does, and a second spelling of it would stop clearing the
     # real variable the day it changed ([LAW:one-source-of-truth]).
     router.CONSUL_URL,
+    router.BACKEND_API_KEY,
     "HOST",
     "PORT",
 )

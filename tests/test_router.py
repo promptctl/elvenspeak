@@ -139,9 +139,15 @@ def test_a_deployment_scaled_to_two_replicas_is_not_a_collision():
     """
     with cluster(("piper", ALPHA_VOICES, EVERYTHING), replicas=2) as consul:
         engine = opened(consul)
+        assert [voice.id for voice in engine.voices()] == ["alpha-one"]
 
-    assert [voice.id for voice in engine.voices()] == ["alpha-one"]
-    assert engine.speak(ALPHA_VOICES[0], "hello", Prosody()).sample_rate == WIRE_RATE
+        # Drained inside the fleet's lifetime, because `speak` is lazy: it opens
+        # nothing until the generator is pulled, so a call whose audio is never
+        # read reaches no backend and proves no routing. Asserted after the
+        # servers had stopped, this passed while proving nothing at all.
+        spoken = engine.speak(ALPHA_VOICES[0], "hello", Prosody())
+        assert spoken.sample_rate == WIRE_RATE
+        assert b"".join(spoken.audio)
 
 
 def test_capabilities_are_what_every_backend_will_honour():
@@ -332,7 +338,10 @@ def test_a_router_can_front_a_guarded_fleet_and_says_so_when_it_cannot():
             {router.CONSUL_URL: consul, router.BACKEND_API_KEY: "s3cret"}, NOTHING
         ).open()
         assert [voice.id for voice in carrying.voices()] == ["alpha-one"]
-        assert carrying.speak(ALPHA_VOICES[0], "hello", Prosody()).sample_rate
+        # Drained, so the guarded `/stream` request is actually made. `voices()`
+        # above proves the key reaches the boot path; only pulling the generator
+        # proves it reaches the synthesis path, which sends its own header.
+        assert b"".join(carrying.speak(ALPHA_VOICES[0], "hello", Prosody()).audio)
 
         with pytest.raises(ConfigError) as raised:
             router.configure({router.CONSUL_URL: consul}, NOTHING).open()
