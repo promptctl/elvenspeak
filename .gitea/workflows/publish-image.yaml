@@ -356,8 +356,101 @@ jobs:
           echo "builder fetched ${GITHUB_SHA} itself, is x86_64 with BuildKit,"
           echo "and can both read and write ${REGISTRY}."
 
+  # The gate that stops a red commit becoming an image (piper-routing-7e2.14).
+  #
+  # `.github/workflows/tests.yml` is the MERGE gate and this is the PUBLISH gate, and
+  # they are two gates because they stop two different things. GitHub's runs on pull
+  # requests and cannot see a `workflow_dispatch` on a branch, which is a publish that
+  # never opens a pull request at all. Master protection also does not cover the path
+  # a break-glass build takes, so without this job the deliberate act CLAUDE.md
+  # sanctions is the one act with nothing checking it.
+  #
+  # A separate job and not a step inside `reachability`, because they answer different
+  # questions and fail for different reasons: `reachability` asks whether this HOST can
+  # build and push, and this asks whether this COMMIT deserves to be. Merged, a red
+  # suite would report as an unfit builder and send the reader to the wrong machine.
+  #
+  # It runs on every ref, exactly as `reachability` does. On a branch that is the whole
+  # value — a branch push publishes nothing, so this is where a Dockerfile or workflow
+  # change can be proved without spending a dated tag.
+  tests:
+    runs-on: ubuntu-latest
+
+    # The suite fetches ~300 MB of models on a cold cache and synthesizes real audio.
+    # This is the "something hung" bound, not the expected duration, and it is longer
+    # than GitHub's 30 because there is no model cache on this side (see below).
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the commit under test
+        uses: actions/checkout@v4
+
+      # The same assertion `reachability` opens with, and for the same reason: a gate
+      # that tested a different tree than the one about to be published would be a
+      # green check for a commit nobody ran. [LAW:one-source-of-truth] — one action,
+      # used by both jobs, rather than the check written out twice.
+      - name: Assert the source is the commit the event named
+        uses: ./.gitea/actions/assert-source-is-event-commit
+
+      # ESTABLISHED BY RUNNING, NOT ASSUMED. This runner is
+      # `docker.gitea.com/runner-images:ubuntu-latest`, which is NOT the image
+      # `.github/workflows/tests.yml` runs on, so nothing that file's steps rely on
+      # being preinstalled can be taken on faith here. Printed rather than merely
+      # relied upon, because the first thing anyone debugging a red run on a runner
+      # they cannot ssh into needs is what the runner actually was.
+      - name: Report the runner this suite is about to run on
+        run: |
+          set -euo pipefail
+          echo "runner: $(uname -s) $(uname -m), $(nproc) cpu"
+          echo "user:   $(id -un) (uid $(id -u))"
+          df -h / | tail -1
+
+      # ffmpeg and espeak-ng are native and no Python metadata can declare them, so an
+      # installer cannot bring them and the suite cannot skip past them -- see README,
+      # "Requirements". `tests/conftest.py` finds the library this puts at
+      # /usr/lib/x86_64-linux-gnu/libespeak-ng.so.1 and points the phonemizer at it, so
+      # the path is named there and not here.
+      #
+      # Bare `apt-get`, unlike the GitHub workflow's `sudo apt-get`, because this
+      # runner has no `sudo` to call and needs none: the step above printed
+      # `user: root (uid 0)` on run 14 of this workflow. Read off a run rather than
+      # reasoned out from the image name — the two workflows differ here precisely
+      # because the runners differ, and guessing which way is how a gate goes red
+      # for a reason that has nothing to do with the commit.
+      - name: Install the native libraries no wheel can carry
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install --no-install-recommends -y ffmpeg espeak-ng
+
+      - uses: astral-sh/setup-uv@v5
+
+      # NO MODEL CACHE HERE, DELIBERATELY, and that is why the timeout above is 45.
+      # GitHub's workflow caches `models` to spare a required check from depending on
+      # HuggingFace being reachable. This job would rather pay the download: a cache is
+      # a second copy of the asset set, and the failure it hides -- serving a stale set
+      # to a suite that asked for a new one, and reporting it as a pass -- is precisely
+      # the one thing a PUBLISH gate must never do. A slow honest gate beats a fast one
+      # that can go green over the wrong models.
+      #
+      # NOTHING RETRIES, for the reason `.github/workflows/tests.yml` spells out at
+      # length: roughly one full-suite run in five has been seen to abort at
+      # interpreter teardown from ONNX Runtime after every test already passed
+      # (piper-tests-ona). A gate that reran until it went green would be the smoke
+      # alarm with the battery out. If this goes red at random, fix the teardown.
+      #
+      # [LAW:one-source-of-truth] The command is the same one the merge gate runs, and
+      # `tests/test_merge_gate.py` asserts that it stays the same. Two gates running
+      # two different suites would mean "the tests passed" naming two different facts.
+      - name: Run the suite
+        run: uv run --all-extras --locked pytest -q
+
   publish:
-    needs: reachability
+    # Both, and the order of the list is not the order they run: a red suite and an
+    # unfit builder each block the publish on their own, which is the whole point of
+    # 7e2.14. `needs` on a job that is skipped would also skip this one, which is why
+    # `tests` carries no `if:` -- it runs on every ref that reaches this workflow.
+    needs: [reachability, tests]
     runs-on: ubuntu-latest
 
     # Which commits become published images, stated once.
