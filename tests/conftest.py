@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from elvenspeak import router
 from elvenspeak.engine import (
     Capability,
     Prosody,
@@ -52,7 +53,11 @@ _ENVIRONMENT = (
     "KOKORO_MODELS_DIR",
     "KOKORO_MODEL",
     "KOKORO_ALLOW_DOWNLOAD",
-    "ROUTER_CONSUL_URL",
+    # Read from the module that owns the name rather than spelled again. Piper's
+    # and Kokoro's are literals here because those modules expose no constant to
+    # read; this one does, and a second spelling of it would stop clearing the
+    # real variable the day it changed ([LAW:one-source-of-truth]).
+    router.CONSUL_URL,
     "HOST",
     "PORT",
 )

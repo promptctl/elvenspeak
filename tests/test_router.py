@@ -314,6 +314,32 @@ def test_a_backend_that_dies_mid_answer_fails_the_boot_by_name():
     assert "elvenspeak-broken" in str(raised.value)
 
 
+def test_a_router_can_front_a_guarded_fleet_and_says_so_when_it_cannot():
+    """`ELVENSPEAK_API_KEY` on a backend is the ordinary thing, not an exception.
+
+    Every route a router calls sits behind that check, so without a credential to
+    present, a router in front of a locked-down fleet 401s on its own boot. The
+    key it sends inward is its own setting rather than `ELVENSPEAK_API_KEY`, which
+    guards the router's *callers* — one variable meaning both would force a
+    deployment to use one secret on both sides of itself.
+
+    Both directions asserted, because the interesting half is the failure: a
+    router given the wrong key has to say which backend refused it rather than
+    boot into a fleet it cannot speak to.
+    """
+    with cluster(("alpha", ALPHA_VOICES, EVERYTHING), api_key="s3cret") as consul:
+        carrying = router.configure(
+            {router.CONSUL_URL: consul, router.BACKEND_API_KEY: "s3cret"}, NOTHING
+        ).open()
+        assert [voice.id for voice in carrying.voices()] == ["alpha-one"]
+        assert carrying.speak(ALPHA_VOICES[0], "hello", Prosody()).sample_rate
+
+        with pytest.raises(ConfigError) as raised:
+            router.configure({router.CONSUL_URL: consul}, NOTHING).open()
+
+    assert "elvenspeak-alpha" in str(raised.value)
+
+
 def test_a_router_installs_nothing_and_says_so():
     """`python -m elvenspeak.bake` has to succeed for a router image.
 

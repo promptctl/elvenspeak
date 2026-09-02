@@ -28,9 +28,7 @@ caller actually asked for, which is a resample that was always going to happen.
 from __future__ import annotations
 
 import base64
-import http.client
 import json
-import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator
@@ -38,7 +36,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import engine
-from .discovery import Backend
+from .discovery import TRANSPORT_FAILURES, Backend
 from .provisioning import ConfigError
 
 #: The format every proxied synthesis is requested in. See the module docstring
@@ -75,16 +73,9 @@ class RemoteFailure(RuntimeError):
     """
 
 
-#: Everything another process can do to a socket we are reading. `URLError` and
-#: `TimeoutError` are both `OSError`, so this covers the connect *and* the
-#: transfer: a backend that crashes after its headers raises `ConnectionResetError`
-#: and one that truncates its body raises `IncompleteRead`, neither of which is a
-#: `URLError`. Catching only that narrower pair is how the boot path came to have
-#: a documented guarantee it did not keep.
-_TRANSPORT_FAILURES = (OSError, http.client.HTTPException)
-
-
-def _read_json(url: str, body: dict | None, timeout: float) -> Any:
+def _read_json(
+    url: str, body: dict | None, timeout: float, api_key: str | None = None
+) -> Any:
     """One whole JSON exchange with a backend, or a [`RemoteFailure`].
 
     [LAW:single-enforcer] The one place a backend's answer is read and parsed, so
@@ -94,13 +85,19 @@ def _read_json(url: str, body: dict | None, timeout: float) -> Any:
     not the connect, so the conversion has to span both.
     """
     try:
-        with _request(url, body, "application/json", timeout) as response:
+        with _request(url, body, "application/json", timeout, api_key) as response:
             return json.load(response)
-    except (*_TRANSPORT_FAILURES, ValueError) as failure:
+    except (*TRANSPORT_FAILURES, ValueError) as failure:
         raise RemoteFailure(f"{url}: {failure}") from None
 
 
-def _request(url: str, body: dict | None, accept: str, timeout: float) -> Any:
+def _request(
+    url: str,
+    body: dict | None,
+    accept: str,
+    timeout: float,
+    api_key: str | None = None,
+) -> Any:
     """Opens `url`, returning the live response for the caller to drain.
 
     Left open on purpose: the streaming path needs the socket while it reads, so
@@ -113,8 +110,13 @@ def _request(url: str, body: dict | None, accept: str, timeout: float) -> Any:
     to be allowed to hang for ten minutes per backend.
     """
     payload = None if body is None else json.dumps(body).encode("utf-8")
-    headers = {"accept": accept} | (
-        {} if payload is None else {"content-type": "application/json"}
+    headers = (
+        {"accept": accept}
+        | ({} if payload is None else {"content-type": "application/json"})
+        # The backends' key, not the router's own. A deployment that guards its
+        # engines is doing the ordinary thing the README describes, and without
+        # this every call a router makes comes back 401 — its boot included.
+        | ({} if api_key is None else {"xi-api-key": api_key})
     )
     request = urllib.request.Request(
         url,
@@ -124,7 +126,7 @@ def _request(url: str, body: dict | None, accept: str, timeout: float) -> Any:
     )
     try:
         return urllib.request.urlopen(request, timeout=timeout)
-    except _TRANSPORT_FAILURES as failure:
+    except TRANSPORT_FAILURES as failure:
         raise RemoteFailure(f"{url}: {failure}") from None
 
 
@@ -180,9 +182,10 @@ class Description:
     """
 
     #: The engine this server runs, which `/v1/models` lists first precisely so a
-    #: reader learns what it *is* before what it will answer to. Carried for
-    #: messages: an operator told two backends collide wants that word, not two
-    #: ports.
+    #: reader learns what it *is* before what it will answer to. Read by the
+    #: router's startup log, so an operator can see which engine each address
+    #: turned out to be. A collision names deployments, not engines — two
+    #: deployments can run the same one.
     engine_name: str
     capabilities: frozenset[engine.Capability]
 
@@ -198,6 +201,11 @@ class Remote:
     """
 
     backend: Backend
+    #: The key every backend in the fleet is guarded with, or `None` for a fleet
+    #: that is not. One value for the fleet rather than one per backend: the
+    #: router is told a credential for the engines it fronts, and a per-backend
+    #: table would be a roster — the thing this whole engine exists not to hold.
+    api_key: str | None = None
 
     def _asked(self, path: str, what: str) -> Any:
         """A question asked while the router is booting, and its answer parsed.
@@ -217,7 +225,7 @@ class Remote:
         """
         try:
             url = f"{self.backend.base_url}{path}"
-            return _read_json(url, None, _ASKING_TIMEOUT_SECONDS)
+            return _read_json(url, None, _ASKING_TIMEOUT_SECONDS, self.api_key)
         except RemoteFailure as failure:
             raise ConfigError([f"{self.backend.service}: {what} ({failure})"]) from None
 
@@ -295,14 +303,16 @@ class Remote:
             # away", and a connection opened before the generator exists is a
             # socket held open by a `Speech` nobody ever drains — reclaimed by the
             # garbage collector rather than by leaving this block.
-            with _request(url, body, "audio/pcm", _SPEAKING_TIMEOUT_SECONDS) as live:
+            with _request(
+                url, body, "audio/pcm", _SPEAKING_TIMEOUT_SECONDS, self.api_key
+            ) as live:
                 try:
                     while True:
                         block = live.read(_CHUNK)
                         if not block:
                             return
                         yield block
-                except _TRANSPORT_FAILURES as failure:
+                except TRANSPORT_FAILURES as failure:
                     # A backend that dies mid-utterance fails this request, in
                     # this module's own terms. The audio already handed onward
                     # stands; what must not happen is a raw socket error
@@ -324,7 +334,9 @@ class Remote:
         an alignment and presenting it as one.
         """
         url = _spoken_at(self.backend.base_url, voice, "/with-timestamps")
-        published = _read_json(url, _body(text, prosody), _SPEAKING_TIMEOUT_SECONDS)
+        published = _read_json(
+            url, _body(text, prosody), _SPEAKING_TIMEOUT_SECONDS, self.api_key
+        )
         if not isinstance(published, dict) or "audio_base64" not in published:
             raise RemoteFailure(f"{url}: no timed audio in the response")
         try:

@@ -64,6 +64,17 @@ _LOGGER = logging.getLogger("elvenspeak.router")
 #: which is a true statement about a false cause.
 CONSUL_URL = "ROUTER_CONSUL_URL"
 
+#: The key the engines behind this router are guarded with, if they are. Its own
+#: setting and not [`Settings.api_key`], which guards the router's *own* callers:
+#: the edge a client authenticates at and the credential the router presents
+#: inward are two facts, and one variable meaning both would force a deployment
+#: to use the same secret on both sides of itself.
+#:
+#: Optional, because a fleet reachable only from inside the cluster is the case
+#: this was built for. Unset means no header is sent, which is exactly what an
+#: unguarded backend expects.
+BACKEND_API_KEY = "ROUTER_BACKEND_API_KEY"
+
 
 @dataclass(frozen=True)
 class RouterEngine:
@@ -131,7 +142,7 @@ class _Found:
     description: Description
 
 
-def _fleet(consul_url: str) -> tuple[_Found, ...]:
+def _fleet(consul_url: str, api_key: str | None) -> tuple[_Found, ...]:
     """Every discovered backend, with what it offers and what it calls itself.
 
     Each backend is asked each question exactly once, and the answers are kept
@@ -141,7 +152,9 @@ def _fleet(consul_url: str) -> tuple[_Found, ...]:
     """
     return tuple(
         _Found(remote=remote, voices=remote.voices(), description=remote.describe())
-        for remote in (Remote(backend) for backend in discovery.engines(consul_url))
+        for remote in (
+            Remote(backend, api_key) for backend in discovery.engines(consul_url)
+        )
     )
 
 
@@ -179,6 +192,9 @@ class _Prepared:
     """
 
     consul_url: str
+    #: Presented to every backend as `xi-api-key`. `None` for a fleet that is not
+    #: guarded, which sends no header at all.
+    backend_api_key: str | None
 
     def acquire(self) -> tuple[engine.Voice, ...]:
         """Nothing: a router installs no assets.
@@ -209,7 +225,7 @@ class _Prepared:
         `HEALTHCHECK` enforces. Refusing here instead would turn a cluster that is
         merely still starting into a crash loop.
         """
-        found = _fleet(self.consul_url)
+        found = _fleet(self.consul_url, self.backend_api_key)
 
         offered: dict[str, set[str]] = {}
         for backend in found:
@@ -285,6 +301,10 @@ def configure(
     elif not consul_url.startswith(("http://", "https://")):
         problems.append(f"{CONSUL_URL}={consul_url!r} is not an http(s) URL")
 
+    # Empty and unset are one situation — no key to present — so the empty string
+    # is not a second spelling of "guarded with nothing".
+    backend_api_key = (env.get(BACKEND_API_KEY) or "").strip() or None
+
     if problems:
         raise ConfigError(problems)
-    return _Prepared(consul_url=consul_url)
+    return _Prepared(consul_url=consul_url, backend_api_key=backend_api_key)

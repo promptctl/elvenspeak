@@ -29,8 +29,9 @@ what lets the router be tested against a fleet that is a tuple of values.
 
 from __future__ import annotations
 
+import http.client
 import json
-import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -46,6 +47,20 @@ ENGINE_TAG = "elvenspeak-engine"
 #: rather than hanging it. Discovery happens while the router is starting, so the
 #: cost of this timeout is paid before the port is bound.
 _TIMEOUT_SECONDS = 5.0
+
+#: Everything another process can do to a socket we are reading, as one fact both
+#: HTTP-speaking modules read. `urlopen` wraps only the connect and headers in a
+#: `URLError`, so a server that dies or truncates while the body is still being
+#: read raises a bare `ConnectionResetError` (an `OSError`) or an
+#: `IncompleteRead` (an `http.client.HTTPException`) instead — and a handler
+#: catching only `URLError` promises more than it delivers.
+#:
+#: [LAW:one-source-of-truth] Here rather than in each module because it was
+#: written twice and the copies immediately disagreed: `remote` was corrected and
+#: this module, making the same promise in its own docstring, was not.
+#: [`elvenspeak.remote`] already depends on this one, so a single definition
+#: costs no new edge.
+TRANSPORT_FAILURES = (OSError, http.client.HTTPException)
 
 
 @dataclass(frozen=True)
@@ -82,7 +97,7 @@ def _fetch(url: str, what: str) -> Any:
     try:
         with urllib.request.urlopen(url, timeout=_TIMEOUT_SECONDS) as response:
             return json.load(response)
-    except (urllib.error.URLError, TimeoutError, ValueError) as failure:
+    except (*TRANSPORT_FAILURES, ValueError) as failure:
         raise ConfigError([f"{what} failed ({url}): {failure}"]) from None
 
 
@@ -158,8 +173,13 @@ def engines(consul_url: str) -> tuple[Backend, ...]:
     """
     found: list[Backend] = []
     for service in _tagged_services(consul_url):
+        # Encoded for the same reason a voice id is in [`elvenspeak.remote`]: the
+        # name comes out of Consul's catalog, not from anything this module
+        # constrains, and one holding `?` or `/` would corrupt the query string
+        # or redirect the path — silently asking about a different service.
+        named = urllib.parse.quote(service, safe="")
         instances = _fetch(
-            f"{consul_url}/v1/health/service/{service}?passing=true",
+            f"{consul_url}/v1/health/service/{named}?passing=true",
             f"consul health lookup for {service}",
         )
         if not isinstance(instances, list):

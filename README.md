@@ -258,6 +258,13 @@ ROUTER_CONSUL_URL=                 # required, e.g. http://10.0.0.4:8500. Where
                                    # only on a host network, and on a bridge
                                    # network it would discover nothing and blame
                                    # the fleet.
+ROUTER_BACKEND_API_KEY=            # the key the engines behind it are guarded
+                                   # with, sent inward as xi-api-key. Unset sends
+                                   # no header, for a fleet reachable only from
+                                   # inside the cluster. Distinct from
+                                   # ELVENSPEAK_API_KEY, which guards the
+                                   # router's own callers — the two sides of a
+                                   # router need not share a secret.
 ```
 
 `ELVENSPEAK_WITHHOLD` is in the server's group and stays there whichever engine

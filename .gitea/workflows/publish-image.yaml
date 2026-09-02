@@ -383,11 +383,11 @@ jobs:
     # ---------------------------------------------------------------------------
     # ONE IMAGE PER ENGINE, and one build description for both.
     #
-    # [LAW:one-type-per-behavior] Piper and Kokoro are not two builds. They are one build
-    # whose only variable is a word: `ELVENSPEAK_ENGINE=x` selects the extra `elvenspeak[x]`,
-    # the assets `elvenspeak.bake` fetches, and the engine that boots. So the difference
-    # crosses a matrix as a value, rather than living in a second copy of every step below
-    # — the copy that would drift the first time only one of them was edited.
+    # [LAW:one-type-per-behavior] Piper, Kokoro and the router are not three builds. They
+    # are one build whose only variable is a word: `ELVENSPEAK_ENGINE=x` selects the extra
+    # `elvenspeak[x]`, the assets `elvenspeak.bake` fetches, and the engine that boots. So
+    # the difference crosses a matrix as a value, rather than living in a third copy of
+    # every step below — the copy that would drift the first time only one was edited.
     #
     # [LAW:one-source-of-truth] This list is a third map of the engine set, after
     # `elvenspeak.engines.ENGINES` and `pyproject.toml`'s extras. `tests/test_workflow.py`
@@ -397,14 +397,15 @@ jobs:
     #
     # max-parallel 1 is DECLARED AND NOT HONOURED, and is left here as the statement of
     # intent it is rather than deleted as though the intent were wrong. Measured on run
-    # 5225 (2026-08-31): both legs started at the same second, 23:29:49, on an act_runner
+    # 5225 (2026-08-31): the legs started at the same second, 23:29:49, on an act_runner
     # with capacity 4. Gitea's scheduler does not implement the key, so what is written
     # above is a request this forge declines.
     #
-    # What it asks for is still what this host wants: both legs share one Docker daemon
-    # on 2 cpu and 7.9GB, a cold build is ~10 minutes, and in sequence the second leg
-    # reuses the base layers the first just built rather than contending for the CPU the
-    # build is bound by. Enforcing it needs a mechanism act_runner actually reads — the
+    # What it asks for is still what this host wants: all three legs share one Docker
+    # daemon on 2 cpu and 7.9GB, a cold build is ~10 minutes, and in sequence each leg
+    # reuses the base layers the one before it just built rather than contending for the
+    # CPU the build is bound by. The router leg is the cheap one — no ONNX runtime, no
+    # baked assets — but it contends for the same daemon. Enforcing it needs a mechanism act_runner actually reads — the
     # workflow-level `concurrency` group below is the only one proved on this runner, and
     # it scopes across runs rather than within one. Deliberately not replaced with an
     # untested job-level `concurrency` expression: this file has no way to verify such a
@@ -412,9 +413,9 @@ jobs:
     # silently does nothing is what is already here. [LAW:no-ambient-temporal-coupling]
     #
     # fail-fast off for the same reason these get separate names and separate service
-    # keys: two services that share an API surface, not two attempts at one thing. One
-    # engine's build failing is not a reason to leave the other's deployment with no
-    # image — the run still goes red, and the half that could be published is.
+    # keys: separate services that share an API surface, not attempts at one thing. One
+    # engine's build failing is not a reason to leave the others' deployments with no
+    # image — the run still goes red, and the legs that could be published are.
     # ---------------------------------------------------------------------------
     strategy:
       fail-fast: false

@@ -73,6 +73,7 @@ def engine_app(
     engine_name: str,
     voices: tuple[Voice, ...],
     capabilities: frozenset[Capability] = frozenset(Capability),
+    api_key: str | None = None,
 ) -> FastAPI:
     """One elvenspeak deployment, assembled exactly as `main.build` assembles one.
 
@@ -88,7 +89,7 @@ def engine_app(
         known_engines=frozenset(ENGINES) | {engine_name},
         withheld=frozenset(),
         fallback=Substitution.FIRST_OFFERED,
-        api_key=None,
+        api_key=api_key,
         host="127.0.0.1",
         port=0,
     )
@@ -162,6 +163,7 @@ def _port(base_url: str) -> int:
 def cluster(
     *engines: tuple[str, tuple[Voice, ...], frozenset[Capability]],
     replicas: int = 1,
+    api_key: str | None = None,
 ) -> Iterator[str]:
     """A running fleet and the Consul that knows it, yielding the Consul's URL.
 
@@ -169,6 +171,9 @@ def cluster(
     and tagged as an engine, which is the registration the real job files perform.
     What the router is handed is therefore the same string a deployment hands it:
     somewhere to ask.
+
+    `api_key` guards every engine in the fleet, which is the ordinary thing a
+    deployment does and the case a router has to be able to reach.
 
     `replicas` scales every deployment, registering that many separate servers
     under the one service name — which is what Nomad does to a scaled job and
@@ -181,7 +186,7 @@ def cluster(
             Registered(
                 service=f"elvenspeak-{name}",
                 base_url=stack.enter_context(
-                    serving(engine_app(name, voices, capabilities))
+                    serving(engine_app(name, voices, capabilities, api_key))
                 ),
             )
             for name, voices, capabilities in engines
