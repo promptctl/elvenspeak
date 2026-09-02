@@ -411,9 +411,12 @@ jobs:
       # /usr/lib/x86_64-linux-gnu/libespeak-ng.so.1 and points the phonemizer at it, so
       # the path is named there and not here.
       #
-      # Bare `apt-get`, unlike the GitHub workflow's `sudo apt-get`. Which of the two
-      # this runner needs is a fact about its image and not something to reason out:
-      # the step above prints the user, and this line is written to what that printed.
+      # Bare `apt-get`, unlike the GitHub workflow's `sudo apt-get`, because this
+      # runner has no `sudo` to call and needs none: the step above printed
+      # `user: root (uid 0)` on run 14 of this workflow. Read off a run rather than
+      # reasoned out from the image name — the two workflows differ here precisely
+      # because the runners differ, and guessing which way is how a gate goes red
+      # for a reason that has nothing to do with the commit.
       - name: Install the native libraries no wheel can carry
         run: |
           set -euo pipefail
