@@ -221,10 +221,24 @@ class _Prepared:
         voices it had not confirmed.
 
         A fleet with nothing in it is not refused. A router that found no engine
-        has no voices, fails its own healthcheck, and is therefore never routed
-        to — which is the correct outcome and is already what the container's
-        `HEALTHCHECK` enforces. Refusing here instead would turn a cluster that is
-        merely still starting into a crash loop.
+        has no voices, so [`elvenspeak.api`] answers `/health` 503 and nothing is
+        routed to it. Refusing here instead would turn a cluster that is merely
+        still starting into a crash loop.
+
+        Discovery happens once, here, so recovery is somebody else's job: an
+        empty router does not look again, and the thing that fixes it is being
+        restarted. The deployment owns that — home-infra's router jobspec carries
+        a `check_restart` on this check, which is what turns "looked too early"
+        into "looks again in thirty seconds".
+
+        This paragraph used to name the container's `HEALTHCHECK` as the enforcer.
+        It was the only correct rule in the system and the only one nothing ran:
+        Nomad's docker driver ignores an image's `HEALTHCHECK`, and the cluster
+        read a `/health` that answered 200 unconditionally. On 2026-09-02 a router
+        in exactly this state registered as passing and served silence for half an
+        hour. Both halves were wrong at once — the check could not fail, and the
+        task's `restart` budget answers a process exiting rather than a check
+        going red, so it could not have fired either.
         """
         found = _fleet(self.consul_url, self.backend_api_key)
 
