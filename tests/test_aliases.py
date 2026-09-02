@@ -1,8 +1,10 @@
-"""Each engine's alias table, checked against the voices its image bakes.
+"""Which voice a request reaches, decided across engines rather than within one.
 
-Every image is built from this one repository, so an alias whose target no image
-carries is visible statically — in the tree, before a build runs. That makes this
-the earliest place the mistake can be caught: earlier than a router refusing at
+Two properties over the alias tables and the Dockerfile's per-engine voice ARGs:
+every alias target is a voice its own image actually bakes, and no two engines
+offer the same voice id. Every image is built from this one repository, so both
+are visible statically — in the tree, before a build runs. That makes this the
+earliest place either mistake can be caught: earlier than a router refusing at
 boot, and far earlier than a caller hearing the wrong voice.
 
 The mistake is not hypothetical and its shape is the reason this file exists.
@@ -61,21 +63,23 @@ def declaring_engines() -> list[str]:
     return sorted(path.stem for path in _DECLARATIONS.glob("*.toml"))
 
 
-def baked_voices(name: str) -> list[str]:
-    """The voice ids `name`'s image installs, read off the Dockerfile.
+def baked_by_engine() -> dict[str, list[str]]:
+    """The voice ids each image installs, keyed by the engine that speaks them.
 
-    The ARG name is derived from the engine's registry key rather than looked up,
-    so a third engine needs no edit here — the same relationship the Dockerfile
-    itself relies on, spelled once.
+    The engine's key and its ARG name are one word in two cases, related by
+    `PIPER_VOICES` <-> `piper` and spelled here once. Derived rather than looked
+    up, so a third engine costs no edit in this file — the same relationship the
+    Dockerfile itself relies on to bake the assets for the engine it installs.
     """
-    wanted = f"{name.upper()}_VOICES"
-    return [
-        voice.strip()
+    return {
+        arg.lower(): [voice.strip() for voice in listing.split(",") if voice.strip()]
         for arg, listing in _VOICES_ARG.findall(instructions())
-        if f"{arg}_VOICES" == wanted
-        for voice in listing.split(",")
-        if voice.strip()
-    ]
+    }
+
+
+def baked_voices(name: str) -> list[str]:
+    """The voice ids `name`'s image installs, or none if it bakes no list."""
+    return baked_by_engine().get(name, [])
 
 
 def declared_aliases(name: str) -> dict[str, str]:
@@ -105,6 +109,76 @@ def test_the_dockerfile_still_declares_voice_lists():
 def test_some_engine_declares_aliases():
     """The other half of the control, over the side read from the filesystem."""
     assert declaring_engines(), f"found no alias tables under {_DECLARATIONS}"
+
+
+@pytest.mark.parametrize("name", sorted(baked_by_engine()))
+def test_every_baked_voice_list_is_named_after_a_registered_engine(name):
+    """An `ARG <ENGINE>_VOICES` naming no engine bakes assets nobody opens.
+
+    The build succeeds and the image carries the models; the engine that boots
+    reads its own variable, finds nothing, and falls back to its default voice.
+    A typo here is therefore a working image speaking in a voice the operator
+    did not choose, which is the same silent-substitution failure the alias
+    check above exists for, arriving through the other door.
+    """
+    assert name in ENGINES, (
+        f"ARG {name.upper()}_VOICES names no engine in the registry: {sorted(ENGINES)}"
+    )
+
+
+def test_no_two_engines_offer_the_same_voice_id():
+    """[LAW:one-source-of-truth] One voice id, one engine that speaks it.
+
+    A voice id is what a caller sends to reach one specific voice, and the
+    router derives its map from what the engines advertise rather than holding a
+    table of its own. So an id two engines both offer has two answers and no
+    rule that picks between them — the ambiguity `piper-routing-7e2.5` decided
+    to refuse rather than resolve by precedence, because first-registered-wins
+    hands a live conversation an arbitrary engine silently, and openconv sends a
+    bare voice id, so the operator would learn from audio that sounds wrong.
+
+    Caught here as well as at the router's boot, and neither replaces the other:
+    this sees one commit's tables and fails before an image exists, while boot
+    sees a running fleet where a rolling deploy legitimately mixes image
+    versions and a newer image's id can collide with an older one still serving
+    — which a check over one tree structurally cannot see.
+
+    Unqualified ids are the reason this can happen at all. Namespacing them as
+    `engine/voice` was rejected because `voice_id` is a path segment, so a slash
+    in it collides with the route shape.
+    """
+    baked = baked_by_engine()
+    assert baked, "parsed no baked voice lists — the regex is wrong, not the file"
+
+    # Engines rather than occurrences, so that one engine listing a voice twice
+    # is reported by the check below and not misread here as a contest between
+    # an engine and itself.
+    speakers: dict[str, set[str]] = {}
+    for name, voices in baked.items():
+        for voice in voices:
+            speakers.setdefault(voice, set()).add(name)
+
+    contested = sorted(
+        f"{voice} is offered by {', '.join(sorted(names))}"
+        for voice, names in speakers.items()
+        if len(names) > 1
+    )
+    assert not contested, (
+        "two engines offer one voice id, which a router cannot resolve:\n  "
+        + "\n  ".join(contested)
+    )
+
+
+@pytest.mark.parametrize("name", sorted(baked_by_engine()))
+def test_no_engine_offers_a_voice_twice(name):
+    """A duplicate is the tell that the list was edited by appending.
+
+    Harmless on its own — the engine opens the model once either way — and worth
+    failing on because it is how the equivalence above stops being the check it
+    looks like: a list that grew by appending is a list nobody re-read.
+    """
+    voices = baked_voices(name)
+    assert len(voices) == len(set(voices)), voices
 
 
 @pytest.mark.parametrize("name", declaring_engines())
