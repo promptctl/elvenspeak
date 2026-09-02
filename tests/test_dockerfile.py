@@ -20,6 +20,8 @@ import re
 from pathlib import Path
 
 import pytest
+from conftest import DECLARED_VOICES
+from fleet import engine_app, serving
 
 from elvenspeak.engines import ENGINES
 
@@ -170,6 +172,83 @@ def test_the_exposed_port_is_not_a_second_copy_of_the_configured_one():
     assert not re.search(r"127\.0\.0\.1:\d+", body), "HEALTHCHECK hardcodes a port"
 
 
+#: `HEALTHCHECK [--flags] CMD <shell command>`. Non-greedy to the first `CMD`,
+#: because only the flags stand between the two while the command's own text can
+#: contain anything at all.
+_HEALTHCHECK_CMD = re.compile(r"^\s*HEALTHCHECK\b.*?\bCMD\s+(.+)$", re.MULTILINE)
+
+
+@pytest.fixture(scope="module")
+def bare_python(tmp_path_factory) -> str:
+    """A PATH whose `python` is this interpreter with its site-packages taken away.
+
+    The image runs its HEALTHCHECK as bare `python` — the base image's
+    interpreter, never `/app/.venv/bin/python` — so the command may import from
+    the standard library and nothing else. `-S` is that reach reproduced here:
+    the stdlib resolves, every dependency of this project does not. A command
+    that grew a third-party import therefore fails the test below rather than
+    failing a container, which is the property that makes writing this one as a
+    string defensible at all.
+    """
+    import sys
+
+    directory = tmp_path_factory.mktemp("bare-python")
+    shim = directory / "python"
+    shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" -S "$@"\n')
+    shim.chmod(0o755)
+    return str(directory)
+
+
+@pytest.mark.parametrize(
+    ("voices", "fit"),
+    [(DECLARED_VOICES, True), ((), False)],
+    ids=["a server whose voices are open", "a server that can speak nothing"],
+)
+def test_the_healthcheck_reaches_the_same_verdict_as_the_endpoint_it_reads(
+    voices, fit, bare_python
+):
+    """[LAW:one-source-of-truth] The check and the endpoint it reads, tied together.
+
+    `/health` owns the verdict — it answers 503 for a server that can speak
+    nothing — and this command is a map of that verdict: `urlopen` raises on the
+    503, and the exit code carries it out to Docker. Nothing held the two
+    together, so the endpoint could stop distinguishing the cases while the image
+    went on reporting healthy. That is the 2026-09-02 outage's exact shape one
+    layer down, and the reason this check is a string rather than a module is
+    that it is small enough to be worth *proving* instead of relocating.
+
+    Run, not read. The command is lifted out of the Dockerfile so that file stays
+    the only place it is written, then executed through `/bin/sh` with `PORT` in
+    the environment — which is what Docker does with a shell-form `CMD`.
+
+    Both directions are needed and only one of them is sharp: a command that is
+    merely broken also exits non-zero, so it would pass the unfit case for the
+    wrong reason. The fit case is what rejects it.
+    """
+    import subprocess
+    from urllib.parse import urlsplit
+
+    command = _HEALTHCHECK_CMD.search(instructions())
+    assert command, "no `HEALTHCHECK ... CMD` instruction found"
+
+    with serving(engine_app("piper", voices)) as base_url:
+        result = subprocess.run(
+            ["/bin/sh", "-c", command.group(1)],
+            env={
+                "PATH": f"{bare_python}{os.pathsep}{os.defpath}",
+                "PORT": str(urlsplit(base_url).port),
+            },
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    assert (result.returncode == 0) == fit, (
+        f"/health answered {200 if fit else 503} and the image's HEALTHCHECK "
+        f"exited {result.returncode}\nstderr: {result.stderr}"
+    )
+
+
 def test_the_baked_default_voice_is_the_projects_default_voice():
     """[LAW:one-source-of-truth] The ARG default and DEFAULT_VOICE, tied together.
 
@@ -273,6 +352,10 @@ def test_the_build_runs_no_python_source_of_its_own():
     imports and bound its calls, and still could not catch the second defect: a
     function that still exists and still takes those arguments can always mean
     less than it used to. The snippet was the problem, so the snippet is gone.
+
+    RUN only, and `piper-build-82n` decided to leave it there: the HEALTHCHECK's
+    one-liner names nothing in this package, so it cannot rot the way the bake
+    step did, and it is pinned by execution above rather than by exclusion here.
     """
     for step in re.findall(r"^\s*RUN\s+(.*)$", instructions(), re.MULTILINE):
         assert "python -c" not in step, f"RUN executes Python source text: {step[:80]!r}"
