@@ -35,41 +35,48 @@ _DIRECTORY = Path(__file__).parent / "aliases"
 def _read(engine_name: str) -> Mapping[str, object]:
     """Everything in `engine_name`'s declaration file, or nothing if it has none.
 
-    [LAW:parse-dont-validate] The checkpoint where bytes become a table, so its
-    failure arm has to be the one every other startup problem uses.
-    [`voice_aliases`] and [`model_ids`] each prove the *shape* of what comes back
-    and raise [`ConfigError`] naming the file — but a file that never parses
-    reaches neither, and `tomllib`'s own error escaped past
+    [LAW:parse-dont-validate] The checkpoint where a file becomes a table, so
+    every way that can fail has to leave by the arm every other startup problem
+    uses. [`voice_aliases`] and [`model_ids`] each prove the *shape* of what comes
+    back and raise [`ConfigError`] naming the file — but a file that never loads
+    reaches neither, and the failure escaped past
     [`elvenspeak.settings.reported_or_exit`], which catches `ConfigError` and
     nothing else. One misplaced bracket therefore answered an operator with a
     traceback where every other typo in the same file answers with a sentence.
 
-    The parse error is quoted rather than summarised: `tomllib` reports the line
-    and column it gave up at, which is the only part of this an operator can act
-    on, and this module knows nothing that would improve on it.
+    `ValueError` rather than `TOMLDecodeError`, because syntax is not the only way
+    the parse refuses: `tomllib.load` decodes as UTF-8 before it parses anything,
+    so a file saved in another encoding raises `UnicodeDecodeError` — no kind of
+    `TOMLDecodeError`, and straight back to being the traceback. Naming the two
+    would be an enumeration a third door reopens; that call does nothing but turn
+    bytes into a table or refuse, so the base they share is exactly the set of
+    ways it can say it could not.
 
-    `ValueError` rather than `TOMLDecodeError`, and that is the whole of the
-    theorem rather than a wider net thrown for safety. Syntax is not the only way
-    this call refuses: `tomllib.load` decodes the bytes as UTF-8 before it parses
-    anything, so a file saved in another encoding raises `UnicodeDecodeError`,
-    which is no kind of `TOMLDecodeError` and would have gone straight back to
-    being the traceback this function exists to stop. Naming the two would be an
-    enumeration a third door reopens; the one call inside this block does nothing
-    but turn bytes into a table or refuse, so the base they share is exactly the
-    set of ways it can say it could not. A non-UTF-8 file is not valid TOML
-    either — the format mandates the encoding — so the sentence stays true for
-    both without a branch to choose between them.
+    Opening is inside the block too, and answers in its own sentence. A file that
+    cannot be opened and a file that cannot be parsed are not one fact: they send
+    the operator to a mount or a permission bit, or to the contents, and one
+    message covering both would be the two collapsed into a single value that
+    names neither. Both quote what the runtime said — `tomllib` gives the line and
+    column it gave up at, the OS gives the errno — because neither is something
+    this module can improve on.
+
+    `exists()` still answers the ordinary absence first, since an engine that
+    declares nothing has no file and that is not a failure to report.
     """
     declared = _DIRECTORY / f"{engine_name}.toml"
     if not declared.exists():
         return {}
-    with declared.open("rb") as handle:
-        try:
+    try:
+        with declared.open("rb") as handle:
             return tomllib.load(handle)
-        except ValueError as unreadable:
-            raise ConfigError(
-                [f"{engine_name}.toml: not valid TOML ({unreadable})"]
-            ) from None
+    except OSError as unopenable:
+        raise ConfigError(
+            [f"{engine_name}.toml: could not be opened ({unopenable})"]
+        ) from None
+    except ValueError as unparseable:
+        raise ConfigError(
+            [f"{engine_name}.toml: not valid TOML ({unparseable})"]
+        ) from None
 
 
 def voice_aliases(engine_name: str) -> Mapping[str, str]:

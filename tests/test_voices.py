@@ -320,6 +320,32 @@ def test_a_malformed_alias_table_refuses_to_boot(tmp_path, monkeypatch, body, te
     assert tells in str(raised.value)
 
 
+def test_a_declaration_that_cannot_be_opened_refuses_to_boot(tmp_path, monkeypatch):
+    """The third door out of the same room: the file never opens at all.
+
+    Neither a parse nor a decode, so it reaches neither of the arms above --
+    `OSError` is no kind of `ValueError` -- and it would have gone back to being
+    the traceback the other two no longer are. Answered in its own sentence
+    because it sends the operator somewhere else entirely: a mount or a
+    permission bit, not the file's contents.
+
+    A directory rather than a `chmod 000` file, and that is not fussiness: the
+    gitea runner executes this suite as root (`user: root (uid 0)`, printed by
+    the publish workflow), and root reads a mode-000 file happily. That test
+    would pass here and quietly stop testing anything in the gate that matters.
+    `open("rb")` on a directory refuses whoever asks.
+    """
+    (tmp_path / "piper.toml").mkdir()
+    monkeypatch.setattr(declarations_mod, "_DIRECTORY", tmp_path)
+
+    with pytest.raises(ConfigError) as raised:
+        Catalog.for_engine(
+            "piper", _Engine("en_US-lessac-medium"), fallback=Substitution.OFF
+        )
+    assert "piper.toml" in str(raised.value)
+    assert "could not be opened" in str(raised.value)
+
+
 def test_an_engine_reads_its_own_declarations_and_no_others(tmp_path, monkeypatch):
     """[LAW:one-source-of-truth] The table belongs to the engine, not the server.
 
