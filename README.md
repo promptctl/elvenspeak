@@ -48,7 +48,7 @@ checked by a test:
 | `GET /v1/voices/{voice_id}` | One voice. 404 if it is not installed. |
 | `GET /v1/voices/settings/default` | ElevenLabs' documented defaults. |
 | `GET /v1/voices/{voice_id}/settings` | Same, per voice. |
-| `GET /health` | Status and which voices actually loaded. Never requires a key. |
+| `GET /health` | Which voices actually loaded, and whether this server is fit for traffic: 200 when it can speak, 503 when it cannot. A router that has not yet found its engines is the case that answers 503. Never requires a key. |
 
 ### Output formats
 
