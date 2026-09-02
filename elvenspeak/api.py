@@ -45,9 +45,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import itertools
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -306,6 +307,63 @@ def _honoured(
     )
 
 
+class Silence(Exception):
+    """An engine finished without producing a single sample.
+
+    Its own type rather than a bare `ValueError` because the four synthesis
+    endpoints all have to turn it into the same answer, and matching on a
+    message would be a second, weaker copy of that decision.
+    """
+
+    def __init__(self, voice: Voice, text: str) -> None:
+        super().__init__(
+            f"engine produced no audio for voice {voice.id!r} "
+            f"from {len(text)} characters of text"
+        )
+
+
+def _audible(voice: Voice, text: str, chunks: Iterator[bytes]) -> Iterator[bytes]:
+    """The engine's samples, proven to contain at least one.
+
+    [LAW:parse-dont-validate] The checkpoint for "did the engine actually
+    speak". It returns an iterator that has already yielded its first real
+    chunk, so nothing downstream can be handed silence and nothing downstream
+    re-asks: the endpoints join or stream what comes back without a guard,
+    because there is no longer a case for a guard to catch.
+
+    [LAW:no-silent-failure] Zero samples reaching a caller is the answer-shaped
+    void this service refuses everywhere else. Joined, it is a 200 carrying an
+    MP3 header and no sound — indistinguishable from success at every layer
+    above, which is why piper-routing-7e2.12 was found by a human listening
+    rather than by anything in the pipeline. `Silence` makes the caller learn
+    that nothing was synthesised.
+
+    Empty chunks are skipped rather than accepted, because an engine yielding
+    `b""` and an engine yielding nothing are the same fact wearing two shapes,
+    and only the sample count settles it.
+
+    This is engine-agnostic on purpose. Kokoro is where it was observed, but the
+    rule belongs to every engine that will ever sit behind this seam — including
+    a remote one, whose silence arrives over HTTP looking exactly like a short
+    successful body.
+    """
+    for chunk in chunks:
+        if chunk:
+            return itertools.chain((chunk,), chunks)
+    raise Silence(voice, text)
+
+
+def _audible_pcm(voice: Voice, text: str, pcm: bytes) -> bytes:
+    """The same checkpoint, for the endpoints handed a whole utterance.
+
+    Routed through [`_audible`] rather than testing `pcm` here, so the predicate
+    for "the engine said nothing" exists once. Two spellings of one rule drift,
+    and the direction they drift in is one endpoint quietly keeping the answer
+    the others refuse.
+    """
+    return b"".join(_audible(voice, text, iter((pcm,))))
+
+
 def create_app(settings: Settings, engine: Engine) -> FastAPI:
     """Builds the ElevenLabs surface over a ready engine.
 
@@ -375,6 +433,31 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         summary="ElevenLabs-compatible text-to-speech, served from local voices",
         version="1.0.0",
     )
+
+    @app.exception_handler(Silence)
+    async def _silent_engine(_request, error: Silence) -> JSONResponse:
+        """The one place silence becomes an answer to the caller.
+
+        502 rather than 500: the request was well-formed and this surface worked:
+        what failed is the thing behind it, which is literally true of a remote
+        backend behind [`elvenspeak.router`] and true enough of a local model that
+        returned an empty array. It also separates cleanly in a caller's error
+        handling from the 422s and 501s this API raises about the request itself.
+
+        Logged at error, because a caller retrying past this would otherwise be
+        the only record that an engine has gone mute — which is how
+        piper-routing-7e2.12 stayed invisible to a green pipeline.
+
+        Not reachable from `/stream/with-timestamps` after its first object: that
+        endpoint synthesizes sentence by sentence inside an already-started
+        response, and a status line cannot be recalled. Silence there ends the
+        stream mid-flight and is logged, which is worse than this and still not
+        silent. Said plainly rather than papered over, because a comment claiming
+        four endpoints are covered when three are is the exact failure this
+        service has already paid for twice.
+        """
+        _LOGGER.error("%s", error)
+        return JSONResponse(status_code=502, content={"detail": str(error)})
     # The capabilities are logged because nothing else tells an operator why a
     # request came back refused or a parameter came back ignored. The 501 used to
     # carry that explanation itself, in the form of a Piper environment variable
@@ -581,7 +664,9 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
             spoken = engine.speak(
                 resolution.voice, body.text, body.prosody(honoured(resolution.voice))
             )
-            return spoken.sample_rate, b"".join(spoken.audio)
+            return spoken.sample_rate, b"".join(
+                _audible(resolution.voice, body.text, spoken.audio)
+            )
 
         # Off the loop, which is the obligation the engine interface places on
         # every caller. FastAPI does not thread-pool `async def` handlers, so
@@ -615,8 +700,16 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         spoken = await asyncio.to_thread(
             engine.speak, resolution.voice, body.text, body.prosody(honoured(resolution.voice))
         )
+        # The first chunk is pulled here, on the thread, and not by the encoder:
+        # it is what proves the engine spoke, and a `StreamingResponse` has
+        # already sent 200 by the time its body raises. The status line is the
+        # only place this answer can still be told, so the checkpoint has to run
+        # before the response object exists.
+        audible = await asyncio.to_thread(
+            _audible, resolution.voice, body.text, spoken.audio
+        )
         return StreamingResponse(
-            encoding.encode_stream(spoken.audio, spoken.sample_rate, fmt),
+            encoding.encode_stream(audible, spoken.sample_rate, fmt),
             media_type=fmt.content_type,
             headers=headers(resolution, body),
         )
@@ -635,7 +728,8 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         spoken = await asyncio.to_thread(
             engine.speak_timed, resolution.voice, body.text, body.prosody(honoured(resolution.voice))
         )
-        audio = await encoding.encode(spoken.pcm, spoken.sample_rate, fmt)
+        pcm = _audible_pcm(resolution.voice, body.text, spoken.pcm)
+        audio = await encoding.encode(pcm, spoken.sample_rate, fmt)
         aligned = align_mod.align(body.text, spoken)
         return JSONResponse(
             content=_timestamped(audio, aligned),
@@ -670,7 +764,8 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
                 spoken = await asyncio.to_thread(
                     engine.speak_timed, resolution.voice, sentence, prosody
                 )
-                audio = await encoding.encode(spoken.pcm, spoken.sample_rate, fmt)
+                pcm = _audible_pcm(resolution.voice, sentence, spoken.pcm)
+                audio = await encoding.encode(pcm, spoken.sample_rate, fmt)
                 aligned = align_mod.align(sentence, spoken, elapsed)
                 # [LAW:one-source-of-truth] The next sentence starts where this
                 # alignment says this one ended. Deriving it instead from

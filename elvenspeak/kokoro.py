@@ -173,12 +173,31 @@ class KokoroEngine:
         self, voice: engine.Voice, text: str, prosody: engine.Prosody
     ) -> engine.TimedSpeech:
         spoken = self._installed[voice.id]
-        audio, _, timings = self._model.create_timed(
-            text,
-            voice=spoken.id,
-            speed=prosody.speed,
-            lang=_language(spoken.id),
-        )
+        # Same empty-output crash as the streaming path, through the library's
+        # other entry point: `create_timed` inserts the same pauses. Reported the
+        # same way — no samples and no timings — so both endpoints reach the
+        # boundary's one answer rather than one of them keeping the bare 500.
+        try:
+            audio, _, timings = self._model.create_timed(
+                text,
+                voice=spoken.id,
+                speed=prosody.speed,
+                lang=_language(spoken.id),
+            )
+        except ValueError as error:
+            if _EMPTY_REDUCTION not in str(error):
+                raise
+            _LOGGER.error(
+                "kokoro synthesized nothing for voice %r from %d characters, "
+                "asked for timings; its pause insertion then failed on the "
+                "empty result (%s)",
+                spoken.id,
+                len(text),
+                error,
+            )
+            # `_pcm` clips and converts whatever sequence it is handed, so an
+            # empty one is already the right way to say "no samples" here.
+            audio, timings = (), ()
         pcm = _pcm(audio)
         return engine.TimedSpeech(
             pcm=pcm,
@@ -517,16 +536,58 @@ def _stream(
     endpoints are unaffected in what they return — `/stream` sends the same
     bytes in the same order — and pay in latency to the first byte.
     """
-    audio, _ = model.create(
-        text,
-        voice=voice.id,
-        speed=prosody.speed,
-        lang=_language(voice.id),
-    )
-    pcm = _pcm(audio)
+    pcm = _synthesized(model, voice, text, prosody)
     step = _CHUNK_SAMPLES * 2
     for start in range(0, len(pcm), step):
         yield pcm[start : start + step]
+
+
+#: What numpy says when `max()` is asked for the largest of nothing. Matched on
+#: the message because that is the only thing distinguishing it: numpy raises a
+#: plain `ValueError` here, so there is no type or attribute to key on.
+_EMPTY_REDUCTION = "zero-size array to reduction operation"
+
+
+def _synthesized(
+    model: "Kokoro", voice: engine.Voice, text: str, prosody: engine.Prosody
+) -> bytes:
+    """Kokoro's samples, or none of them when it produced none.
+
+    [LAW:no-silent-failure] The library cannot survive its own empty output.
+    `kokoro_onnx.pauses._quiet_frames` takes `loudness.max()` of the frames it
+    was given, and `max()` of an empty array raises rather than returning an
+    identity — so a synthesis that yields zero samples escapes as a bare 500
+    carrying no body, which tells a caller nothing about what happened
+    (piper-routing-7e2.12).
+
+    Returning empty here says the true thing in the vocabulary the seam already
+    has — an engine that produced no audio — and lets [`elvenspeak.api`] decide
+    once what every caller is told. This module deliberately does not raise the
+    API's exception: the engine reports, the boundary answers.
+
+    Narrow on purpose. Any other `ValueError` is re-raised untouched, because a
+    blanket catch here would turn a real bug in this engine into a tidy report
+    that the voice was merely quiet.
+    """
+    try:
+        audio, _ = model.create(
+            text,
+            voice=voice.id,
+            speed=prosody.speed,
+            lang=_language(voice.id),
+        )
+    except ValueError as error:
+        if _EMPTY_REDUCTION not in str(error):
+            raise
+        _LOGGER.error(
+            "kokoro synthesized nothing for voice %r from %d characters; "
+            "its pause insertion then failed on the empty result (%s)",
+            voice.id,
+            len(text),
+            error,
+        )
+        return b""
+    return _pcm(audio)
 
 
 def _pcm(audio) -> bytes:
