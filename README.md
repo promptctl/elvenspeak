@@ -23,10 +23,12 @@ checked by a test:
    has an equivalent of `stability` or `seed`, so those are dropped — and the
    response carries `x-elvenspeak-ignored: seed, voice_settings.stability`
    so you learn it from the response instead of from the audio. The list is
-   worked out per request from the engine behind the server, not written down
-   anywhere: an engine that cannot vary its speaking rate adds
+   worked out per request from **the voice that will speak**, not written down
+   anywhere: a voice that cannot vary its speaking rate adds
    `voice_settings.speed` to it, and one that could reproduce a `seed` would
-   drop it, with no edit here.
+   drop it, with no edit here. Per voice rather than per server, because a
+   deployment can serve voices from more than one engine — so the same parameter
+   is honoured for one voice and named back for another, in one process.
 3. **A request that cannot be served is refused.** An unknown `output_format` is
    a `422` quoting the value you sent, not a quiet substitution. So is `text`
    that is empty, whitespace-only, or longer than **5000 characters** — the cap
@@ -41,8 +43,8 @@ checked by a test:
 | `POST /v1/text-to-speech/{voice_id}/stream` | Audio arrives as it is synthesized. |
 | `POST /v1/text-to-speech/{voice_id}/with-timestamps` | Audio plus character timings. |
 | `POST /v1/text-to-speech/{voice_id}/stream/with-timestamps` | One JSON object per sentence. |
-| `GET /v1/models` | Every `model_id` this deployment accepts — the engine's own name, then the ElevenLabs ids that reach it — and what it will honour. A bare array, as ElevenLabs returns. |
-| `GET /v1/voices` | The voices installed here, in ElevenLabs' shape. |
+| `GET /v1/models` | Every `model_id` this deployment accepts — the engine's own name, then the ElevenLabs ids that reach it — and what it can honour *at all*: the union across its voices. The per-voice answer is on `GET /v1/voices`. A bare array, as ElevenLabs returns. |
+| `GET /v1/voices` | The voices installed here, in ElevenLabs' shape, each with the `capabilities` it really has. |
 | `GET /v1/voices/{voice_id}` | One voice. 404 if it is not installed. |
 | `GET /v1/voices/settings/default` | ElevenLabs' documented defaults. |
 | `GET /v1/voices/{voice_id}/settings` | Same, per voice. |
@@ -92,6 +94,23 @@ voice their table names, so all nine ids resolve to real speech out of the box.
 
 `GET /v1/voices` reports each voice's live aliases, so what actually resolves is
 readable from the server rather than inferred from a file.
+
+### What each voice can actually do
+
+That same response carries a `capabilities` list per voice — `speed`,
+`timestamps` — naming what speaking in *that* voice really does. It is per voice
+and not per server because a deployment can serve voices from more than one
+engine: behind the router, one voice measures character timings and the next
+cannot, in the same process.
+
+Read it and you know before you call. `POST /with-timestamps` answers `501` for a
+voice whose list omits `timestamps`, and `voice_settings.speed` comes back in
+`x-elvenspeak-ignored` for one that omits `speed` — so the alternative to reading
+it is discovering it from a refusal partway through a conversation.
+
+`GET /v1/models` also reports a `capabilities` list, and it answers a different
+question: what this deployment can do *at all*, the union across its voices. Use
+it to choose a deployment; use `GET /v1/voices` to decide a request.
 
 Substitution is never invisible: every synthesis response carries
 `x-elvenspeak-voice` naming what actually spoke, and `x-elvenspeak-voice-requested` when
@@ -271,7 +290,7 @@ ROUTER_BACKEND_API_KEY=            # the key the engines behind it are guarded
 runs. It names capabilities rather than features — the same closed vocabulary the
 engines declare against — so `ELVENSPEAK_WITHHOLD=timestamps` means the timestamp
 endpoints answer 501 whether Piper, Kokoro or something you wrote is behind them.
-The server subtracts what you withheld from whatever the engine declared, so no
+The server subtracts what you withheld from whatever each voice declared, so no
 engine can disagree with you by forgetting to read a setting.
 
 An engine is also *told* what you withheld, which is where the saving comes from:
@@ -370,9 +389,11 @@ are one word rather than two that can drift.
 Two protocols, both in `elvenspeak`, and everything you need is exported from the
 package root — you should never have to import a submodule of this package.
 
-`Engine` is four methods: `voices()`, `capabilities()`, `speak()` and
-`speak_timed()`. Implement that and construct it yourself, and `create_app` gives
-you the server. `Prepared` and `Configure` are the second, optional half: a
+`Engine` is three methods: `voices()`, `speak()` and `speak_timed()`. Implement
+that and construct it yourself, and `create_app` gives you the server. What your
+engine can do is declared on each `Voice` you return, in its `capabilities`
+field — not on the engine, because behind the router one deployment serves voices
+from several engines and a single answer for all of them would be wrong for some. `Prepared` and `Configure` are the second, optional half: a
 `Configure` turns an environment and a set of withheld capabilities into a
 `Prepared`, and a `Prepared` has `acquire()` to install assets at build time and
 `open()` to build the engine at boot. Implement those too and a deployment can
@@ -415,14 +436,20 @@ silent fallback inside the component whose whole job is to fail loudly. Raise
 from `acquire()` or `open()`. Those are the build and the boot — the two moments
 where failing is cheap and visible. A request is neither.
 
-**Capabilities may be a fact about the deployment, not about your engine.** They
-are read once at startup and must be constant for the process, but they need not
-be constant for the code: the kokoro engine reads `TIMESTAMPS` off the ONNX
-session it actually opened, because one published export has a duration output
-and another does not. So answer `capabilities()` from what you really opened,
-never from the configuration that asked for it. Getting this wrong is
-undetectable rather than obviously wrong — the server will report a capability as
-honoured and the audio will disagree.
+**Declare capabilities from what you really opened, never from the configuration
+that asked for it.** They must be fixed for as long as the voice is offered — the
+streaming timestamp endpoint commits its `200` before it calls `speak_timed()`,
+so a capability discoverable only by trying could never be refused honestly — but
+they need not be fixed in the code: the kokoro engine reads `TIMESTAMPS` off the
+ONNX session it actually opened, because one published export has a duration
+output and another does not. Getting this wrong is undetectable rather than
+obviously wrong — the server will report a capability as honoured and the audio
+will disagree.
+
+If every voice your engine offers is spoken the same way, give them all the same
+set; that is what piper and kokoro do, and the per-voice shape costs them a single
+`replace(...)`. If they differ, say so one voice at a time — that is the case the
+field exists for.
 
 **`Capability` is a closed enum, and stays one.** An engine cannot declare
 something the enum does not name, which reads like a limit on outside engines and

@@ -9,8 +9,9 @@ exported here, so its obligation is one import line and the answer to "what do I
 have to implement" is "the two protocols in this list" rather than a tour of the
 package's modules.
 
-An outside engine implements [`Engine`] — voices, capabilities, and the two
-synthesis calls — and, if it wants a deployment to be able to select it by name,
+An outside engine implements [`Engine`] — voices and the two synthesis calls,
+with what each voice can do declared on the [`Voice`] itself — and, if it wants a
+deployment to be able to select it by name,
 [`Prepared`] and a [`Configure`] that turns an environment into one. It then
 builds its own [`Registry`], hands it to [`Settings.from_env`], and passes the
 result to [`create_app`]: nothing here has to be edited and nothing has to be

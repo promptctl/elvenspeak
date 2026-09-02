@@ -14,7 +14,7 @@ directly.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from elvenspeak import piper
 from elvenspeak.engine import Capability, Prosody, Voice
@@ -49,10 +49,16 @@ def engine_over(*chunks: FakeChunk) -> piper.PiperEngine:
     return piper.PiperEngine(
         {
             VOICE.id: piper._Installed(
-                voice=VOICE, sample_rate=RATE, model=FakeSession(list(chunks))
+                voice=replace(
+                    VOICE,
+                    capabilities=frozenset(
+                        {Capability.SPEED, Capability.TIMESTAMPS}
+                    ),
+                ),
+                sample_rate=RATE,
+                model=FakeSession(list(chunks)),
             )
         },
-        capabilities=frozenset({Capability.SPEED, Capability.TIMESTAMPS}),
     )
 
 

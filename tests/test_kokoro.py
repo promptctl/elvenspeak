@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import pytest
 from conftest import (
+    declared,
     KOKORO_MODEL,
     KOKORO_TIMELESS_MODEL,
     KOKORO_VOICES,
@@ -45,8 +46,12 @@ def engine(kokoro_installed):
 
 def test_the_export_that_reports_durations_declares_it(engine):
     """The default deployment, whose export carries a `duration` output."""
-    assert Capability.TIMESTAMPS in engine.capabilities()
-    assert Capability.SPEED in engine.capabilities()
+    # Per voice, not merely somewhere in the union: `open()` claims every voice
+    # this export speaks carries the same set, and a stamp applied to only one of
+    # the voices this fixture loads would satisfy `declared()` while leaving the
+    # rest silently incapable.
+    assert all(Capability.TIMESTAMPS in v.capabilities for v in engine.voices())
+    assert all(Capability.SPEED in v.capabilities for v in engine.voices())
 
 
 def test_the_export_without_durations_does_not_declare_the_capability(
@@ -62,10 +67,10 @@ def test_the_export_without_durations_does_not_declare_the_capability(
     """
     engine = kokoro_prepared(model=KOKORO_TIMELESS_MODEL).open()
 
-    assert Capability.TIMESTAMPS not in engine.capabilities()
+    assert Capability.TIMESTAMPS not in declared(engine)
     # Still a working engine, so this is a capability absent rather than a
     # deployment broken — the distinction the whole negotiation rests on.
-    assert Capability.SPEED in engine.capabilities()
+    assert Capability.SPEED in declared(engine)
     assert engine.voices()
 
 
@@ -172,7 +177,7 @@ def test_a_deployment_that_withheld_timestamps_is_obeyed_by_this_engine_too(
     # The engine still declares it: the export has a `duration` output and
     # saying otherwise would be this engine lying about itself. What changes is
     # what the server offers, which is the deployment's answer and not its.
-    assert Capability.TIMESTAMPS in opened.capabilities()
+    assert Capability.TIMESTAMPS in declared(opened)
 
     client = TestClient(create_app(settings, opened))
     assert client.post(
@@ -515,9 +520,19 @@ def test_acquire_describes_what_it_installed(kokoro_installed):
     An engine that cannot describe what it installed has not installed it, and
     the build is the last moment that failure is cheap.
     """
-    voices = kokoro_prepared().acquire()
+    prepared = kokoro_prepared()
+    voices = prepared.acquire()
 
     assert [voice.id for voice in voices] == list(KOKORO_VOICES)
+
+    # [FRAMING:representation] And it describes them the way they will boot. A
+    # `Voice` states what speaking in it really does, so a build that reported
+    # them capability-less while `open` serves them able to measure would be two
+    # descriptions of one voice, disagreeing.
+    assert {voice.id: voice.capabilities for voice in voices} == {
+        voice.id: voice.capabilities for voice in prepared.open().voices()
+    }
+    assert all(Capability.TIMESTAMPS in voice.capabilities for voice in voices)
 
 
 def test_a_voice_that_is_not_in_the_pack_is_caught_at_install(kokoro_installed):

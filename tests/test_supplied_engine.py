@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from conftest import declared
 from fastapi.testclient import TestClient
 
 from elvenspeak import (
@@ -134,12 +135,13 @@ class ToneEngine:
                 # own. `labels` is pairs rather than a dict because a `Voice` is
                 # frozen and shared by every request.
                 labels=(("engine", "tone"), ("hertz", str(hertz))),
+                # What speaking in this voice really does. Every tone is made the
+                # same way so they all carry the same set — an engine whose voices
+                # differ says so here, one voice at a time.
+                capabilities=self._capabilities,
             )
             for name, hertz in self._pitches
         )
-
-    def capabilities(self) -> frozenset[Capability]:
-        return self._capabilities
 
     def speak(self, voice: Voice, text: str, prosody: Prosody) -> Speech:
         hertz = self._hertz(voice)
@@ -470,7 +472,7 @@ def test_a_capability_this_deployment_withheld_reaches_the_supplied_engine(envir
     """
     withholding = {**environ, "ELVENSPEAK_WITHHOLD": "timestamps"}
     prepared = Settings.from_env(SUPPLIED, withholding).engine
-    assert Capability.TIMESTAMPS not in prepared.open().capabilities()
+    assert Capability.TIMESTAMPS not in declared(prepared.open())
 
     timeless = serving(withholding)
     response = timeless.post(

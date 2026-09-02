@@ -14,7 +14,7 @@ import base64
 import json
 
 import pytest
-from conftest import DECLARED_VOICES, DeclaredEngine
+from conftest import declaring, DECLARED_VOICES, DeclaredEngine
 from conftest import INSTALLED_VOICE as VOICE
 from conftest import MODELS_DIR as MODELS
 from conftest import piper_prepared
@@ -163,7 +163,7 @@ def test_the_alias_table_loaded_is_the_one_the_engines_name_picks(
 
     app = create_app(
         settings_for(engine_name="named", fallback=DECLARED_VOICES[0].id),
-        DeclaredEngine(frozenset(Capability)),
+        DeclaredEngine(declaring(frozenset(Capability))),
     )
     response = TestClient(app).post(
         "/v1/text-to-speech/foreign-id/stream", json={"text": "hello"}

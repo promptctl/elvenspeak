@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -129,13 +129,8 @@ class PiperEngine:
     arranged to make unreachable.
     """
 
-    def __init__(
-        self,
-        installed: dict[str, _Installed],
-        capabilities: frozenset[engine.Capability],
-    ) -> None:
+    def __init__(self, installed: dict[str, _Installed]) -> None:
         self._installed = installed
-        self._capabilities = capabilities
 
     def voices(self) -> tuple[engine.Voice, ...]:
         """Every configured voice, in the order the operator named them.
@@ -153,14 +148,6 @@ class PiperEngine:
         sorts for display on its own.
         """
         return tuple(installed.voice for installed in self._installed.values())
-
-    def capabilities(self) -> frozenset[engine.Capability]:
-        # Settled by `_Prepared.open` from the flag the sessions were really
-        # opened under, not recomputed from the setting that produced it:
-        # `include_alignments`
-        # patches the graph at load time, so these particular sessions are the
-        # only thing that knows whether durations can be reported.
-        return self._capabilities
 
     def speak(
         self, voice: engine.Voice, text: str, prosody: engine.Prosody
@@ -244,15 +231,34 @@ class _Prepared:
         The lifecycle moment is carried by which method the caller reached for.
         """
         return tuple(
-            ready.voice
+            replace(ready.voice, capabilities=self.capabilities())
             for ready in _install(
                 self.keys, self.models_dir, allow_download=True
             ).values()
         )
 
+    def capabilities(self) -> frozenset[engine.Capability]:
+        """What every voice this deployment opens will declare.
+
+        [LAW:one-source-of-truth] Read by both lifecycle methods rather than
+        computed in each. A `Voice` now states what speaking in it really does, so
+        the voices [`acquire`] describes have to say the same thing as the ones
+        [`open`] serves — two spellings of one derivation would let a build report
+        a voice that boots differently.
+
+        `include_alignments` patches the graph at load time, so this is decided by
+        the flag those sessions will be opened under. Every Piper voice in one
+        process is opened the same way, so they all carry the same set.
+        """
+        return _INHERENT | (
+            frozenset({engine.Capability.TIMESTAMPS}) if self.timings else frozenset()
+        )
+
     def open(self) -> PiperEngine:
         """Opens every configured voice and returns the engine that speaks them."""
         from piper import PiperVoice
+
+        capabilities = self.capabilities()
 
         installed: dict[str, _Installed] = {}
         for key, ready in _install(
@@ -260,23 +266,14 @@ class _Prepared:
         ).items():
             _LOGGER.info("loading voice %s", key)
             installed[key] = _Installed(
-                voice=ready.voice,
+                voice=replace(ready.voice, capabilities=capabilities),
                 sample_rate=ready.sample_rate,
                 model=PiperVoice.load(
                     str(ready.model_path), include_alignments=self.timings
                 ),
             )
 
-        # Decided here, beside the loop that opened the sessions, rather than
-        # stored as a flag the engine re-reads later: this is the only line that
-        # can see both what was asked for and what the voices were actually
-        # opened with, and an engine holding the setting instead would keep
-        # answering for the setting if those two ever came apart.
-        return PiperEngine(
-            installed,
-            capabilities=_INHERENT
-            | ({engine.Capability.TIMESTAMPS} if self.timings else set()),
-        )
+        return PiperEngine(installed)
 
 
 def configure(

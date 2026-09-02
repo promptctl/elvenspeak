@@ -22,7 +22,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 
 import uvicorn
-from conftest import DeclaredEngine, DeclaredPrepared
+from conftest import DeclaredEngine, DeclaredPrepared, declaring
 from fastapi import FastAPI
 
 from elvenspeak import api
@@ -93,7 +93,7 @@ def engine_app(
         host="127.0.0.1",
         port=0,
     )
-    return api.create_app(settings, DeclaredEngine(capabilities, voices))
+    return api.create_app(settings, DeclaredEngine(declaring(capabilities, voices)))
 
 
 @dataclass

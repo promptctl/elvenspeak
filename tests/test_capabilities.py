@@ -19,13 +19,14 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from conftest import DECLARED_VOICES, DeclaredEngine, DeclaredPrepared
+from conftest import declaring, DECLARED_VOICES, DeclaredEngine, DeclaredPrepared
 from fastapi.testclient import TestClient
 
 from elvenspeak import api, models
 from elvenspeak.engine import Capability, Prosody, Speech, Voice
 from elvenspeak.engines import ENGINES
 from elvenspeak.settings import Settings
+from elvenspeak.voices import Substitution
 
 VOICE = DECLARED_VOICES[0]
 
@@ -62,7 +63,7 @@ class RecordingEngine(DeclaredEngine):
     """
 
     def __init__(self, capabilities: frozenset[Capability]) -> None:
-        super().__init__(capabilities)
+        super().__init__(declaring(capabilities))
         self.asked: list[Prosody] = []
 
     def speak(self, voice: Voice, text: str, prosody: Prosody) -> Speech:
@@ -77,7 +78,7 @@ def served_by(engine, *withheld: Capability) -> TestClient:
 
 def served(*capabilities: Capability) -> TestClient:
     """The real API surface over an engine declaring exactly `capabilities`."""
-    return served_by(DeclaredEngine(frozenset(capabilities)))
+    return served_by(DeclaredEngine(declaring(frozenset(capabilities))))
 
 
 def ignored(client: TestClient, **body) -> str:
@@ -218,7 +219,7 @@ def test_a_withheld_capability_is_refused_however_loudly_the_engine_declares_it(
     delegated to it, no engine can disagree with the deployment by omission.
     """
     with served_by(
-        DeclaredEngine(frozenset(Capability)), Capability.TIMESTAMPS
+        DeclaredEngine(declaring(frozenset(Capability))), Capability.TIMESTAMPS
     ) as client:
         response = client.post(
             f"/v1/text-to-speech/{VOICE.id}{path}", json={"text": "hello there"}
@@ -251,7 +252,7 @@ def test_withholding_what_the_engine_never_had_is_not_an_error():
     it has said the same thing twice. Subtraction from a set is what makes that
     free rather than a case anyone had to remember to allow.
     """
-    with served_by(DeclaredEngine(frozenset()), Capability.TIMESTAMPS) as client:
+    with served_by(DeclaredEngine(declaring(frozenset())), Capability.TIMESTAMPS) as client:
         response = client.post(
             f"/v1/text-to-speech/{VOICE.id}/stream",
             json={"text": "hello there"},
@@ -322,7 +323,7 @@ def test_a_capability_the_service_withholds_leaves_the_listing(capability):
     still offers. The endpoint exists to stop a caller discovering a limit from a
     501 mid-conversation, which it does only while those two agree.
     """
-    with served_by(DeclaredEngine(frozenset(Capability)), capability) as client:
+    with served_by(DeclaredEngine(declaring(frozenset(Capability))), capability) as client:
         assert capability.name.lower() not in listed(client)
         assert _DECLINES[capability](client)
 
@@ -335,7 +336,7 @@ def test_a_capability_the_service_honours_is_listed(capability):
     it will not: a caller that trusted the listing would work around a limit this
     deployment does not have.
     """
-    with served_by(DeclaredEngine(frozenset(Capability))) as client:
+    with served_by(DeclaredEngine(declaring(frozenset(Capability)))) as client:
         assert capability.name.lower() in listed(client)
         assert not _DECLINES[capability](client)
 
@@ -359,7 +360,7 @@ def test_the_listing_names_an_engine_this_module_has_never_heard_of():
         engine_name="stentor",
         known_engines=frozenset(ENGINES) | {"declared", "stentor"},
     )
-    with TestClient(api.create_app(settings, DeclaredEngine(frozenset()))) as client:
+    with TestClient(api.create_app(settings, DeclaredEngine(declaring(frozenset())))) as client:
         listing = client.get("/v1/models").json()
 
     assert [entry["model_id"] for entry in listing] == ["stentor"]
@@ -374,3 +375,57 @@ def test_every_reach_says_what_it_honours():
     dropped for a request the router had just used it to steer.
     """
     assert set(api._HONOURED_BY_REACH) == set(models.Reach)
+
+
+def test_one_engine_whose_voices_differ_is_answered_per_voice():
+    """The seam-level case, without a router or a socket in the way.
+
+    `test_router` proves per-voice capability across a fleet, which travels over
+    HTTP and through `elvenspeak.remote`'s parsing — a different path from the one
+    `api.py` takes when a single `Engine.voices()` call returns voices that
+    disagree. Nothing else exercised that, so the surface's own `honoured(voice)`
+    and `require(capability, voice)` were only ever tested against engines whose
+    voices were all alike.
+
+    Nothing forbids an engine from offering a measured voice beside an unmeasured
+    one; the interface stopped having anywhere to say so only because the answer
+    used to live on the engine.
+
+    Built in the direction that used to be inexpressible: most voices generous and
+    one deliberately capability-less. A stand-in that read an empty set as "not
+    stated, inherit the engine's" would silently promote `plain` to everything —
+    the opposite of what `Voice.capabilities` promises, and green.
+    """
+    timed = Voice(
+        id="measured",
+        name="Measured",
+        description="carries timings",
+        capabilities=frozenset(Capability),
+    )
+    # Declares nothing, and means it.
+    plain = Voice(id="plain", name="Plain", description="does not")
+
+    engine = DeclaredEngine((*declaring(frozenset(Capability), (timed,)), plain))
+    # First-offered rather than this file's usual named fallback, which names a
+    # voice this engine does not have.
+    settings = replace(_settings(), fallback=Substitution.FIRST_OFFERED)
+    with TestClient(api.create_app(settings, engine)) as client:
+        answers = {
+            voice_id: client.post(
+                f"/v1/text-to-speech/{voice_id}/with-timestamps",
+                json={"text": "hello there"},
+            )
+            for voice_id in ("measured", "plain")
+        }
+        speeds = {
+            voice_id: client.post(
+                f"/v1/text-to-speech/{voice_id}/stream",
+                json={"text": "hello", "voice_settings": {"speed": 2.0}},
+            ).headers.get("x-elvenspeak-ignored", "")
+            for voice_id in ("measured", "plain")
+        }
+
+    assert answers["measured"].status_code == 200, answers["measured"].text
+    assert answers["plain"].status_code == 501, answers["plain"].text
+    assert "voice_settings.speed" not in speeds["measured"]
+    assert "voice_settings.speed" in speeds["plain"]

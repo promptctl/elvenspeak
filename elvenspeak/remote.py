@@ -160,6 +160,15 @@ def _voice(published: Any, service: str) -> engine.Voice:
     voice_id = published.get("voice_id")
     if not isinstance(voice_id, str) or not voice_id:
         raise ConfigError([f"{service}: a voice entry named no voice_id"])
+    declared = published.get("capabilities")
+    if not isinstance(declared, list):
+        raise ConfigError(
+            [
+                f"{service}: voice {voice_id!r} named no capabilities. "
+                f"This backend predates per-voice capabilities and a router "
+                f"cannot tell what it will honour."
+            ]
+        )
     labels = published.get("labels")
     return engine.Voice(
         id=voice_id,
@@ -169,25 +178,14 @@ def _voice(published: Any, service: str) -> engine.Voice:
             (str(key), str(value))
             for key, value in sorted(labels.items() if isinstance(labels, dict) else ())
         ),
+        # [LAW:one-source-of-truth] Read per voice, from the voice, rather than
+        # from the deployment-wide set `GET /v1/models` also publishes. Those two
+        # agree for a single-engine backend and cannot for a routed one, and this
+        # is the answer a request is actually decided by.
+        capabilities=frozenset(
+            item for item in engine.Capability if item.name.lower() in declared
+        ),
     )
-
-
-@dataclass(frozen=True)
-class Description:
-    """What a backend says it is and what it will honour.
-
-    One value because it comes from one request. `GET /v1/models` answers both
-    questions at once, and asking it twice — once per field — would let a router
-    pair one backend's name with another moment's capabilities.
-    """
-
-    #: The engine this server runs, which `/v1/models` lists first precisely so a
-    #: reader learns what it *is* before what it will answer to. Read by the
-    #: router's startup log, so an operator can see which engine each address
-    #: turned out to be. A collision names deployments, not engines — two
-    #: deployments can run the same one.
-    engine_name: str
-    capabilities: frozenset[engine.Capability]
 
 
 @dataclass(frozen=True)
@@ -248,41 +246,35 @@ class Remote:
             _voice(entry, self.backend.service) for entry in published["voices"]
         )
 
-    def describe(self) -> Description:
-        """What this server runs and what it says it will honour.
+    def engine_name(self) -> str:
+        """The engine this server runs, as `GET /v1/models` lists it first.
 
-        Read from `GET /v1/models`, which reports the deployment's capabilities
-        beside every model id it serves — the same set that decides its own 501s,
-        so a router built on it refuses exactly what the backend would have
-        refused rather than keeping a second opinion.
+        Carried for the router's startup log, so an operator can see which engine
+        each address turned out to be. A collision names deployments rather than
+        engines — two deployments can run the same one.
+
+        What this server will *honour* is deliberately not read here. That is a
+        per-voice fact and travels on each voice in `GET /v1/voices`; the set this
+        endpoint publishes is the union across them, which is the right answer to
+        "what can this deployment do at all" and the wrong one to decide a request
+        by ([LAW:one-source-of-truth]).
 
         [LAW:no-silent-failure] A server too old to answer this endpoint is a
-        refusal to boot naming it, not an assumption. Treating a 404 as "declares
-        nothing" would silently turn every timestamp request into a 501 for a
-        backend that can in fact measure, and the operator would be left to infer
-        an image version from missing captions. Every image built since
+        refusal to boot naming it, not an assumption. Every image built since
         `GET /v1/models` landed answers it; one that does not is behind, and
         saying so at boot is cheaper than saying it in the audio.
         """
-        published = self._asked(
-            "/v1/models", "could not be asked what engine it runs"
-        )
+        published = self._asked("/v1/models", "could not be asked what engine it runs")
         if not isinstance(published, list) or not published:
             raise ConfigError(
                 [f"{self.backend.service}: /v1/models did not answer with any model"]
             )
         listed = published[0]
-        declared = listed.get("capabilities") if isinstance(listed, dict) else None
-        if not isinstance(declared, list):
+        if not isinstance(listed, dict):
             raise ConfigError(
-                [f"{self.backend.service}: /v1/models named no capabilities"]
+                [f"{self.backend.service}: /v1/models listed something that is not a model"]
             )
-        return Description(
-            engine_name=str(listed.get("model_id") or self.backend.service),
-            capabilities=frozenset(
-                item for item in engine.Capability if item.name.lower() in declared
-            ),
-        )
+        return str(listed.get("model_id") or self.backend.service)
 
     def speak(
         self, voice: engine.Voice, text: str, prosody: engine.Prosody
