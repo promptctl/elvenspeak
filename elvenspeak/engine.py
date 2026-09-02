@@ -187,6 +187,49 @@ class Speech:
     audio: Iterator[bytes]
 
 
+class Silence(Exception):
+    """An engine finished without producing a single sample.
+
+    Its own type rather than a bare `ValueError` so one handler can recognise it
+    without matching on a message — which would be a second, weaker copy of the
+    decision about what a caller is told.
+
+    It lives here, beside the [`Speech`] it is the absence of, rather than in
+    [`elvenspeak.api`] where it is answered. Both sides of this seam raise it and
+    neither imports the other: an engine reports that it produced nothing, and a
+    remote engine ([`elvenspeak.remote`]) reports the same fact after reading it
+    off a backend's response. Putting it in the module that answers it would mean
+    the engines importing the web layer to say a thing about themselves.
+    """
+
+    #: The header by which one elvenspeak process tells another that *this* is
+    #: what it means, present on that response and carrying no value worth
+    #: reading — its presence is the whole message.
+    #:
+    #: [LAW:one-source-of-truth] Here, on the type it names, because both sides of
+    #: the wire must spell it identically and both already import this module:
+    #: [`elvenspeak.api`] writes it on the one response it answers a `Silence`
+    #: with, and [`elvenspeak.remote`] reads it back into this type. Two literals
+    #: would be two clocks, and the day they disagreed a routed silence would
+    #: quietly stop being reported as one — the exact regression 7e2.12 was.
+    #:
+    #: A status code cannot carry this fact. 502 says "something behind me
+    #: failed", which is true of a mute engine and equally true of any proxy,
+    #: ingress or sidecar that ever lands between two of these processes and
+    #: synthesises its own — and a `Silence` inferred from *their* 502 would tell
+    #: an operator the engine went mute while the real fault was that the backend
+    #: was unreachable. This header is written by this service and nothing else,
+    #: so reading it is a fact about who answered rather than about what is
+    #: currently deployed between them.
+    WIRE_HEADER = "x-elvenspeak-silence"
+
+    def __init__(self, voice: Voice, text: str) -> None:
+        super().__init__(
+            f"engine produced no audio for voice {voice.id!r} "
+            f"from {len(text)} characters of text"
+        )
+
+
 @dataclass(frozen=True)
 class Timing:
     """One stretch of an utterance the engine can account for.

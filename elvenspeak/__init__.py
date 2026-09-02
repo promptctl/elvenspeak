@@ -31,6 +31,7 @@ from .engine import (
     Capability,
     Engine,
     Prosody,
+    Silence,
     Speech,
     TimedSpeech,
     Timing,
@@ -51,6 +52,9 @@ __all__ = [
     "Speech",
     "TimedSpeech",
     "Timing",
+    # ...and what an engine raises when it made no audio at all, which an outside
+    # engine has to be able to raise by name rather than reinvent.
+    "Silence",
     # How a deployment gets one: configured, then acquired and opened.
     "Prepared",
     "Configure",
