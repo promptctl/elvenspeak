@@ -47,6 +47,18 @@ def _read(engine_name: str) -> Mapping[str, object]:
     The parse error is quoted rather than summarised: `tomllib` reports the line
     and column it gave up at, which is the only part of this an operator can act
     on, and this module knows nothing that would improve on it.
+
+    `ValueError` rather than `TOMLDecodeError`, and that is the whole of the
+    theorem rather than a wider net thrown for safety. Syntax is not the only way
+    this call refuses: `tomllib.load` decodes the bytes as UTF-8 before it parses
+    anything, so a file saved in another encoding raises `UnicodeDecodeError`,
+    which is no kind of `TOMLDecodeError` and would have gone straight back to
+    being the traceback this function exists to stop. Naming the two would be an
+    enumeration a third door reopens; the one call inside this block does nothing
+    but turn bytes into a table or refuse, so the base they share is exactly the
+    set of ways it can say it could not. A non-UTF-8 file is not valid TOML
+    either — the format mandates the encoding — so the sentence stays true for
+    both without a branch to choose between them.
     """
     declared = _DIRECTORY / f"{engine_name}.toml"
     if not declared.exists():
@@ -54,9 +66,9 @@ def _read(engine_name: str) -> Mapping[str, object]:
     with declared.open("rb") as handle:
         try:
             return tomllib.load(handle)
-        except tomllib.TOMLDecodeError as unparseable:
+        except ValueError as unreadable:
             raise ConfigError(
-                [f"{engine_name}.toml: not valid TOML ({unparseable})"]
+                [f"{engine_name}.toml: not valid TOML ({unreadable})"]
             ) from None
 
 

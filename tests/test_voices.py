@@ -274,7 +274,20 @@ def declare(directory, engine_name: str, body: str):
     return directory
 
 
-def test_a_malformed_alias_table_refuses_to_boot(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("body", "tells"),
+    [
+        # An unclosed `[elevenlabs`, which `tomllib` gives up on at column 12.
+        pytest.param(b"[elevenlabs\nnot = valid", "line 1, column 12", id="bad-syntax"),
+        # A file saved in some other encoding. It never reaches the parser at
+        # all: `tomllib.load` decodes as UTF-8 first, so this used to be the
+        # second door out of the same room -- a `UnicodeDecodeError` is no kind
+        # of `TOMLDecodeError`, and a handler naming that type would have let
+        # this one back out as the traceback the other case no longer is.
+        pytest.param(b"\xff\xfe[elevenlabs]\n", "utf-8", id="bad-encoding"),
+    ],
+)
+def test_a_malformed_alias_table_refuses_to_boot(tmp_path, monkeypatch, body, tells):
     """The reason aliases are read while the app is built, not on first use.
 
     Read lazily it surfaced on whichever synthesis call first needed an alias —
@@ -287,10 +300,16 @@ def test_a_malformed_alias_table_refuses_to_boot(tmp_path, monkeypatch):
     catches `ConfigError` and nothing else, so what it was really guarding was an
     operator getting a traceback. The contract is the one its valid-TOML
     neighbour already states — the file is named, in the list every other startup
-    problem joins — and the parse position rides along because a bracket in a
-    hundred-line table is not findable from the filename alone.
+    problem joins — and whatever `tomllib` said about where it stopped rides
+    along, because a bad byte in a hundred-line table is not findable from the
+    filename alone.
+
+    [LAW:one-type-per-behavior] The two bodies are one behaviour's instances, not
+    two tests: "this file could not be turned into a table" is the whole of what
+    an operator is being told, and the two ways to earn that sentence differ only
+    in which bytes provoke it.
     """
-    declare(tmp_path, "piper", "[elevenlabs\nnot = valid")
+    (tmp_path / "piper.toml").write_bytes(body)
     monkeypatch.setattr(declarations_mod, "_DIRECTORY", tmp_path)
 
     with pytest.raises(ConfigError) as raised:
@@ -298,9 +317,7 @@ def test_a_malformed_alias_table_refuses_to_boot(tmp_path, monkeypatch):
             "piper", _Engine("en_US-lessac-medium"), fallback=Substitution.OFF
         )
     assert "piper.toml" in str(raised.value)
-    # Where the unclosed `[elevenlabs` is, quoted from `tomllib` rather than
-    # restated: the position is the only part of this an operator can act on.
-    assert "line 1, column 12" in str(raised.value)
+    assert tells in str(raised.value)
 
 
 def test_an_engine_reads_its_own_declarations_and_no_others(tmp_path, monkeypatch):

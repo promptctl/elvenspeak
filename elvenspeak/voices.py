@@ -208,9 +208,13 @@ class Catalog:
 
         [LAW:effects-at-boundaries] Where the declarations are read, which is why
         this is separate from the constructor: it happens once at startup, so a
-        malformed table is a refusal to boot rather than an uncaught
-        TOMLDecodeError on whichever synthesis call first needed an alias —
-        invisible to a healthcheck that never touches resolution.
+        malformed table is a refusal to boot rather than a failure raised on
+        whichever synthesis call first needed an alias — invisible to a
+        healthcheck that never touches resolution. Which exception that would be
+        is not the point and is deliberately not named: [`declarations._read`]
+        translates every way the file can fail to load into a `ConfigError`, so
+        pinning a type here would be a copy of that decision, made in the module
+        least likely to be edited when it changes.
 
         Also the one place [`Substitution.FIRST_OFFERED`] can be answered, since
         this is where a real voice list first exists. The constructor still takes
