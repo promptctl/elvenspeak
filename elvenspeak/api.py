@@ -448,13 +448,10 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         the only record that an engine has gone mute — which is how
         piper-routing-7e2.12 stayed invisible to a green pipeline.
 
-        Not reachable from `/stream/with-timestamps` after its first object: that
-        endpoint synthesizes sentence by sentence inside an already-started
-        response, and a status line cannot be recalled. Silence there ends the
-        stream mid-flight and is logged, which is worse than this and still not
-        silent. Said plainly rather than papered over, because a comment claiming
-        four endpoints are covered when three are is the exact failure this
-        service has already paid for twice.
+        Never reached from `/stream/with-timestamps`, not even for its first
+        sentence: that endpoint's status line is committed when the
+        `StreamingResponse` is constructed, before the body is advanced at all.
+        Silence there aborts the response instead of answering it.
         """
         _LOGGER.error("%s", error)
         return JSONResponse(status_code=502, content={"detail": str(error)})

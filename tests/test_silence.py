@@ -27,10 +27,18 @@ from elvenspeak import api, kokoro
 from elvenspeak.engine import Capability, Prosody, Speech, TimedSpeech, Voice
 from elvenspeak.engines import ENGINES
 from elvenspeak.settings import Settings
-from elvenspeak.voices import Substitution
 
 VOICE = DECLARED_VOICES[0]
-EVERYTHING = frozenset({Capability.SPEED, Capability.TIMESTAMPS})
+EVERYTHING = frozenset(Capability)
+
+#: A voice built to kokoro's own id grammar, for the tests that call into
+#: kokoro directly. `_language` reads the first letter through
+#: `_VOICE_LANGUAGES` while the `create` arguments are being built, so a generic
+#: fixture id reaches that table too — and `DECLARED_VOICES[0]` only survives it
+#: by beginning with an `f` that happens to mean French. Renaming a conftest
+#: voice would then break this file for a reason with no visible connection to
+#: it, so the kokoro tests bring an id kokoro can actually read.
+KOKORO_VOICE = Voice(id="af_test", name="test", description="test")
 
 
 def _settings() -> Settings:
@@ -144,6 +152,29 @@ def test_a_mute_engine_answers_502_and_says_so(path, chunks):
     assert VOICE.id in response.json()["detail"]
 
 
+def test_stream_with_timestamps_aborts_rather_than_completing_quietly():
+    """The one endpoint that cannot answer 502, pinned to what it really does.
+
+    Its status line is committed when the `StreamingResponse` is constructed,
+    before the body is advanced at all, so no checkpoint inside `stream()` can
+    change it — which is why `/stream` pulls its first chunk *before* building
+    the response and this one structurally cannot.
+
+    What matters is that the failure is not the thing this feature exists to
+    stop: a clean 200 carrying a short but well-formed JSON stream. It aborts
+    instead. Asserted from a measurement — the request raises rather than
+    returning — because the alternative is a comment claiming four endpoints are
+    covered when three are, which is the exact failure this service has already
+    paid for twice.
+    """
+    client = served_by(MuteEngine())
+    with pytest.raises(RuntimeError, match="response already started"):
+        client.post(
+            f"/v1/text-to-speech/{VOICE.id}/stream/with-timestamps",
+            json={"text": "First sentence. Second sentence."},
+        )
+
+
 def test_an_engine_that_speaks_is_not_refused():
     """The other half of the regression, and the reason it is not paranoia.
 
@@ -160,14 +191,31 @@ def test_an_engine_that_speaks_is_not_refused():
 # ---------------------------------------------------- the engine's own translation
 
 
+EMPTY_REDUCTION = ValueError(
+    "zero-size array to reduction operation maximum which has no identity"
+)
+
+
 class _Crashing:
-    """Stands in for `Kokoro`, raising what numpy raises on an empty result."""
+    """Stands in for `Kokoro`, raising what numpy raises on an empty result.
+
+    Both entry points, because both insert the pauses that crash and both have
+    to reach the same translation.
+    """
 
     def __init__(self, error: Exception) -> None:
         self._error = error
 
     def create(self, *args, **kwargs):
         raise self._error
+
+    def create_timed(self, *args, **kwargs):
+        raise self._error
+
+
+def _engine_over(model) -> kokoro.KokoroEngine:
+    """A Kokoro engine holding a model that only ever raises."""
+    return kokoro.KokoroEngine(model, {KOKORO_VOICE.id: KOKORO_VOICE}, 24000)
 
 
 def test_kokoro_reports_no_samples_rather_than_letting_numpy_escape():
@@ -177,11 +225,11 @@ def test_kokoro_reports_no_samples_rather_than_letting_numpy_escape():
     the boundary decides the answer, so this stays true for an engine that is
     never served over HTTP at all.
     """
-    crash = ValueError(
-        "zero-size array to reduction operation maximum which has no identity"
-    )
     assert (
-        kokoro._synthesized(_Crashing(crash), VOICE, "Hi", Prosody(speed=1.0)) == b""
+        kokoro._synthesized(
+            _Crashing(EMPTY_REDUCTION), KOKORO_VOICE, "Hi", Prosody(speed=1.0)
+        )
+        == b""
     )
 
 
@@ -195,7 +243,43 @@ def test_kokoro_does_not_swallow_an_unrelated_value_error():
     with pytest.raises(ValueError, match="voice pack is corrupt"):
         kokoro._synthesized(
             _Crashing(ValueError("voice pack is corrupt")),
-            VOICE,
+            KOKORO_VOICE,
             "Hi",
             Prosody(speed=1.0),
+        )
+
+
+def test_kokoro_does_not_swallow_another_reduction_that_is_not_the_pause_one():
+    """numpy words every identity-less reduction the same way but for its name.
+
+    Matching only the common prefix would catch a `min` or `argmax` raised
+    anywhere else in the library and report it to a caller as "the engine
+    produced no audio" — this fix telling the lie it exists to stop, one layer
+    down.
+    """
+    other = ValueError(
+        "zero-size array to reduction operation minimum which has no identity"
+    )
+    with pytest.raises(ValueError, match="minimum"):
+        kokoro._synthesized(_Crashing(other), KOKORO_VOICE, "Hi", Prosody(speed=1.0))
+
+
+# `speak_timed` reaches the same translation through the library's other entry
+# point. Driven end to end rather than through `_created` directly, because the
+# extraction that gave both callers one catch is exactly the kind of change that
+# can silently stop wiring one of them up.
+
+
+def test_speak_timed_reports_no_samples_rather_than_letting_numpy_escape():
+    spoken = _engine_over(_Crashing(EMPTY_REDUCTION)).speak_timed(
+        KOKORO_VOICE, "Hi", Prosody(speed=1.0)
+    )
+    assert spoken.pcm == b""
+    assert spoken.timings == ()
+
+
+def test_speak_timed_does_not_swallow_an_unrelated_value_error():
+    with pytest.raises(ValueError, match="voice pack is corrupt"):
+        _engine_over(_Crashing(ValueError("voice pack is corrupt"))).speak_timed(
+            KOKORO_VOICE, "Hi", Prosody(speed=1.0)
         )

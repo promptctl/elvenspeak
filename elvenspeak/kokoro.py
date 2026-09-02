@@ -58,7 +58,7 @@ from . import engine
 from .provisioning import ConfigError, flag
 
 if TYPE_CHECKING:  # pragma: no cover - import cost is real, the symbol is not
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
     from kokoro_onnx import Kokoro
 
@@ -173,31 +173,21 @@ class KokoroEngine:
         self, voice: engine.Voice, text: str, prosody: engine.Prosody
     ) -> engine.TimedSpeech:
         spoken = self._installed[voice.id]
-        # Same empty-output crash as the streaming path, through the library's
-        # other entry point: `create_timed` inserts the same pauses. Reported the
-        # same way — no samples and no timings — so both endpoints reach the
-        # boundary's one answer rather than one of them keeping the bare 500.
-        try:
-            audio, _, timings = self._model.create_timed(
+        # `create_timed` inserts the same pauses as `create`, so it carries the
+        # same empty-output crash and goes through the same translation.
+        created = _created(
+            lambda: self._model.create_timed(
                 text,
                 voice=spoken.id,
                 speed=prosody.speed,
                 lang=_language(spoken.id),
-            )
-        except ValueError as error:
-            if _EMPTY_REDUCTION not in str(error):
-                raise
-            _LOGGER.error(
-                "kokoro synthesized nothing for voice %r from %d characters, "
-                "asked for timings; its pause insertion then failed on the "
-                "empty result (%s)",
-                spoken.id,
-                len(text),
-                error,
-            )
-            # `_pcm` clips and converts whatever sequence it is handed, so an
-            # empty one is already the right way to say "no samples" here.
-            audio, timings = (), ()
+            ),
+            spoken.id,
+            text,
+        )
+        # `_pcm` clips and converts whatever sequence it is handed, so an empty
+        # one is already the right way to say "no samples".
+        audio, timings = ((), ()) if created is None else (created[0], created[2])
         pcm = _pcm(audio)
         return engine.TimedSpeech(
             pcm=pcm,
@@ -542,52 +532,68 @@ def _stream(
         yield pcm[start : start + step]
 
 
-#: What numpy says when `max()` is asked for the largest of nothing. Matched on
-#: the message because that is the only thing distinguishing it: numpy raises a
-#: plain `ValueError` here, so there is no type or attribute to key on.
-_EMPTY_REDUCTION = "zero-size array to reduction operation"
+#: What numpy says when `max()` is asked for the largest of nothing, which is
+#: what `kokoro_onnx.pauses._quiet_frames` does to an empty result.
+#:
+#: The operation name is part of the match on purpose. numpy words every
+#: identity-less reduction this way — `min`, `argmax` and the rest each name
+#: their own — so matching only the common prefix would catch an unrelated
+#: reduction elsewhere in the library and report it as "the engine produced no
+#: audio", which is this fix telling the lie it exists to stop.
+_EMPTY_REDUCTION = "zero-size array to reduction operation maximum"
 
 
-def _synthesized(
-    model: "Kokoro", voice: engine.Voice, text: str, prosody: engine.Prosody
-) -> bytes:
-    """Kokoro's samples, or none of them when it produced none.
+def _created(create: "Callable[[], tuple]", voice_id: str, text: str) -> tuple | None:
+    """What the library returned, or None when it synthesized nothing.
 
-    [LAW:no-silent-failure] The library cannot survive its own empty output.
-    `kokoro_onnx.pauses._quiet_frames` takes `loudness.max()` of the frames it
-    was given, and `max()` of an empty array raises rather than returning an
-    identity — so a synthesis that yields zero samples escapes as a bare 500
-    carrying no body, which tells a caller nothing about what happened
-    (piper-routing-7e2.12).
+    [LAW:single-enforcer] The one place Kokoro's empty-output crash is
+    recognised. Both entry points reach it — `create` and `create_timed` insert
+    the same pauses and fail the same way — and a second copy of this catch
+    would be free to drift from the first in exactly the direction that matters:
+    one of them quietly keeping the bare 500.
 
-    Returning empty here says the true thing in the vocabulary the seam already
-    has — an engine that produced no audio — and lets [`elvenspeak.api`] decide
-    once what every caller is told. This module deliberately does not raise the
-    API's exception: the engine reports, the boundary answers.
+    [LAW:no-silent-failure] `kokoro_onnx.pauses._quiet_frames` takes
+    `loudness.max()` of the frames it was given, and `max()` of an empty array
+    raises rather than returning an identity — so zero samples escape as a 500
+    with no body, telling a caller nothing (piper-routing-7e2.12). None says the
+    true thing in the vocabulary the seam already has, and lets
+    [`elvenspeak.api`] decide once what every caller is told: the engine
+    reports, the boundary answers.
 
     Narrow on purpose. Any other `ValueError` is re-raised untouched, because a
-    blanket catch here would turn a real bug in this engine into a tidy report
-    that the voice was merely quiet.
+    blanket catch would turn a real bug in this engine into a tidy report that
+    the voice was merely quiet.
     """
     try:
-        audio, _ = model.create(
-            text,
-            voice=voice.id,
-            speed=prosody.speed,
-            lang=_language(voice.id),
-        )
+        return create()
     except ValueError as error:
         if _EMPTY_REDUCTION not in str(error):
             raise
         _LOGGER.error(
             "kokoro synthesized nothing for voice %r from %d characters; "
             "its pause insertion then failed on the empty result (%s)",
-            voice.id,
+            voice_id,
             len(text),
             error,
         )
-        return b""
-    return _pcm(audio)
+        return None
+
+
+def _synthesized(
+    model: "Kokoro", voice: engine.Voice, text: str, prosody: engine.Prosody
+) -> bytes:
+    """Kokoro's samples, or none of them when it produced none."""
+    created = _created(
+        lambda: model.create(
+            text,
+            voice=voice.id,
+            speed=prosody.speed,
+            lang=_language(voice.id),
+        ),
+        voice.id,
+        text,
+    )
+    return b"" if created is None else _pcm(created[0])
 
 
 def _pcm(audio) -> bytes:
