@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from elvenspeak.engine import Voice
+from conftest import SERVES
 from elvenspeak import declarations as declarations_mod
 from elvenspeak.provisioning import ConfigError
 from elvenspeak.voices import Catalog, Substitution, VoiceNotInstalled, load_aliases
@@ -23,6 +24,7 @@ def voice(key: str) -> Voice:
         name=key.split("-")[1] if "-" in key else key,
         description=key,
         labels=(("language", "en_US"), ("quality", "medium")),
+        models=SERVES,
     )
 
 

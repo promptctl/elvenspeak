@@ -119,8 +119,14 @@ class ToneEngine:
     class inherits nothing and imports no base to satisfy.
     """
 
-    def __init__(self, pitches: tuple[tuple[str, int], ...], measures: bool) -> None:
+    def __init__(
+        self,
+        pitches: tuple[tuple[str, int], ...],
+        measures: bool,
+        serves: frozenset[str],
+    ) -> None:
         self._pitches = pitches
+        self._serves = serves
         self._capabilities = frozenset(
             {Capability.SPEED, *([Capability.TIMESTAMPS] if measures else [])}
         )
@@ -139,6 +145,12 @@ class ToneEngine:
                 # same way so they all carry the same set — an engine whose voices
                 # differ says so here, one voice at a time.
                 capabilities=self._capabilities,
+                # Every `model_id` this deployment answers to, handed down by
+                # `Settings.from_env` from the name this engine is registered
+                # under. An engine is never told its own key, so it could not
+                # have derived this — and a router in front of it reads the
+                # answer off each voice to know which engine speaks it.
+                models=self._serves,
             )
             for name, hertz in self._pitches
         )
@@ -197,6 +209,8 @@ class TonePrepared:
     directory: Path
     names: tuple[str, ...]
     measures: bool
+    #: Every `model_id` a deployment running this engine answers to.
+    serves: frozenset[str]
 
     def acquire(self) -> tuple[Voice, ...]:
         """Installs the voice packs. The image build's step, never a request's.
@@ -228,14 +242,16 @@ class TonePrepared:
             (name, int(self._pack(name).read_text(encoding="utf-8")))
             for name in self.names
         )
-        return ToneEngine(pitches, self.measures)
+        return ToneEngine(pitches, self.measures, self.serves)
 
     def _pack(self, name: str) -> Path:
         return self.directory / f"{name}{SUFFIX}"
 
 
 def configure(
-    environ: Mapping[str, str], withheld: frozenset[Capability]
+    environ: Mapping[str, str],
+    withheld: frozenset[Capability],
+    serves: frozenset[str],
 ) -> TonePrepared:
     """This engine's whole configuration, checked in one pass.
 
@@ -272,7 +288,7 @@ def configure(
     # this engine declares, so building the machinery anyway would only waste
     # the work. An engine with nothing to save is free to ignore this.
     return TonePrepared(
-        Path(directory), names, Capability.TIMESTAMPS not in withheld
+        Path(directory), names, Capability.TIMESTAMPS not in withheld, serves
     )
 
 
@@ -361,7 +377,9 @@ def test_opening_what_was_never_acquired_fails_loudly(tmp_path):
     here rather than degrading. The alternative is a service that boots, answers
     `/health`, and is wrong.
     """
-    prepared = configure({VOICES: "low", DIRECTORY: str(tmp_path)}, frozenset())
+    prepared = configure(
+        {VOICES: "low", DIRECTORY: str(tmp_path)}, frozenset(), frozenset({"tone"})
+    )
     with pytest.raises(FileNotFoundError, match="voice pack"):
         prepared.open()
 
@@ -377,6 +395,67 @@ def test_the_listing_is_the_supplied_engines_voices(client):
     listed = client.get("/v1/voices").json()["voices"]
     assert {voice["voice_id"] for voice in listed} == {"tone-low", "tone-high"}
     assert all(voice["labels"]["engine"] == "tone" for voice in listed)
+
+
+def test_the_engine_axis_reaches_a_supplied_engine_too(client):
+    """`model_id` decided against an engine this package has never seen.
+
+    The three answers, through the public API alone. `tone` is the name this
+    example registers its engine under and the only name it was ever told —
+    `Settings.from_env` hands it down, because an engine cannot know the key a
+    registry filed it under — so a deployment that failed to pass it through
+    would advertise nothing and refuse the caller who named it.
+
+    The 422 is the half worth stating twice: an outside engine that stamped the
+    wrong set would still serve every request, in its own voice, with nothing in
+    the response saying the engine named was not the engine that spoke.
+    """
+    listed = client.get("/v1/models").json()
+    assert [entry["model_id"] for entry in listed] == ["tone"]
+
+    named = client.post(
+        "/v1/text-to-speech/tone-low", json={"text": TEXT, "model_id": "tone"}
+    )
+    assert named.status_code == 200
+    assert "model_id" not in named.headers.get("x-elvenspeak-ignored", "")
+
+    # An id no engine in this registry has steers nothing and is reported, rather
+    # than refused: a stock ElevenLabs client sends one on every request.
+    foreign = client.post(
+        "/v1/text-to-speech/tone-low",
+        json={"text": TEXT, "model_id": "eleven_turbo_v2"},
+    )
+    assert foreign.status_code == 200
+    assert "model_id" in foreign.headers["x-elvenspeak-ignored"]
+
+
+def test_naming_an_engine_this_deployment_is_not_running_is_refused(environ):
+    """The refusal, which needs a registry holding more than the engine that runs.
+
+    A one-engine registry cannot produce it: every id is either `tone` or nothing
+    this build has, and the second is reported rather than refused. So this
+    registers the same engine twice under two names — which is what a project
+    shipping two engines in one build really looks like from `models.Directory`,
+    since what it reads is the registry's *keys*.
+
+    Without this the caller who asks for `chime` and is answered by `tone` hears
+    fluent audio from an engine they did not name, and nothing in the response
+    says so.
+    """
+    both: Registry = {"tone": configure, "chime": configure}
+    settings = Settings.from_env(both, environ)
+    settings.engine.acquire()
+    client = TestClient(create_app(settings, settings.engine.open()))
+
+    refused = client.post(
+        "/v1/text-to-speech/tone-low", json={"text": TEXT, "model_id": "chime"}
+    )
+
+    assert refused.status_code == 422
+    detail = refused.json()["detail"]
+    assert "'chime'" in detail["message"]
+    assert "tone-low" in detail["message"]
+    assert detail["served"] == ["tone"]
 
 
 def test_the_supplied_engines_own_order_chooses_the_fallback_voice(client):

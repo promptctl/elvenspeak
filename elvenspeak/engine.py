@@ -47,7 +47,7 @@ speak in one of them; it never has to decide what an id means.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
 
@@ -140,6 +140,35 @@ class Voice:
     #: engine, so a voice that undersells itself is merely pessimistic while one
     #: that oversells lies in the audio.
     capabilities: frozenset["Capability"] = frozenset()
+    #: Every `model_id` the server that speaks this voice answers to — its engine's
+    #: own name, plus the foreign ids that engine declares.
+    #:
+    #: [LAW:one-source-of-truth] On the voice for the reason `capabilities` is, and
+    #: discovered to be the same reason: which engine will speak is a fact about
+    #: *what will speak*, and the voice is what names that. It was
+    #: `models.Directory`, built from the deployment's own engine name, which was
+    #: the same thing only while one process meant one engine. Behind
+    #: [`elvenspeak.router`] it was not: a router's name declares nothing, so it
+    #: advertised itself as the only engine it served while routing to two, and
+    #: every `model_id` its own backends honour came back reported as ignored
+    #: (`piper-routing-7e2.17`, measured against the running cluster).
+    #:
+    #: The deployment-wide set is still available and is *derived*: the union over
+    #: the voices on offer ([`elvenspeak.models.Directory.over`]). Held instead, it
+    #: would be a second source free to disagree with the voices it summarises —
+    #: which is exactly how it came to disagree.
+    #:
+    #: [LAW:types-are-the-program] Required, and the one field here with no
+    #: default, because there is no such thing as a voice no engine speaks: the
+    #: engine that speaks it has a name, and that name alone is already a model id
+    #: it answers to. An empty set is not the cautious answer it looks like — it
+    #: refuses the caller who names the very engine about to speak, since
+    #: [`elvenspeak.models.Directory.reach`] finds that name among the build's
+    #: engines and reads the disagreement as a request for a different one.
+    #:
+    #: `kw_only` so this stays beside the field it belongs with rather than moving
+    #: ahead of the defaulted ones to satisfy the constructor.
+    models: frozenset[str] = field(kw_only=True)
 
 
 @dataclass(frozen=True)

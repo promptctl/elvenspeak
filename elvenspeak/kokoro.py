@@ -217,6 +217,11 @@ class _Prepared:
     #: Whether [`open`] may fetch an asset that is missing at boot. Not consulted
     #: by [`acquire`], which fetches by definition — see its docstring.
     allow_download: bool
+    #: Every `model_id` this deployment answers to, stamped onto each voice beside
+    #: its capabilities and for the same reason — it is a fact about what will
+    #: speak. Arrives from [`configure`] because the name it was derived from is
+    #: the key this module is registered under, which this module never learns.
+    serves: frozenset[str]
 
     def acquire(self) -> tuple[engine.Voice, ...]:
         """Puts this engine's assets on disk, and says what they turned out to be.
@@ -242,14 +247,14 @@ class _Prepared:
         this reports have to say the same thing as the ones [`open`] serves.
         """
         model, installed, _ = _open(
-            self.keys, self.models_dir, self.model, allow_download=True
+            self.keys, self.models_dir, self.model, True, self.serves
         )
         return tuple(_declaring(model, installed).values())
 
     def open(self) -> KokoroEngine:
         """Opens the export and returns the engine that speaks every named voice."""
         model, installed, sample_rate = _open(
-            self.keys, self.models_dir, self.model, self.allow_download
+            self.keys, self.models_dir, self.model, self.allow_download, self.serves
         )
         # Settled here, beside the session that was opened, rather than stored as
         # a setting the engine re-reads later: whether durations can be reported is
@@ -264,13 +269,20 @@ class _Prepared:
         )
 
 
-def _declaring(model: "Kokoro", installed: dict[str, engine.Voice]) -> dict[str, engine.Voice]:
+def _declaring(
+    model: "Kokoro", installed: dict[str, engine.Voice]
+) -> dict[str, engine.Voice]:
     """`installed`, every voice declaring what this export can actually do.
 
     [LAW:one-source-of-truth] Read by both lifecycle methods rather than computed
     in each: whether durations can be reported is a property of the export's graph
     outputs, so the opened session is the only thing that knows, and a build that
     derived it separately could describe a voice that boots differently.
+
+    Capabilities only. What a voice answers to is settled at [`_describe`], where
+    the voice is born, because `serves` is known from `configure` onwards and owes
+    nothing to the session — stamping it here as well would date a config-time
+    fact to session-open for no reason.
 
     Every voice is spoken by that one session, so they all carry the same set.
     """
@@ -284,7 +296,9 @@ def _declaring(model: "Kokoro", installed: dict[str, engine.Voice]) -> dict[str,
 
 
 def configure(
-    env: "Mapping[str, str]", withheld: frozenset[engine.Capability]
+    env: "Mapping[str, str]",
+    withheld: frozenset[engine.Capability],
+    serves: frozenset[str],
 ) -> _Prepared:
     """Reads Kokoro's own environment, or says everything wrong with it at once.
 
@@ -354,6 +368,7 @@ def configure(
         models_dir=models_dir,
         model=model,
         allow_download=allow_download,
+        serves=serves,
     )
 
 
@@ -369,7 +384,11 @@ def _is_voice_id(key: str) -> bool:
 
 
 def _install(
-    keys: tuple[str, ...], models_dir: Path, model: str, allow_download: bool
+    keys: tuple[str, ...],
+    models_dir: Path,
+    model: str,
+    allow_download: bool,
+    serves: frozenset[str],
 ) -> dict[str, engine.Voice]:
     """Makes the assets present and every named voice readable out of them.
 
@@ -405,11 +424,15 @@ def _install(
         )
 
     _LOGGER.info("kokoro assets ready in %s (%s)", models_dir, model_path.name)
-    return {key: _describe(key) for key in keys}
+    return {key: _describe(key, serves) for key in keys}
 
 
 def _open(
-    keys: tuple[str, ...], models_dir: Path, model: str, allow_download: bool
+    keys: tuple[str, ...],
+    models_dir: Path,
+    model: str,
+    allow_download: bool,
+    serves: frozenset[str],
 ) -> tuple["Kokoro", dict[str, engine.Voice], int]:
     """The opened session, the voices it will speak in, and the rate it speaks at.
 
@@ -422,7 +445,7 @@ def _open(
     """
     from kokoro_onnx import SAMPLE_RATE, Kokoro
 
-    installed = _install(keys, models_dir, model, allow_download)
+    installed = _install(keys, models_dir, model, allow_download, serves)
     _LOGGER.info("opening kokoro export %s", model)
     return (
         Kokoro(str(models_dir / model), str(models_dir / _VOICES_FILE)),
@@ -487,7 +510,7 @@ def _language(key: str) -> str:
     return _VOICE_LANGUAGES[key[0]]
 
 
-def _describe(key: str) -> engine.Voice:
+def _describe(key: str, serves: frozenset[str]) -> engine.Voice:
     """One voice as the API surface has to show it, read out of its id.
 
     There is no per-voice metadata to read: the style pack carries vectors, not
@@ -511,6 +534,7 @@ def _describe(key: str) -> engine.Voice:
             ("gender", gender),
             ("engine", "kokoro"),
         ),
+        models=serves,
     )
 
 

@@ -121,7 +121,7 @@ def router_engine() -> Iterator[Engine]:
     the part that matters, and it is real.
     """
     with cluster(("declared", DECLARED_VOICES, frozenset(Capability))) as consul:
-        yield router.configure({router.CONSUL_URL: consul}, frozenset()).open()
+        yield router.configure({router.CONSUL_URL: consul}, frozenset(), frozenset({"router"})).open()
 
 
 #: Every engine this project can put behind the API surface, and the suite below
@@ -293,10 +293,21 @@ def test_what_a_voice_says_it_can_do_does_not_change_between_calls(
     Since the claim travels on a frozen `Voice`, this is now asking the same
     question as "the voice list does not change", from the one angle that matters
     for what the server promises about it.
+
+    `models` is held to the same standard for the same reason: which engine
+    answers for a voice is read on the request that names it, so a set that
+    varied between calls would decide two requests differently with nothing
+    having changed. Asserted non-empty as well, because equality alone is
+    satisfied by a subject that stamps nothing — and a voice that names no model
+    id refuses the caller who named the engine about to speak.
     """
     assert {voice.id: voice.capabilities for voice in subject.voices()} == {
         voice.id: voice.capabilities for voice in subject.voices()
     }
+    assert {voice.id: voice.models for voice in subject.voices()} == {
+        voice.id: voice.models for voice in subject.voices()
+    }
+    assert all(voice.models for voice in subject.voices())
 
 
 # --------------------------------------------------------- what it then does

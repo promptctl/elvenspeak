@@ -372,16 +372,21 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     # owns the alias table.
     cat = voices.Catalog.for_engine(settings.engine_name, engine, settings.fallback)
 
-    # Which `model_id` values reach this deployment, built once for the same
-    # reason the catalog is: it reads the engine's declaration off disk, and a
-    # malformed one should stop the process rather than surface on whichever
-    # call first named a model.
+    # Which `model_id` values reach this deployment at all, derived once from the
+    # voices on offer rather than from this deployment's own engine name.
     #
-    # Both arguments come from the settings, so this module still names no
-    # concrete engine — it passes two strings-worth of fact to the module that
-    # owns the question ([LAW:one-way-deps]).
-    directory = models.Directory.for_engine(
-        settings.engine_name, settings.known_engines
+    # The name was what `piper-routing-7e2.17` found wrong: a router's name
+    # declares nothing, so a directory built from it advertised `["router"]` while
+    # fronting piper and kokoro, and refused both by name as engines this
+    # deployment was not running. What each voice's server answers to travels on
+    # the voice ([`elvenspeak.engine.Voice.models`]) and the union is taken here,
+    # which is the same shape `offered()` above takes for capabilities and is
+    # right for one engine and several alike ([LAW:one-source-of-truth]).
+    #
+    # Built once because `cat.installed` is fixed once, so recomputing it per
+    # request would be the same answer at a cost.
+    directory = models.Directory.over(
+        (voice.models for voice in cat.installed), settings.known_engines
     )
 
     def honoured(voice: Voice) -> frozenset[Capability]:
@@ -537,42 +542,59 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
                 },
             ) from None
 
-    def require_served(body: SpeechRequest) -> None:
-        """Refuses a request for an engine this deployment is not running.
+    def speaking(voice_id: str, body: SpeechRequest) -> voices.Resolution:
+        """The voice that will speak this request, or the refusal that stops it.
 
-        [LAW:no-silent-failure] The alternative is the answer this ticket exists
-        to forbid: a caller asks for kokoro, hears fluent piper, and nothing in
-        the response says the engine it named was not the engine that spoke. A
-        voice can substitute because a substitute voice is still an answer to
-        "say this"; an engine cannot, because the engine *is* the answer.
+        [LAW:parse-dont-validate] One unit for the whole crossing, and one type
+        out of it that no handler could have built for itself. It was two calls
+        every endpoint made in the right order — the engine check first, then the
+        voice — and the order stopped being incidental the moment the engine check
+        started needing the voice: which engine answers a request is a fact about
+        the voice it resolved to, so asking first could only ever have been
+        answered deployment-wide ([LAW:no-ambient-temporal-coupling]).
 
-        Only an id naming another engine is refused. An ElevenLabs model id this
-        deployment maps to nothing names no engine here, so there is no
-        contradiction to detect and no 422 to justify — every stock ElevenLabs
-        client sends a `model_id`, and refusing the unrecognised ones would
-        reject most real callers on their first request. Those come back named in
-        `x-elvenspeak-ignored` instead, which is rule 2 doing its job.
+        [LAW:no-silent-failure] Refusing an engine that will not be speaking is
+        the answer `piper-routing-7e2.2` exists to force: a caller asks for
+        kokoro, hears fluent piper, and nothing in the response says the engine it
+        named was not the engine that spoke. A voice can substitute because a
+        substitute voice is still an answer to "say this"; an engine cannot,
+        because the engine *is* the answer.
+
+        Only an id naming an engine is refused. An ElevenLabs model id nothing
+        here maps names no engine at all, so there is no contradiction to detect
+        and no 422 to justify — every stock ElevenLabs client sends a `model_id`,
+        and refusing the unrecognised ones would reject most real callers on their
+        first request. Those come back named in `x-elvenspeak-ignored` instead,
+        which is rule 2 doing its job.
 
         422 rather than 404: the offending value is in the request body, which is
         what that status is for here and what `output_format` already answers.
         """
-        if directory.reach(body.model_id) is models.Reach.ELSEWHERE:
+        try:
+            resolution = cat.resolve(voice_id)
+        except voices.VoiceNotInstalled as error:
+            raise HTTPException(status_code=404, detail=str(error)) from None
+
+        if (
+            directory.reach(body.model_id, resolution.voice.models)
+            is models.Reach.ELSEWHERE
+        ):
             raise HTTPException(
                 status_code=422,
                 detail={
+                    # Says what is true of this request rather than of the
+                    # process. Behind a router the named engine may well be
+                    # running — it just does not speak the voice that resolved,
+                    # and a message claiming otherwise would send an operator
+                    # looking for a backend that is up.
                     "message": (
-                        f"model_id {body.model_id!r} names an engine this "
-                        f"deployment is not running"
+                        f"model_id {body.model_id!r} names an engine that is not "
+                        f"speaking voice {resolution.voice.id!r}"
                     ),
                     "served": list(directory.listed()),
                 },
             )
-
-    def resolve(voice_id: str) -> voices.Resolution:
-        try:
-            return cat.resolve(voice_id)
-        except voices.VoiceNotInstalled as error:
-            raise HTTPException(status_code=404, detail=str(error)) from None
+        return resolution
 
     def headers(
         resolution: voices.Resolution,
@@ -591,7 +613,10 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         if resolution.substituted:
             out["x-elvenspeak-voice-requested"] = (resolution.requested,)
         ignored = body.ignored(
-            _honoured(honoured(resolution.voice), directory.reach(body.model_id))
+            _honoured(
+                honoured(resolution.voice),
+                directory.reach(body.model_id, resolution.voice.models),
+            )
         )
         if ignored:
             out["x-elvenspeak-ignored"] = ignored
@@ -649,8 +674,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         output_format: str = Query(default=DEFAULT_OUTPUT_FORMAT),
     ) -> Response:
         fmt = parse_format(output_format)
-        require_served(body)
-        resolution = resolve(voice_id)
+        resolution = speaking(voice_id, body)
 
         def synthesize() -> tuple[int, bytes]:
             spoken = engine.speak(
@@ -681,8 +705,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         output_format: str = Query(default=DEFAULT_OUTPUT_FORMAT),
     ) -> StreamingResponse:
         fmt = parse_format(output_format)
-        require_served(body)
-        resolution = resolve(voice_id)
+        resolution = speaking(voice_id, body)
 
         # On a thread even though the interface promises the audio arrives lazily
         # — `speak` itself is synchronous, and an engine that opens a connection
@@ -713,8 +736,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         output_format: str = Query(default=DEFAULT_OUTPUT_FORMAT),
     ) -> JSONResponse:
         fmt = parse_format(output_format)
-        require_served(body)
-        resolution = resolve(voice_id)
+        resolution = speaking(voice_id, body)
         require(Capability.TIMESTAMPS, resolution.voice)
 
         spoken = await asyncio.to_thread(
@@ -741,8 +763,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         output_format: str = Query(default=DEFAULT_OUTPUT_FORMAT),
     ) -> StreamingResponse:
         fmt = parse_format(output_format)
-        require_served(body)
-        resolution = resolve(voice_id)
+        resolution = speaking(voice_id, body)
         require(Capability.TIMESTAMPS, resolution.voice)
         prosody = body.prosody(honoured(resolution.voice))
 
@@ -800,17 +821,23 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         inferring it from the shape of a voice name.
 
         [LAW:one-source-of-truth] Derived from what this process actually has —
-        the engine the environment chose, the foreign ids that engine declares,
-        and the capabilities that survived the deployment's withholding — never
-        from a list written beside it. A roster here would be a second answer to
-        "what can this server do", free to advertise an engine the image does not
-        carry.
+        the model ids the voices on offer answer to, and the capabilities that
+        survived the deployment's withholding — never from a list written beside
+        it. A roster here would be a second answer to "what can this server do",
+        free to advertise an engine the image does not carry.
 
-        Every id listed is one [`require_served`] will accept, because both read
-        the same [`models.Directory`]. Listing only the engine while an
-        `eleven_*` id also reached it would leave a caller discovering the rest
-        by trying them, which is the discovery-by-500 this endpoint exists to
-        replace.
+        Behind a router that derivation is the whole endpoint. It used to read the
+        deployment's own engine name, which for a router declares nothing, so a
+        router fronting piper and kokoro answered `["router"]` and a caller could
+        not discover through it that either existed (`piper-routing-7e2.17`).
+        Listing the union means every engine the fleet actually fronts appears
+        here, and appears because a voice reported it.
+
+        Every id listed is one [`speaking`] will accept for at least one voice,
+        because both read the same [`models.Directory`]. It is not a promise that
+        any id here reaches any voice here: behind a router `piper` and `af_heart`
+        are both real and do not go together, and that pairing is refused per
+        request, where the voice is known.
 
         A bare array rather than an object with a `models` key, because that is
         what ElevenLabs returns and a stock client indexes it directly. `GET
@@ -962,6 +989,18 @@ def _voice_json(
         # `elvenspeak.remote` reads it to route on the truth rather than on a
         # deployment-wide average.
         "capabilities": sorted(item.name.lower() for item in honoured),
+        # Not an ElevenLabs field either, and here for the same reason
+        # `capabilities` is: which engine will speak is a fact about this voice,
+        # not about the server answering. `elvenspeak.remote` reads it so a router
+        # can advertise the engines it fronts instead of only itself, and it
+        # arrives in the same response as the voices so a rolling deploy cannot
+        # pair one backend's name with another's voice list.
+        #
+        # Deliberately not ElevenLabs' `high_quality_base_model_ids` above, which
+        # is a claim about tier rather than about reachability — answering this
+        # question there would tell a stock client something this service never
+        # measured.
+        "models": sorted(voice.models),
     }
 
 

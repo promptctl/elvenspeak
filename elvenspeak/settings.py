@@ -38,6 +38,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from . import models
 from .engine import Capability
 from .provisioning import ConfigError, Prepared, Registry
 from .voices import Fallback, Substitution
@@ -287,4 +288,12 @@ def _prepare(
         raise ConfigError(
             [f"ELVENSPEAK_ENGINE={chosen!r} is not one of: {', '.join(engines)}"]
         )
-    return _Chosen(name=chosen, engine=configure(env, withheld))
+    # [LAW:one-source-of-truth] The one place the chosen name and the registry's
+    # keys are both in hand, so it is where the engine's declared model ids are
+    # read. An engine module cannot do it: it is registered under a name it has
+    # never been told, which is the gap `piper-routing-7e2.17` closed by handing
+    # the answer down instead of having each engine guess at its own key.
+    return _Chosen(
+        name=chosen,
+        engine=configure(env, withheld, models.declared_by(chosen, engines)),
+    )

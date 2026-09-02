@@ -37,6 +37,7 @@ import re
 
 import pytest
 
+from conftest import SERVES
 from elvenspeak.declarations import _DIRECTORY, model_ids, voice_aliases
 from elvenspeak.engine import Voice
 from elvenspeak.engines import ENGINES
@@ -231,7 +232,7 @@ def test_no_two_engines_claim_the_same_model_id():
 def test_no_declared_model_id_is_an_engine_name(name):
     """An engine's own name already reaches it, and another's is a false claim.
 
-    `Directory.for_engine` refuses both at startup, which is the right place for
+    `models.declared_by` refuses both at startup, which is the right place for
     a deployment and the wrong place to *learn* it: the failure lands on whoever
     boots the image rather than on whoever edited the table. This is the earlier
     of the two checks, not the only one — it fails in CI, before an image exists,
@@ -288,7 +289,8 @@ def test_no_alias_points_at_a_voice_the_image_does_not_bake(name):
     assert declared, f"{name}.toml declares no aliases — the parser is wrong, not the file"
 
     installed = {
-        voice: Voice(id=voice, name=voice, description="") for voice in baked
+        voice: Voice(id=voice, name=voice, description="", models=SERVES)
+        for voice in baked
     }
     live = load_aliases(name, installed)
 

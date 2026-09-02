@@ -204,6 +204,30 @@ def kokoro_timeless_installed(kokoro_installed: Path) -> Path:
     return MODELS_DIR
 
 
+def serves(name: str) -> frozenset[str]:
+    """What a deployment running `name` answers to, derived the way the server does.
+
+    [LAW:behavior-not-structure] Reads the real declaration through
+    `models.declared_by` against the real registry, exactly as
+    `elvenspeak.settings` does, rather than restating an engine's model ids here.
+    A literal would be a second copy of `aliases/<name>.toml`, and it would keep
+    passing after the file it duplicates stopped saying that.
+
+    Imported inside the call because `elvenspeak.engines` pulls in every engine
+    module, which the tests that never open one should not pay for.
+    """
+    from elvenspeak import engines, models
+
+    return models.declared_by(name, engines.ENGINES)
+
+
+#: A served set for the parse tests, which carry it through `configure` without
+#: ever looking at it. Deliberately not a real engine's: what the set *contains*
+#: is `models.declared_by`'s contract and is asserted there, and a parse test that
+#: named piper's ids would fail the day piper declared one more.
+SERVES = frozenset({"an-engine"})
+
+
 def kokoro_prepared(
     models_dir: Path = MODELS_DIR,
     *,
@@ -228,6 +252,7 @@ def kokoro_prepared(
             "KOKORO_ALLOW_DOWNLOAD": "1" if allow_download else "0",
         },
         frozenset(),
+        serves("kokoro"),
     )
 
 
@@ -259,12 +284,33 @@ def piper_prepared(
         # whichever engine is running — so a test asking Piper not to build
         # alignments now says it the way a deployment does.
         frozenset() if timings else frozenset({Capability.TIMESTAMPS}),
+        serves("piper"),
     )
+
+#: What a stand-in engine answers to by `model_id`, in the shape a real one does:
+#: its own name, plus a foreign id it declares a mapping for. Every voice below
+#: carries it, because a voice whose server names no model id is unreachable by
+#: engine — which is a state worth being able to build deliberately and a bad one
+#: to inherit by default.
+#: `declared` is the name the settings these voices are served under carry, so the
+#: stand-in agrees with itself about which engine it is — a deployment whose
+#: `engine_name` and whose voices named different engines could not exist.
+DECLARED_MODELS = frozenset({"declared", "eleven_fake_v1"})
 
 #: Two, so that "every voice the engine offers" is a claim about more than one.
 DECLARED_VOICES = (
-    Voice(id="fake-voice", name="Fake", description="a test engine's voice"),
-    Voice(id="fake-voice-two", name="Fake Two", description="its other voice"),
+    Voice(
+        id="fake-voice",
+        name="Fake",
+        description="a test engine's voice",
+        models=DECLARED_MODELS,
+    ),
+    Voice(
+        id="fake-voice-two",
+        name="Fake Two",
+        description="its other voice",
+        models=DECLARED_MODELS,
+    ),
 )
 
 #: Audio per character of text, at [`_DECLARED_RATE`]. Arbitrary: what matters is
@@ -282,8 +328,18 @@ def declaring(
     The ordinary case, and what the real single-engine implementations do: every
     voice piper opens was opened the same way, so they all say the same thing. An
     engine whose voices genuinely differ builds them separately instead.
+
+    Capabilities only. Which `model_id` values reach a voice is carried on the
+    voice a caller passes in — a fleet's whole point is that its backends answer
+    to different ones, so a helper that stamped a single set over them would erase
+    the difference every router test is looking for.
     """
     return tuple(replace(voice, capabilities=capabilities) for voice in voices)
+
+
+def answering(models: frozenset[str]) -> tuple[Voice, ...]:
+    """The stand-in voices, as a server that answers to `models` would publish them."""
+    return tuple(replace(voice, models=models) for voice in DECLARED_VOICES)
 
 
 class DeclaredEngine:

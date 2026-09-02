@@ -219,6 +219,11 @@ class _Prepared:
     #: by [`acquire`], which fetches by definition — see its docstring.
     allow_download: bool
     timings: bool
+    #: Every `model_id` this deployment answers to, stamped onto each voice beside
+    #: its capabilities and for the same reason — it is a fact about what will
+    #: speak. Arrives from [`configure`] because the name it was derived from is
+    #: the key this module is registered under, which this module never learns.
+    serves: frozenset[str]
 
     def acquire(self) -> tuple[engine.Voice, ...]:
         """Puts every configured voice on disk, and says what they turned out to be.
@@ -233,7 +238,7 @@ class _Prepared:
         return tuple(
             replace(ready.voice, capabilities=self.capabilities())
             for ready in _install(
-                self.keys, self.models_dir, allow_download=True
+                self.keys, self.models_dir, True, self.serves
             ).values()
         )
 
@@ -262,7 +267,7 @@ class _Prepared:
 
         installed: dict[str, _Installed] = {}
         for key, ready in _install(
-            self.keys, self.models_dir, self.allow_download
+            self.keys, self.models_dir, self.allow_download, self.serves
         ).items():
             _LOGGER.info("loading voice %s", key)
             installed[key] = _Installed(
@@ -277,7 +282,9 @@ class _Prepared:
 
 
 def configure(
-    env: "Mapping[str, str]", withheld: frozenset[engine.Capability]
+    env: "Mapping[str, str]",
+    withheld: frozenset[engine.Capability],
+    serves: frozenset[str],
 ) -> _Prepared:
     """Reads Piper's own environment, or says everything wrong with it at once.
 
@@ -334,11 +341,15 @@ def configure(
         # TIMESTAMPS buys back, and it can only be unpatched by a session that
         # was never opened patched. Decided here, before anything is opened.
         timings=engine.Capability.TIMESTAMPS not in withheld,
+        serves=serves,
     )
 
 
 def _install(
-    keys: tuple[str, ...], models_dir: Path, allow_download: bool
+    keys: tuple[str, ...],
+    models_dir: Path,
+    allow_download: bool,
+    serves: frozenset[str],
 ) -> dict[str, _Ready]:
     """Makes every named voice present and readable, and says what they are.
 
@@ -391,7 +402,7 @@ def _install(
                     f"downloading voice {key!r} into {models_dir} did not produce "
                     f"both {model_path.name} and {config_path.name}"
                 )
-        voice, sample_rate = _describe(key, model_path)
+        voice, sample_rate = _describe(key, model_path, serves)
         ready[key] = _Ready(
             voice=voice, sample_rate=sample_rate, model_path=model_path
         )
@@ -437,7 +448,9 @@ def _separates_words(phoneme: str) -> bool:
     return phoneme.isspace() or phoneme in _BOUNDARY_PHONEMES
 
 
-def _describe(key: str, model_path: Path) -> tuple[engine.Voice, int]:
+def _describe(
+    key: str, model_path: Path, serves: frozenset[str]
+) -> tuple[engine.Voice, int]:
     """Reads a voice's metadata, and the rate its samples will really have.
 
     From the `.onnx.json` beside the weights rather than from the remote catalog,
@@ -503,6 +516,7 @@ def _describe(key: str, model_path: Path) -> tuple[engine.Voice, int]:
                 ("engine", "piper"),
                 ("speakers", str(int(config.get("num_speakers") or 1))),
             ),
+            models=serves,
         ),
         int(rate),
     )
