@@ -95,6 +95,23 @@ class RemoteRefusal(RemoteFailure):
         self.status = status
 
 
+class RemoteSilence(RemoteRefusal):
+    """A backend's refusal that the backend itself stamped as [`engine.Silence`].
+
+    [LAW:types-are-the-program] The discriminator lives in the type rather than in
+    a status number every reader has to interpret, so [`_heard`] has nothing to
+    decide: the one place that holds the response ([`_request`]) is the one place
+    that classifies it, and everything above reads the class.
+
+    Narrower than "the backend answered 502" on purpose. 502 is what any proxy,
+    ingress or sidecar in the path says when it cannot reach what is behind it,
+    and translating one of those into silence would report a mute engine to an
+    operator whose engine is fine and whose network is not. Only a response
+    carrying [`engine.Silence.WIRE_HEADER`] — which nothing but
+    [`elvenspeak.api`]'s own handler writes — is that fact.
+    """
+
+
 def _read_json(
     url: str, body: dict | None, timeout: float, api_key: str | None = None
 ) -> Any:
@@ -155,20 +172,19 @@ def _request(
         # never having reached it. That is what it did until 7e2.12 was verified
         # against the cluster, and it is why a routed request met a backend's 502
         # as a bare 500.
-        raise RemoteRefusal(refusal.code, f"{url}: {refusal}") from None
+        #
+        # [LAW:parse-dont-validate] Which class is decided here and only here,
+        # because this is the last frame that still holds the response and can
+        # see its headers at all. Above this the answer is a type, and no caller
+        # re-reads a status to work out what it meant.
+        refused = (
+            RemoteSilence
+            if engine.Silence.WIRE_HEADER in refusal.headers
+            else RemoteRefusal
+        )
+        raise refused(refusal.code, f"{url}: {refusal}") from None
     except TRANSPORT_FAILURES as failure:
         raise RemoteFailure(f"{url}: {failure}") from None
-
-
-#: The status an elvenspeak server answers when its engine produced no audio.
-#:
-#: [LAW:one-source-of-truth] Read back into [`elvenspeak.engine.Silence`] rather
-#: than matched on the body's wording, because the status IS the wire spelling of
-#: that type: 502 is written in exactly one place in [`elvenspeak.api`], the
-#: handler for it. Parsing the number keeps one decision about what silence means
-#: on both sides of the wire, where a substring check of the detail would be a
-#: second, weaker copy that the first rewording of that sentence would break.
-_SILENT_STATUS = 502
 
 
 def _heard(call: Callable[[], Any], voice: engine.Voice, text: str) -> Any:
@@ -184,15 +200,14 @@ def _heard(call: Callable[[], Any], voice: engine.Voice, text: str) -> Any:
     `_audible_pcm` routes through `_audible`: two spellings of one rule drift,
     and the direction they drift in is one path quietly keeping the bare 500.
 
-    Any other refusal stays a [`RemoteRefusal`]. A backend answering 404 or 401
-    is not silent, and reporting it as silence would invent a diagnosis — the
-    same lie in the other direction.
+    Any other refusal stays a [`RemoteRefusal`] and travels on untouched. A
+    backend answering 404 or 401 is not silent, and neither is a proxy answering
+    502 about a backend it could not reach; reporting either as silence would
+    invent a diagnosis — the same lie in the other direction.
     """
     try:
         return call()
-    except RemoteRefusal as refusal:
-        if refusal.status != _SILENT_STATUS:
-            raise
+    except RemoteSilence:
         # Rebuilt here rather than relayed out of the backend's body: the message
         # a caller reads is `Silence`'s to write, so a routed answer and a direct
         # one read alike and there is one sentence to change if it ever changes.

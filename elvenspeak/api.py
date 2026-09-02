@@ -437,9 +437,19 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         sentence: that endpoint's status line is committed when the
         `StreamingResponse` is constructed, before the body is advanced at all.
         Silence there aborts the response instead of answering it.
+
+        [`Silence.WIRE_HEADER`] is what makes the 502 recognisable as *this*
+        answer rather than as any 502. A router in front of a fleet reads it back
+        into `Silence`; the status alone could not tell this response apart from
+        one an ingress or sidecar wrote about a backend it could not reach, and
+        guessing wrong there names the wrong system at 3 a.m.
         """
         _LOGGER.error("%s", error)
-        return JSONResponse(status_code=502, content={"detail": str(error)})
+        return JSONResponse(
+            status_code=502,
+            headers={Silence.WIRE_HEADER: "1"},
+            content={"detail": str(error)},
+        )
     # The capabilities are logged because nothing else tells an operator why a
     # request came back refused or a parameter came back ignored. The 501 used to
     # carry that explanation itself, in the form of a Piper environment variable

@@ -24,6 +24,8 @@ from contextlib import ExitStack
 import fleet
 import pytest
 from conftest import DECLARED_VOICES, DeclaredEngine, DeclaredPrepared, declaring
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from elvenspeak import api, kokoro, remote
@@ -337,7 +339,7 @@ def _remote_to(url: str) -> remote.Remote:
 
 
 def test_a_routed_stream_reports_the_backend_s_silence_as_silence():
-    """[LAW:parse-dont-validate] 502 is the wire spelling of `Silence`, parsed back.
+    """[LAW:parse-dont-validate] The stamped 502 is parsed back into `Silence`.
 
     The router raises exactly what a local engine raises, so the one handler in
     [`elvenspeak.api`] answers a routed silence without knowing it was routed.
@@ -383,8 +385,9 @@ def test_a_backend_that_refuses_for_another_reason_is_not_called_silent():
     """[LAW:no-silent-failure] The narrowness, again, in the other direction.
 
     A backend refusing an unauthenticated caller has not gone mute, and reporting
-    it as silence would invent a diagnosis. Only 502 -- which `elvenspeak.api`
-    writes in exactly one place, the `Silence` handler -- crosses back.
+    it as silence would invent a diagnosis. Only a response stamped with
+    `Silence.WIRE_HEADER` -- which `elvenspeak.api` writes in exactly one place,
+    the `Silence` handler -- crosses back.
 
     A guarded backend rather than an unknown voice, because an unknown voice is
     not a refusal at all: the fleet's fallback resolves it to a real one and the
@@ -402,6 +405,38 @@ def test_a_backend_that_refuses_for_another_reason_is_not_called_silent():
             _remote_to(url).speak_timed(VOICE, "hi", Prosody(speed=1.0))
     assert not isinstance(refused.value, engine_mod.Silence)
     assert refused.value.status == 401
+
+
+def test_an_unstamped_502_from_the_path_is_not_called_silent():
+    """A proxy's 502 is about reaching the backend, not about the engine speaking.
+
+    [LAW:one-source-of-truth] The third fact the status alone cannot separate, and
+    the one that made reading 502 as silence unsound: an ingress, sidecar or load
+    balancer between the router and a backend answers 502 for its own reasons, and
+    nothing in the number distinguishes that from a mute engine. Told apart here
+    by the stamp `elvenspeak.api` writes and no intermediary does, so the answer
+    stops depending on what happens to be deployed in the path.
+
+    Standing in for the proxy with a bare app rather than asserting the topology
+    has none: what is deployed between two of these processes is home-infra's to
+    decide and can change without this repository changing, which is exactly why
+    the guarantee has to live in the response instead of in a comment about the
+    cluster.
+    """
+    proxy = FastAPI()
+
+    @proxy.api_route("/{_path:path}", methods=["GET", "POST"])
+    async def _unreachable(_path: str) -> JSONResponse:
+        return JSONResponse(status_code=502, content={"detail": "upstream refused"})
+
+    with ExitStack() as stack:
+        with pytest.raises(remote.RemoteFailure) as refused:
+            _remote_to(stack.enter_context(fleet.serving(proxy))).speak_timed(
+                VOICE, "hi", Prosody(speed=1.0)
+            )
+    assert not isinstance(refused.value, engine_mod.Silence)
+    assert not isinstance(refused.value, remote.RemoteSilence)
+    assert refused.value.status == 502
 
 
 def test_a_backend_that_cannot_be_reached_is_not_called_silent():
