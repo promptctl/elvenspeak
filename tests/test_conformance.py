@@ -52,6 +52,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 
 import pytest
 from conftest import (
+    declaring,
     DECLARED_VOICES,
     INSTALLED_VOICE,
     MODELS_DIR,
@@ -139,11 +140,11 @@ def router_engine() -> Iterator[Engine]:
 #: of them one way ([LAW:dataflow-not-control-flow]).
 ENGINES = [
     pytest.param(
-        lambda: nullcontext(DeclaredEngine(frozenset(Capability))),
+        lambda: nullcontext(DeclaredEngine(declaring(frozenset(Capability)))),
         id="declares-everything",
     ),
     pytest.param(
-        lambda: nullcontext(DeclaredEngine(frozenset())), id="declares-nothing"
+        lambda: nullcontext(DeclaredEngine(declaring(frozenset()))), id="declares-nothing"
     ),
     pytest.param(piper_engine, id="piper"),
     pytest.param(kokoro_engine, id="kokoro"),

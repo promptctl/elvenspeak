@@ -420,3 +420,43 @@ def test_every_problem_in_this_engine_s_configuration_is_reported_together():
     assert len(raised.value.problems) == 3
     for expected in ("PIPER_VOICES", "PIPER_MODELS_DIR", "PIPER_ALLOW_DOWNLOAD"):
         assert expected in joined
+
+
+def test_every_voice_a_multi_voice_deployment_opens_declares_the_same_thing(tmp_path):
+    """`open()` stamps one set over a loop, and one voice is not evidence.
+
+    Every other capability test in this file opens a single voice, so `declared()`
+    — a union — is trivially that voice's own set, and a stamp that reached only
+    the first of several would pass all of them. The published piper image bakes
+    three voices, so the multi-voice case is the deployed one.
+    """
+    make_voice(tmp_path, key="en_US-lessac-medium")
+    make_voice(tmp_path, key="en_GB-alba-medium")
+    keys = ("en_US-lessac-medium", "en_GB-alba-medium")
+
+    engine = piper_prepared(tmp_path, voices=keys, timings=True).open()
+
+    offered = engine.voices()
+    assert len(offered) == len(keys)
+    assert all(Capability.TIMESTAMPS in voice.capabilities for voice in offered)
+    assert all(Capability.SPEED in voice.capabilities for voice in offered)
+
+
+def test_the_voices_a_build_reports_declare_what_the_ones_it_boots_will(tmp_path):
+    """[FRAMING:representation] Two descriptions of one voice, kept true together.
+
+    `acquire` and `open` both hand back `Voice`s, and a `Voice` now states what
+    speaking in it really does. They came from one derivation, so a build cannot
+    describe a voice as capability-less that boots able to measure — which is what
+    it did while only `open` stamped them.
+    """
+    make_voice(tmp_path, key="en_US-lessac-medium")
+    prepared = piper_prepared(
+        tmp_path, voices=("en_US-lessac-medium",), timings=True
+    )
+
+    baked = {voice.id: voice.capabilities for voice in prepared.acquire()}
+    booted = {voice.id: voice.capabilities for voice in prepared.open().voices()}
+
+    assert baked == booted
+    assert Capability.TIMESTAMPS in baked["en_US-lessac-medium"]

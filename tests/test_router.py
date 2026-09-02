@@ -319,7 +319,18 @@ def test_a_backend_that_cannot_describe_itself_fails_the_boot_by_name():
 
     @stale.get("/v1/voices")
     def voices() -> dict:
-        return {"voices": [{"voice_id": "ancient", "name": "Ancient"}]}
+        # Its voices are well-formed and declare their capabilities; what it lacks
+        # is `/v1/models`. Otherwise the boot fails at the voice check first and
+        # this stops testing the thing it names.
+        return {
+            "voices": [
+                {
+                    "voice_id": "ancient",
+                    "name": "Ancient",
+                    "capabilities": ["speed"],
+                }
+            ]
+        }
 
     with serving(stale) as backend, serving(
         registered_consul([Registered(service="elvenspeak-ancient", base_url=backend)])
@@ -327,7 +338,13 @@ def test_a_backend_that_cannot_describe_itself_fails_the_boot_by_name():
         with pytest.raises(ConfigError) as raised:
             opened(consul)
 
-    assert "elvenspeak-ancient" in str(raised.value)
+    message = str(raised.value)
+    assert "elvenspeak-ancient" in message
+    # Pinned to the endpoint this test is named for. The voices check runs first,
+    # so a fixture whose voices were also malformed would fail here for the wrong
+    # reason and leave the `/v1/models` path uncovered — which is what happened
+    # when per-voice capabilities became mandatory.
+    assert "what engine it runs" in message
 
 
 def test_a_backend_that_dies_mid_answer_fails_the_boot_by_name():

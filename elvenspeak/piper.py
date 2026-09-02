@@ -231,25 +231,34 @@ class _Prepared:
         The lifecycle moment is carried by which method the caller reached for.
         """
         return tuple(
-            ready.voice
+            replace(ready.voice, capabilities=self.capabilities())
             for ready in _install(
                 self.keys, self.models_dir, allow_download=True
             ).values()
+        )
+
+    def capabilities(self) -> frozenset[engine.Capability]:
+        """What every voice this deployment opens will declare.
+
+        [LAW:one-source-of-truth] Read by both lifecycle methods rather than
+        computed in each. A `Voice` now states what speaking in it really does, so
+        the voices [`acquire`] describes have to say the same thing as the ones
+        [`open`] serves — two spellings of one derivation would let a build report
+        a voice that boots differently.
+
+        `include_alignments` patches the graph at load time, so this is decided by
+        the flag those sessions will be opened under. Every Piper voice in one
+        process is opened the same way, so they all carry the same set.
+        """
+        return _INHERENT | (
+            frozenset({engine.Capability.TIMESTAMPS}) if self.timings else frozenset()
         )
 
     def open(self) -> PiperEngine:
         """Opens every configured voice and returns the engine that speaks them."""
         from piper import PiperVoice
 
-        # Settled here, beside the loop that opens the sessions, rather than
-        # recomputed later from the setting that produced it: `include_alignments`
-        # patches the graph at load time, so these particular sessions are the only
-        # thing that knows whether durations can be reported. Every Piper voice in
-        # one process is opened the same way, so they all carry the same set — the
-        # per-voice shape costs nothing here and is what a router needs.
-        capabilities = _INHERENT | (
-            {engine.Capability.TIMESTAMPS} if self.timings else frozenset()
-        )
+        capabilities = self.capabilities()
 
         installed: dict[str, _Installed] = {}
         for key, ready in _install(
@@ -257,7 +266,7 @@ class _Prepared:
         ).items():
             _LOGGER.info("loading voice %s", key)
             installed[key] = _Installed(
-                voice=replace(ready.voice, capabilities=frozenset(capabilities)),
+                voice=replace(ready.voice, capabilities=capabilities),
                 sample_rate=ready.sample_rate,
                 model=PiperVoice.load(
                     str(ready.model_path), include_alignments=self.timings

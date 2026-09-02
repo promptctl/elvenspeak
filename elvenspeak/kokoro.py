@@ -227,13 +227,15 @@ class _Prepared:
         passes every file check there is, and the build is the last moment that
         failure is cheap.
 
-        The session is discarded. What is wanted from it is that building it
-        succeeded.
+        The session is discarded once it has answered. What is wanted from it is
+        that building it succeeded — and, since a `Voice` states what speaking in
+        it really does, what the export turned out to be capable of: the voices
+        this reports have to say the same thing as the ones [`open`] serves.
         """
-        _, installed, _ = _open(
+        model, installed, _ = _open(
             self.keys, self.models_dir, self.model, allow_download=True
         )
-        return tuple(installed.values())
+        return tuple(_declaring(model, installed).values())
 
     def open(self) -> KokoroEngine:
         """Opens the export and returns the engine that speaks every named voice."""
@@ -246,17 +248,30 @@ class _Prepared:
         # only thing that knows, and an engine holding the filename instead would
         # keep answering for the filename. Every voice this export speaks is spoken
         # by that one session, so they all carry the same set.
-        capabilities = _INHERENT | (
-            {engine.Capability.TIMESTAMPS} if model.has_timings else frozenset()
-        )
         return KokoroEngine(
             model,
-            {
-                key: replace(voice, capabilities=frozenset(capabilities))
-                for key, voice in installed.items()
-            },
+            _declaring(model, installed),
             sample_rate=sample_rate,
         )
+
+
+def _declaring(model: "Kokoro", installed: dict[str, engine.Voice]) -> dict[str, engine.Voice]:
+    """`installed`, every voice declaring what this export can actually do.
+
+    [LAW:one-source-of-truth] Read by both lifecycle methods rather than computed
+    in each: whether durations can be reported is a property of the export's graph
+    outputs, so the opened session is the only thing that knows, and a build that
+    derived it separately could describe a voice that boots differently.
+
+    Every voice is spoken by that one session, so they all carry the same set.
+    """
+    capabilities = _INHERENT | (
+        frozenset({engine.Capability.TIMESTAMPS}) if model.has_timings else frozenset()
+    )
+    return {
+        key: replace(voice, capabilities=capabilities)
+        for key, voice in installed.items()
+    }
 
 
 def configure(

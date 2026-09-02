@@ -274,6 +274,18 @@ _SAMPLES_PER_CHARACTER = 100
 _DECLARED_RATE = 22050
 
 
+def declaring(
+    capabilities: frozenset[Capability], voices: tuple[Voice, ...] = DECLARED_VOICES
+) -> tuple[Voice, ...]:
+    """`voices`, every one of them declaring `capabilities`.
+
+    The ordinary case, and what the real single-engine implementations do: every
+    voice piper opens was opened the same way, so they all say the same thing. An
+    engine whose voices genuinely differ builds them separately instead.
+    """
+    return tuple(replace(voice, capabilities=capabilities) for voice in voices)
+
+
 class DeclaredEngine:
     """An engine that does exactly what it was told to declare, and nothing more.
 
@@ -292,27 +304,21 @@ class DeclaredEngine:
     the collision, never the routing, so proving a voice reached *its own* engine
     means two stand-ins that differ in what they offer.
 
+    It takes finished voices rather than a capability set to spread over them,
+    because a set cannot say "this voice declares nothing" and "this voice was not
+    given an answer" apart — both are `frozenset()`. Reading emptiness as "inherit
+    the engine's set" made an engine whose default is generous and whose one odd
+    voice is capability-less inexpressible, and silently promoted that voice
+    instead ([LAW:types-are-the-program]). [`declaring`] is the common case; a
+    voice that differs is simply built differently.
+
     Honest in both directions, which is what lets it stand as a subject of the
     conformance suite rather than only as a foil for the API's headers: what it
     declares, it really does, and what it does not declare, it really refuses.
     """
 
-    def __init__(
-        self,
-        capabilities: frozenset[Capability],
-        voices: tuple[Voice, ...] = DECLARED_VOICES,
-    ) -> None:
-        self._capabilities = capabilities
-        # `capabilities` is what a voice does *unless it says otherwise*: one rule
-        # applied to every voice, so an engine whose voices differ is expressed by
-        # the voices differing rather than by a second way of building one. Stamp
-        # the voice that diverges, leave the rest, and set this to what the rest
-        # should have. [LAW:one-type-per-behavior] — what varies between the
-        # engines these tests need is a value, and this is the richer value.
-        self._voices = tuple(
-            voice if voice.capabilities else replace(voice, capabilities=capabilities)
-            for voice in voices
-        )
+    def __init__(self, voices: tuple[Voice, ...]) -> None:
+        self._voices = voices
 
     def voices(self) -> tuple[Voice, ...]:
         return self._voices
@@ -386,7 +392,7 @@ class DeclaredPrepared:
         return ()
 
     def open(self) -> DeclaredEngine:
-        return DeclaredEngine(self.capabilities)
+        return DeclaredEngine(declaring(self.capabilities))
 
 
 def _silence(samples: int) -> Iterator[bytes]:

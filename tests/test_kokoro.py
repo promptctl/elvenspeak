@@ -48,8 +48,8 @@ def test_the_export_that_reports_durations_declares_it(engine):
     """The default deployment, whose export carries a `duration` output."""
     # Per voice, not merely somewhere in the union: `open()` claims every voice
     # this export speaks carries the same set, and a stamp applied to only one of
-    # the four would satisfy `declared()` while leaving three voices silently
-    # incapable.
+    # the voices this fixture loads would satisfy `declared()` while leaving the
+    # rest silently incapable.
     assert all(Capability.TIMESTAMPS in v.capabilities for v in engine.voices())
     assert all(Capability.SPEED in v.capabilities for v in engine.voices())
 
@@ -520,9 +520,19 @@ def test_acquire_describes_what_it_installed(kokoro_installed):
     An engine that cannot describe what it installed has not installed it, and
     the build is the last moment that failure is cheap.
     """
-    voices = kokoro_prepared().acquire()
+    prepared = kokoro_prepared()
+    voices = prepared.acquire()
 
     assert [voice.id for voice in voices] == list(KOKORO_VOICES)
+
+    # [FRAMING:representation] And it describes them the way they will boot. A
+    # `Voice` states what speaking in it really does, so a build that reported
+    # them capability-less while `open` serves them able to measure would be two
+    # descriptions of one voice, disagreeing.
+    assert {voice.id: voice.capabilities for voice in voices} == {
+        voice.id: voice.capabilities for voice in prepared.open().voices()
+    }
+    assert all(Capability.TIMESTAMPS in voice.capabilities for voice in voices)
 
 
 def test_a_voice_that_is_not_in_the_pack_is_caught_at_install(kokoro_installed):
