@@ -37,6 +37,7 @@ def settings_for(models_dir: Path, voices: tuple[str, ...] = (KEY,)) -> Settings
     return Settings(
         engine=piper_prepared(models_dir, voices=voices, allow_download=False),
         engine_name="piper",
+        known_engines=frozenset(ENGINES),
         withheld=frozenset(),
         fallback=Substitution.FIRST_OFFERED,
         api_key=None,
@@ -134,6 +135,7 @@ def test_an_engine_with_no_assets_bakes_nothing_and_says_so():
     settings = Settings(
         engine=DeclaredPrepared(),
         engine_name="declared",
+        known_engines=frozenset(ENGINES),
         withheld=frozenset(),
         fallback=Substitution.FIRST_OFFERED,
         api_key=None,

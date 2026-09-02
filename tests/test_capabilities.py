@@ -22,8 +22,9 @@ import pytest
 from conftest import DECLARED_VOICES, DeclaredEngine, DeclaredPrepared
 from fastapi.testclient import TestClient
 
-from elvenspeak import api
+from elvenspeak import api, models
 from elvenspeak.engine import Capability, Prosody, Speech, Voice
+from elvenspeak.engines import ENGINES
 from elvenspeak.settings import Settings
 
 VOICE = DECLARED_VOICES[0]
@@ -41,6 +42,9 @@ def _settings(withheld: frozenset[Capability] = frozenset()) -> Settings:
         # are about capabilities, and an engine with no declarations gets an
         # empty alias table rather than a failure.
         engine_name="declared",
+        # Named alongside every engine this build has, which is what makes a
+        # `model_id` naming one of *those* a refusal rather than a shrug.
+        known_engines=frozenset(ENGINES) | {"declared"},
         withheld=withheld,
         fallback=VOICE.id,
         api_key=None,
@@ -257,11 +261,19 @@ def test_withholding_what_the_engine_never_had_is_not_an_error():
 
 
 def listed(client: TestClient) -> set[str]:
-    """The capabilities `GET /v1/models` advertises for this deployment."""
+    """The capabilities `GET /v1/models` advertises for this deployment.
+
+    The engine's own entry is found by name rather than by being the only one.
+    It was the only one until `piper-routing-7e2.2`, and unpacking the response
+    with `entry, =` said so — a deployment whose engine declares foreign model
+    ids lists those beside it, and every assertion below would have failed on the
+    shape instead of on the property it is about.
+    """
     response = client.get("/v1/models")
     assert response.status_code == 200, response.text
-    entry, = response.json()
-    return set(entry["capabilities"])
+    entries = {entry["model_id"]: entry for entry in response.json()}
+    assert _settings().engine_name in entries, entries
+    return set(entries[_settings().engine_name]["capabilities"])
 
 
 def _timestamps_declined(client: TestClient) -> bool:
@@ -337,9 +349,24 @@ def test_the_listing_names_an_engine_this_module_has_never_heard_of():
     package mentions, because a listing that inferred the engine from anything it
     could recognise would answer correctly for `piper` and wrongly for the
     remote engine the router is going to hand it.
+
+    Exactly one entry, still: an engine that declares no foreign model ids
+    answers for its own name and nothing else, which is also what a deployment
+    of an engine written elsewhere looks like.
     """
     settings = replace(_settings(), engine_name="stentor")
     with TestClient(api.create_app(settings, DeclaredEngine(frozenset()))) as client:
-        entry, = client.get("/v1/models").json()
+        listing = client.get("/v1/models").json()
 
-    assert entry["model_id"] == "stentor"
+    assert [entry["model_id"] for entry in listing] == ["stentor"]
+
+
+def test_every_reach_says_what_it_honours():
+    """The coverage a lookup with a default would have hidden.
+
+    `_HONOURED_BY_REACH` decides whether `model_id` comes back named in
+    `x-elvenspeak-ignored`, and a fourth [`Reach`] added without an entry here
+    would inherit "not honoured" silently — the header claiming the field was
+    dropped for a request the router had just used it to steer.
+    """
+    assert set(api._HONOURED_BY_REACH) == set(models.Reach)

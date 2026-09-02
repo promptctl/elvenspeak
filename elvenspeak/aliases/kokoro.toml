@@ -38,6 +38,15 @@
 # An ID absent from this table is not an error: see `fallback` in settings and
 # the `x-elvenspeak-voice` response header, which names whatever actually spoke.
 
+# Which ElevenLabs `model_id` values reach this engine. Read by
+# `elvenspeak.models`; the engine is also always reachable by its own name, so
+# `kokoro` is not repeated here. `eleven_multilingual_v2` is the quality half of
+# ElevenLabs' range, which is what Kokoro is here — it sounds considerably
+# better than Piper and synthesises some twenty-five times slower. No id appears
+# in two engines' lists: a model id names an engine, so two claims on one id
+# have no answer, and `tests/test_aliases.py` refuses it before an image exists.
+elevenlabs_models = ["eleven_multilingual_v2"]
+
 [elevenlabs]
 # The nine voices from ElevenLabs' original default set, the ones most likely
 # to be hardcoded in a client written before voice pickers existed.

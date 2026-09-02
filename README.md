@@ -17,10 +17,11 @@ checked by a test:
 
 1. **A parameter that can be honoured, is.** `output_format` selects any of the
    28 published formats. `voice_id` selects a real voice. `voice_settings.speed`
-   changes the speech rate.
+   changes the speech rate. `model_id` selects the engine, when it names the one
+   this deployment runs.
 2. **A parameter that cannot be honoured is named back to you.** Nothing here
    has an equivalent of `stability` or `seed`, so those are dropped — and the
-   response carries `x-elvenspeak-ignored: model_id, seed, voice_settings.stability`
+   response carries `x-elvenspeak-ignored: seed, voice_settings.stability`
    so you learn it from the response instead of from the audio. The list is
    worked out per request from the engine behind the server, not written down
    anywhere: an engine that cannot vary its speaking rate adds
@@ -40,7 +41,7 @@ checked by a test:
 | `POST /v1/text-to-speech/{voice_id}/stream` | Audio arrives as it is synthesized. |
 | `POST /v1/text-to-speech/{voice_id}/with-timestamps` | Audio plus character timings. |
 | `POST /v1/text-to-speech/{voice_id}/stream/with-timestamps` | One JSON object per sentence. |
-| `GET /v1/models` | The engine this image was built with, and what it will honour. A bare array, as ElevenLabs returns. |
+| `GET /v1/models` | Every `model_id` this deployment accepts — the engine's own name, then the ElevenLabs ids that reach it — and what it will honour. A bare array, as ElevenLabs returns. |
 | `GET /v1/voices` | The voices installed here, in ElevenLabs' shape. |
 | `GET /v1/voices/{voice_id}` | One voice. 404 if it is not installed. |
 | `GET /v1/voices/settings/default` | ElevenLabs' documented defaults. |
@@ -86,6 +87,35 @@ Substitution is never invisible: every synthesis response carries
 `x-elvenspeak-voice` naming what actually spoke, and `x-elvenspeak-voice-requested` when
 that differs from what you asked for. `GET /v1/voices/{id}` does **not**
 substitute — discovery must only report what is really installed.
+
+### Model IDs, and which engine they reach
+
+On the real API `model_id` picks the synthesis model, so here it picks the
+engine — and an image holds exactly one engine, so there are three answers
+depending on what you named.
+
+- **It names the engine this deployment runs**, either by that engine's own
+  name (`piper`, `kokoro`) or by one of the ElevenLabs model ids that engine
+  declares. The request is served, and `model_id` is not in
+  `x-elvenspeak-ignored`.
+- **It names an engine this build has but this deployment is not running** —
+  `model_id: "kokoro"` sent to a piper deployment. That is a `422` quoting the
+  value and listing what this deployment does serve. It is never quietly
+  answered by the engine that is running: that would be a caller hearing a
+  different engine than the one they asked for, with nothing in the response
+  saying so.
+- **It names no engine here** — `eleven_turbo_v2`, or any other value. The
+  request is served, the voice decides as it does when `model_id` is omitted,
+  and `model_id` comes back in `x-elvenspeak-ignored`. Deliberately not a
+  `422`: every stock ElevenLabs client sends a `model_id`, and refusing the
+  unrecognised ones would turn most real callers away on their first request.
+
+Which ElevenLabs ids reach an engine is declared by that engine, in the same
+`elvenspeak/aliases/<engine>.toml` file that holds its voice aliases, under the
+top-level `elevenlabs_models` key. Piper declares `eleven_flash_v2_5` and
+`eleven_turbo_v2_5` — ElevenLabs' fast half, which is what piper is here — and
+kokoro declares `eleven_multilingual_v2`, the quality half. No id may be claimed
+by two engines; a test refuses that before any image is built.
 
 ### Timestamps, and what is measured
 
@@ -430,6 +460,3 @@ four cores, it synthesizes about 30 seconds of speech per second of compute.
 **No voice cloning, no voice library, no `DELETE /v1/voices/{id}`.** Those
 endpoints manage a hosted account's voices. There is no account here, and a
 stub that pretended to accept them would be a lie in the shape of an API.
-
-**No `model_id`.** A Piper voice *is* its model. Sending one is reported in
-`x-elvenspeak-ignored` rather than silently accepted.
