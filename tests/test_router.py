@@ -36,6 +36,27 @@ def opened(consul_url: str) -> router.RouterEngine:
     return router.configure({router.CONSUL_URL: consul_url}, NOTHING).open()
 
 
+def routed(consul_url: str) -> TestClient:
+    """A client on the whole server a routed deployment boots, not just its engine.
+
+    [LAW:one-source-of-truth] Written out once. Three tests need the same
+    `Settings`, and the copies were already drifting toward being edited
+    separately — a router's deployment settings are one fact about this project,
+    not one per test.
+    """
+    settings = Settings(
+        engine=router.configure({router.CONSUL_URL: consul_url}, NOTHING),
+        engine_name="router",
+        known_engines=frozenset(ENGINES),
+        withheld=NOTHING,
+        fallback=Substitution.FIRST_OFFERED,
+        api_key=None,
+        host="127.0.0.1",
+        port=0,
+    )
+    return TestClient(create_app(settings, settings.engine.open()))
+
+
 def test_the_fleets_voices_are_offered_as_one_engines():
     """The point of the whole epic: two deployments, one endpoint.
 
@@ -214,15 +235,45 @@ def test_each_voice_carries_what_its_own_backend_will_honour():
 def test_a_fleet_with_no_engines_boots_and_offers_nothing():
     """Not a refusal: a cluster that is still starting must not be a crash loop.
 
-    A router that discovered no engine has no voices, so its own `HEALTHCHECK` —
-    which requires voices — fails and nothing is ever routed to it. That is the
-    correct outcome and it is already enforced one layer down, so refusing here
-    as well would turn a transient state into an outage.
+    A router that discovered no engine has no voices and says so at `/health`,
+    which is what keeps it out of rotation until it finds them — see the test
+    below, which is the other half of this one and the reason refusing here would
+    turn a transient state into an outage.
+
+    This docstring used to say that outcome was "already enforced one layer
+    down", meaning the image's `HEALTHCHECK`. It was, and that layer is not the
+    one a Nomad deployment reads: on 2026-09-02 this exact state registered in
+    Consul as passing, because the cluster's check asked `/health` for a status
+    code and got 200. The claim was true about the wrong enforcer, and no test
+    covered the one that mattered.
     """
     with cluster() as consul:
         engine = opened(consul)
 
     assert engine.voices() == ()
+
+
+def test_a_router_that_found_no_engines_reports_itself_unfit_at_health():
+    """The half of the boot-ordering story that a cluster actually reads.
+
+    [LAW:no-silent-failure] `{"voices": []}` behind a 200 is an answer-shaped
+    void: "I can speak nothing" arrives in the same shape as "I am fine", and the
+    load balancer believes the shape. This is the regression test for the
+    2026-09-02 deploy, where all three allocations started in the same second,
+    the router looked before either engine had registered, and Consul marked it
+    passing — so it stayed in rotation, mute, and its thirty-attempt restart
+    budget never spent an attempt because nothing ever failed.
+
+    Asserted through the whole app rather than on the engine, because the defect
+    was never in discovery: `voices() == ()` was correct and the test above
+    already covered it. What was missing was the server saying so where a checker
+    looks.
+    """
+    with cluster() as consul, routed(consul) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json() == {"voices": []}
 
 
 def test_an_unreachable_consul_fails_the_boot_rather_than_finding_nothing():
@@ -271,17 +322,7 @@ def test_both_engines_are_reachable_through_one_endpoint():
     with cluster(
         ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", BETA_VOICES, EVERYTHING)
     ) as consul:
-        settings = Settings(
-            engine=router.configure({router.CONSUL_URL: consul}, NOTHING),
-            engine_name="router",
-            known_engines=frozenset(ENGINES),
-            withheld=NOTHING,
-            fallback=Substitution.FIRST_OFFERED,
-            api_key=None,
-            host="127.0.0.1",
-            port=0,
-        )
-        with TestClient(create_app(settings, settings.engine.open())) as client:
+        with routed(consul) as client:
             published = client.get("/v1/voices").json()["voices"]
             listed = [entry["voice_id"] for entry in published]
             spoken = {
@@ -496,17 +537,7 @@ def test_one_deployment_tells_the_truth_about_each_of_its_voices():
     with cluster(
         ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", BETA_VOICES, NOTHING)
     ) as consul:
-        settings = Settings(
-            engine=router.configure({router.CONSUL_URL: consul}, NOTHING),
-            engine_name="router",
-            known_engines=frozenset(ENGINES),
-            withheld=NOTHING,
-            fallback=Substitution.FIRST_OFFERED,
-            api_key=None,
-            host="127.0.0.1",
-            port=0,
-        )
-        with TestClient(create_app(settings, settings.engine.open())) as client:
+        with routed(consul) as client:
             timed = {
                 voice_id: client.post(
                     f"/v1/text-to-speech/{voice_id}/with-timestamps",
