@@ -700,6 +700,60 @@ def test_a_backend_that_names_no_model_ids_fails_the_boot(published, why):
     assert "named no models" in message, why
 
 
+@pytest.mark.parametrize(
+    "published, why",
+    [
+        ({}, "omits the field"),
+        ({"language": ""}, "publishes an empty code"),
+        ({"language": None}, "publishes a null"),
+    ],
+    ids=["absent", "empty", "null"],
+)
+def test_a_backend_that_names_no_language_fails_the_boot(published, why):
+    """The rolling deploy `piper-language-j1c.2` opens, held to the `models` bar.
+
+    A backend from before per-voice languages publishes voices carrying
+    `capabilities` and `models` — new enough to pass both checks above — and says
+    nothing about what its voices speak. There is no honest default: read as `""`,
+    the voice matches no caller's `language_code`, so the router narrows every
+    Spanish request onto an empty table, falls back to the whole fleet, and
+    reports `language_code` ignored for a backend that may well have baked the
+    Spanish voice this epic exists to reach. Silent, audible only as English
+    phonemes over Spanish words, and the same class of wrong answer the `models`
+    check refuses — so the boot stops here too, naming the backend.
+    """
+    mute = FastAPI()
+
+    @mute.get("/v1/models")
+    def models():
+        return [{"model_id": "mute", "capabilities": ["speed"]}]
+
+    @mute.get("/v1/voices")
+    def voices() -> dict:
+        return {
+            "voices": [
+                {
+                    "voice_id": "mute-one",
+                    "name": "Mute One",
+                    "capabilities": ["speed"],
+                    "models": ["mute"],
+                }
+                | published
+            ]
+        }
+
+    with serving(mute) as backend, serving(
+        registered_consul([Registered(service="elvenspeak-mute", base_url=backend)])
+    ) as consul:
+        with pytest.raises(ConfigError) as raised:
+            opened(consul)
+
+    message = str(raised.value)
+    assert "elvenspeak-mute" in message, why
+    assert "mute-one" in message, why
+    assert "named no language" in message, why
+
+
 # ------------------------------------------------- the engine axis, end to end
 #
 # `piper-routing-7e2.17`, whose symptoms were all measured against the running

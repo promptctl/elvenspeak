@@ -178,6 +178,79 @@ def test_an_unasked_for_parameter_is_never_reported():
         assert ignored(client) == ""
 
 
+#: A catalog that speaks two languages. Both directions of the language half need
+#: it: the honoured direction needs a voice that really speaks what was asked for,
+#: and the ignored direction needs a language no voice speaks while the catalog is
+#: otherwise perfectly usable — an engine with no Spanish at all can only test the
+#: second, and would pass with the honoured half wired to a constant.
+_HABLA = replace(
+    declaring(frozenset(Capability))[1], id="voz", name="Voz", language="es"
+)
+
+
+def _bilingual() -> TestClient:
+    """The surface over an engine offering English voices and one Spanish one.
+
+    The fallback stays `VOICE.id`, which is English, so the Spanish voice is only
+    ever reached by the language steering the resolution — never by being the only
+    thing installed.
+    """
+    return TestClient(
+        api.create_app(_settings(), DeclaredEngine((*declaring(frozenset(Capability)), _HABLA)))
+    )
+
+
+def spoke_with(client: TestClient, **body) -> tuple[str, str]:
+    """Which voice answered, and what the service said it could not honour."""
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE.id}/stream",
+        json={"text": "hola", **body},
+        params={"output_format": "pcm_22050"},
+    )
+    assert response.status_code == 200, response.text
+    return (
+        response.headers["x-elvenspeak-voice"],
+        response.headers.get("x-elvenspeak-ignored", ""),
+    )
+
+
+def test_a_language_the_catalog_speaks_steers_the_voice_and_goes_unreported():
+    """The half `_honoured` grew for `piper-language-j1c.2`, from the honest side.
+
+    Asserted together with `x-elvenspeak-voice` rather than alone, because the
+    header saying `language_code` was honoured is worth exactly as much as the
+    audio agreeing with it — and a `spoke` wired to "a language was named" would
+    say honoured while an English voice read the Spanish, which is the failure
+    this whole epic is about and the one that sounds fine.
+
+    The request names an English voice id and a Spanish language, which is the
+    shape a real caller sends: an agent's configured voice plus the language of
+    the reply. `es-MX` rather than `es`, so the normalisation is exercised where a
+    caller actually applies it and not only in `test_voices`.
+    """
+    with _bilingual() as client:
+        voice, unhonoured = spoke_with(client, language_code="es-MX")
+
+    assert voice == _HABLA.id
+    assert "language_code" not in unhonoured
+
+
+def test_a_language_nothing_speaks_is_reported_rather_than_refused():
+    """The other direction, and the reason `Catalog.speaking` falls back.
+
+    No voice here speaks German, so the request cannot be honoured — but it is
+    still answerable, and a 404 for a voice that is installed and was never the
+    problem would be the wrong answer. The service speaks with what it has and
+    names the field it dropped, which is rule 2 for a parameter no capability
+    gates.
+    """
+    with _bilingual() as client:
+        voice, unhonoured = spoke_with(client, language_code="de")
+
+    assert voice == VOICE.id
+    assert "language_code" in unhonoured
+
+
 @pytest.mark.parametrize("path", ["/with-timestamps", "/stream/with-timestamps"])
 def test_the_timestamp_endpoints_refuse_an_engine_that_cannot_measure(path):
     with served(Capability.SPEED) as client:
