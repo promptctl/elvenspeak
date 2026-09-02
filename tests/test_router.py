@@ -8,10 +8,12 @@ different program. The engines behind those servers are the existing
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+
 import pytest
 from fastapi import FastAPI, Response
 from fastapi.testclient import TestClient
-from fleet import Registered, cluster, consul_app, serving
+from fleet import Registered, cluster, engine_app, registered_consul, serving
 
 from elvenspeak import router
 from elvenspeak.api import create_app
@@ -150,6 +152,46 @@ def test_a_deployment_scaled_to_two_replicas_is_not_a_collision():
         assert b"".join(spoken.audio)
 
 
+def test_a_replica_still_loading_its_voices_is_not_routed_to():
+    """The whole path, against a deployment mid-rollout.
+
+    A replica that is registered but failing its check has not finished opening
+    its voices, so routing to it would 503 every clause of a conversation. The
+    filter that excludes it is one query parameter in `discovery`, and until this
+    test the router's own `open()` was never driven against a fleet where some
+    instances were unhealthy — `test_discovery` proved the parameter is honoured,
+    but nothing proved the router ends up with only the servers that can speak.
+
+    The unhealthy instance is a real server here, so a router that ignored the
+    filter would boot successfully and quietly include it, which is exactly the
+    failure this must not pass through.
+    """
+    with ExitStack() as running:
+        healthy = running.enter_context(
+            serving(engine_app("piper", ALPHA_VOICES, EVERYTHING))
+        )
+        loading = running.enter_context(
+            serving(engine_app("piper", BETA_VOICES, EVERYTHING))
+        )
+        consul = running.enter_context(
+            serving(
+                registered_consul(
+                    [
+                        Registered(service="elvenspeak-piper", base_url=healthy),
+                        Registered(
+                            service="elvenspeak-piper",
+                            base_url=loading,
+                            passing=False,
+                        ),
+                    ]
+                )
+            )
+        )
+        engine = opened(consul)
+        assert [voice.id for voice in engine.voices()] == ["alpha-one"]
+        assert b"".join(engine.speak(ALPHA_VOICES[0], "hello", Prosody()).audio)
+
+
 def test_capabilities_are_what_every_backend_will_honour():
     """Intersection, because one answer is given for every voice.
 
@@ -281,7 +323,7 @@ def test_a_backend_that_cannot_describe_itself_fails_the_boot_by_name():
         return {"voices": [{"voice_id": "ancient", "name": "Ancient"}]}
 
     with serving(stale) as backend, serving(
-        consul_app([Registered(service="elvenspeak-ancient", base_url=backend)])
+        registered_consul([Registered(service="elvenspeak-ancient", base_url=backend)])
     ) as consul:
         with pytest.raises(ConfigError) as raised:
             opened(consul)
@@ -312,7 +354,7 @@ def test_a_backend_that_dies_mid_answer_fails_the_boot_by_name():
         )
 
     with serving(truncating) as backend, serving(
-        consul_app([Registered(service="elvenspeak-broken", base_url=backend)])
+        registered_consul([Registered(service="elvenspeak-broken", base_url=backend)])
     ) as consul:
         with pytest.raises(ConfigError) as raised:
             opened(consul)
@@ -358,3 +400,57 @@ def test_a_router_installs_nothing_and_says_so():
     """
     prepared = router.configure({router.CONSUL_URL: "http://consul:8500"}, NOTHING)
     assert prepared.acquire() == ()
+
+
+@pytest.mark.parametrize(
+    "alignment",
+    [
+        '{"characters": ["a"], "character_end_times_seconds": [Infinity]}',
+        '{"characters": ["a"], "character_end_times_seconds": [1e305]}',
+        '{"characters": ["a"], "character_end_times_seconds": ["soon"]}',
+    ],
+    ids=["infinite", "overflows-the-multiply", "not-a-number"],
+)
+def test_a_timestamp_that_is_not_a_usable_number_fails_the_request(alignment):
+    """[LAW:no-silent-failure] Every unusable payload arrives as one named failure.
+
+    `round()` answers `OverflowError` for a non-finite value, which is neither a
+    `ValueError` nor a `TypeError` — so an infinity reached the caller as a raw
+    traceback out of a live synthesis rather than as the `RemoteFailure` this path
+    exists to raise. Both routes to one are covered: a literal `Infinity`, which
+    `json` parses without complaint as a non-standard extension, and an ordinary
+    huge value that overflows silently when multiplied by the sample rate.
+
+    The body is written as bytes rather than returned as a dict, and that is
+    load-bearing: FastAPI refuses to serialise a float infinity and answers 500,
+    so a stub built the ordinary way would never put the token on the wire and
+    this test would pass by exercising the unreachable-backend path instead —
+    green, and about something else entirely.
+    """
+    backend = FastAPI()
+
+    @backend.get("/v1/models")
+    def models():
+        return [{"model_id": "odd", "capabilities": ["speed", "timestamps"]}]
+
+    @backend.get("/v1/voices")
+    def voices():
+        return {"voices": [{"voice_id": "alpha-one", "name": "Alpha One"}]}
+
+    @backend.post("/v1/text-to-speech/{voice_id}/with-timestamps")
+    def timed(voice_id: str):
+        return Response(
+            content=(
+                '{"audio_base64": "AAAA", "alignment": '
+                + alignment
+                + ', "alignment_fidelity": "word-exact"}'
+            ),
+            media_type="application/json",
+        )
+
+    with serving(backend) as served, serving(
+        registered_consul([Registered(service="elvenspeak-odd", base_url=served)])
+    ) as consul:
+        engine = opened(consul)
+        with pytest.raises(RemoteFailure):
+            engine.speak_timed(ALPHA_VOICES[0], "hello", Prosody())

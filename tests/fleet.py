@@ -110,45 +110,76 @@ class Registered:
     passing: bool = True
 
 
-def consul_app(registered: list[Registered]) -> FastAPI:
-    """A Consul answering the two endpoints [`elvenspeak.discovery`] asks.
+def health_entry(host: str, port: int, service_address: str = "") -> dict:
+    """One instance in the shape Consul's health endpoint reports it.
 
-    Shaped after the real agent's replies, including the part that matters most
-    for the parsing: `Service.Address` is left empty here exactly as Consul leaves
-    it for a service that did not override its node's address, so the fallback to
-    `Node.Address` is exercised by the same fixture that exercises everything
-    else rather than only by a unit test that asserts it in isolation.
+    `Service.Address` defaults to empty exactly as the real agent leaves it for a
+    service that did not override its node's address, so the fallback to
+    `Node.Address` is the ordinary path here rather than a special case only one
+    test remembers to build.
     """
+    return {
+        "Node": {"Address": host},
+        "Service": {"Address": service_address, "Port": port},
+    }
+
+
+def consul_app(
+    catalog: dict[str, list[str]],
+    health: dict[str, list[dict]],
+    unhealthy: dict[str, list[dict]] | None = None,
+) -> FastAPI:
+    """The two endpoints [`elvenspeak.discovery`] asks, answering what it is told.
+
+    [LAW:one-source-of-truth] The one Consul-shaped fake. There were two — this
+    and a hand-written twin in `test_discovery` — and they drifted exactly as two
+    copies do: when the `?passing=true` filter turned out to be unverified, the
+    fix had to be made in both, and either could have been missed while the other
+    kept its file green. The endpoint shapes, the filter and the address fallback
+    are stated here, once, and both callers build on it.
+
+    `unhealthy` holds instances that exist but fail their check. Withheld when the
+    lookup filters to passing and returned when it does not, which is what makes
+    the filter observable at all.
+    """
+    failing = unhealthy or {}
     app = FastAPI()
 
     @app.get("/v1/catalog/services")
-    def catalog() -> dict:
-        return {entry.service: entry.tags for entry in registered} | {
-            # Something that is not ours, to prove the tag is what selects rather
-            # than the name looking familiar.
-            "elvenspeak-lookalike": [],
-            "gitea": ["vcs"],
-        }
+    def services() -> dict:
+        return catalog
 
     @app.get("/v1/health/service/{name}")
-    def health(name: str, passing: bool = False) -> list:
+    def instances(name: str, passing: bool = False):
         """Honours `passing` exactly as the real agent does.
 
-        Not decoration: `discovery` appends `?passing=true` so that only servers
-        whose voices are already open are routed to, and a stub that ignored the
-        parameter would let that be deleted from the URL with the whole suite
-        still green.
+        `discovery` appends `?passing=true` so that only servers whose voices are
+        already open are routed to. A stub that ignored the parameter would let
+        that be deleted from the URL with the whole suite still green.
         """
-        return [
-            {
-                "Node": {"Address": _host(entry.base_url)},
-                "Service": {"Address": "", "Port": _port(entry.base_url)},
-            }
-            for entry in registered
-            if entry.service == name and (entry.passing or not passing)
-        ]
+        listed = list(health.get(name, []))
+        return listed if passing else listed + list(failing.get(name, []))
 
     return app
+
+
+def registered_consul(registered: list[Registered]) -> FastAPI:
+    """A [`consul_app`] describing a fleet given as [`Registered`] services."""
+    catalog: dict[str, list[str]] = {
+        # Something that is not ours, to prove the tag is what selects rather than
+        # the name looking familiar.
+        "elvenspeak-lookalike": [],
+        "gitea": ["vcs"],
+    }
+    health: dict[str, list[dict]] = {}
+    unhealthy: dict[str, list[dict]] = {}
+    for entry in registered:
+        catalog[entry.service] = entry.tags
+        entries = health if entry.passing else unhealthy
+        entries.setdefault(entry.service, []).append(
+            health_entry(_host(entry.base_url), _port(entry.base_url))
+        )
+    return consul_app(catalog, health, unhealthy)
 
 
 def _host(base_url: str) -> str:
@@ -192,4 +223,4 @@ def cluster(
             for name, voices, capabilities in engines
             for _ in range(replicas)
         ]
-        yield stack.enter_context(serving(consul_app(registered)))
+        yield stack.enter_context(serving(registered_consul(registered)))

@@ -342,10 +342,14 @@ class Remote:
         try:
             pcm = base64.b64decode(published["audio_base64"])
             timings = _timings(published.get("alignment"), len(pcm) // 2)
-        except (ValueError, TypeError) as failure:
-            # Audio that will not decode, or timestamps that are not numbers, are
-            # this backend failing this request — the same thing an unreachable
-            # one is, from the caller's side. `binascii.Error` is a `ValueError`.
+        except (ValueError, TypeError, OverflowError) as failure:
+            # Audio that will not decode, or timestamps that are not usable
+            # numbers, are this backend failing this request — the same thing an
+            # unreachable one is, from the caller's side. `binascii.Error` is a
+            # `ValueError`; `OverflowError` is what `round()` answers for a
+            # non-finite timestamp, which `json` will happily parse from a literal
+            # `Infinity` and which an ordinary huge value reaches by overflowing
+            # the multiply silently.
             raise RemoteFailure(f"{url}: unreadable timed audio ({failure})") from None
         return engine.TimedSpeech(
             pcm=pcm,
