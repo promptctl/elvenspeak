@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from elvenspeak.engines import ENGINES
+
 REPO = Path(__file__).parent.parent
 DOCKERFILE = REPO / "Dockerfile"
 
@@ -308,3 +310,50 @@ def test_the_voice_bake_runs_a_module_that_exists_and_refuses_a_bad_environment(
         f"not 2\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
     assert "PORT" in result.stderr
+
+
+_ARG = re.compile(r"^\s*ARG\s+([A-Z_][A-Z0-9_]*)=(.*)$", re.MULTILINE)
+_ENV = re.compile(r"^\s*ENV\s+(.*)$", re.MULTILINE)
+
+
+def build_environment(engine_name: str) -> dict[str, str]:
+    """Everything an engine's `configure` can see while the image is being built.
+
+    The Dockerfile's `ARG` defaults and its `ENV` block, with `${...}` expanded
+    from the args exactly as Docker expands them. Derived from the file rather
+    than restated, so this cannot agree with a Dockerfile that has moved on
+    ([LAW:one-source-of-truth]).
+    """
+    import shlex
+
+    values = {name: value.strip('"') for name, value in _ARG.findall(instructions())}
+    values["ELVENSPEAK_ENGINE"] = engine_name
+    for assignments in _ENV.findall(instructions()):
+        for token in shlex.split(assignments):
+            name, _, raw = token.partition("=")
+            values[name] = re.sub(
+                r"\$\{([A-Z_][A-Z0-9_]*)\}", lambda m: values.get(m.group(1), ""), raw
+            )
+    return values
+
+
+@pytest.mark.parametrize("engine_name", sorted(ENGINES))
+def test_every_engine_can_be_configured_from_what_the_build_provides(engine_name):
+    """[LAW:verifiable-goals] The bake parses the whole environment before it runs.
+
+    `python -m elvenspeak.bake` calls `Settings.from_env(ENGINES)`, so an engine
+    whose `configure` requires a variable the Dockerfile never sets cannot be
+    built at all — the image fails on the bake step, in CI, on a matrix leg that
+    has no way to succeed. Nothing else in the suite could see that: every other
+    test either builds `Settings` directly or supplies its own environment.
+
+    This is the check that was missing when the router was added. Its `configure`
+    requires somewhere to ask, the Dockerfile set nothing, and `bake` exited 2 for
+    the router leg of every publish. Parametrized over the registry so the third
+    engine of this kind is caught before its first build rather than by it.
+    """
+    from elvenspeak.settings import Settings
+
+    # Parsing only. `configure` does no I/O — that is what `Prepared` is for — so
+    # this needs no models directory, no network and no engine library.
+    Settings.from_env(ENGINES, build_environment(engine_name))

@@ -13,14 +13,20 @@ same. It is a lookup in this table now, made once, and both entry points work
 from the result.
 
 Adding an engine is a line here, a same-named extra in `pyproject.toml`
-(`tests/test_packaging.py` fails without it), and three in `tests/`:
-`test_conformance.ENGINES` for the contract suite, `conftest.ENGINE_LIBRARIES`
-for the seam check, and its library in `test_encoding`'s positive control.
+(`tests/test_packaging.py` fails without it), a leg in the publish matrix
+(`tests/test_workflow.py` fails without it), and a case in
+`test_conformance.ENGINES` so the contract suite drives it.
+
+Two further edits are owed only by an engine that *has* a third-party library:
+its import name in `conftest.ENGINE_LIBRARIES` and that same name in
+`test_encoding`'s positive control, which proves the seam check can fail. The
+router has no library — it needs nothing beyond the base dependencies — so it
+appears in neither, and adding it to either would assert something untrue.
 """
 
 from __future__ import annotations
 
-from . import kokoro, piper
+from . import kokoro, piper, router
 from .provisioning import Registry
 
 #: [LAW:one-source-of-truth] The key is the engine's name; no entry repeats it.
@@ -31,4 +37,14 @@ from .provisioning import Registry
 #: this class of machine, Piper runs at RTF ~0.03 against Kokoro's ~0.77. Kokoro
 #: sounds considerably better, which is a deployment's choice to make and not one
 #: to inherit by being listed.
-ENGINES: Registry = {"piper": piper.configure, "kokoro": kokoro.configure}
+#:
+#: `router` is last and is an engine like any other: it satisfies the same
+#: protocol, is selected the same way, and is published as its own image. What it
+#: has instead of a model file is a fleet of other elvenspeak servers — which
+#: [`elvenspeak.engine`] always allowed, and this is the entry that collects on
+#: it.
+ENGINES: Registry = {
+    "piper": piper.configure,
+    "kokoro": kokoro.configure,
+    "router": router.configure,
+}

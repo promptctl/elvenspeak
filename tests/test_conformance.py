@@ -47,15 +47,21 @@ and there is no such property here.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+
 import pytest
 from conftest import (
+    DECLARED_VOICES,
     INSTALLED_VOICE,
     MODELS_DIR,
     DeclaredEngine,
     kokoro_prepared,
     piper_prepared,
 )
+from fleet import cluster
 
+from elvenspeak import router
 from elvenspeak.engine import Capability, Engine, Prosody, Voice
 
 #: One short utterance and one about ten times longer. Both are real sentences
@@ -74,19 +80,21 @@ LONG = (
 #: need no model, no network and no espeak-ng, would have waited on ~200 MB of
 #: downloads to make a noise in memory. Provisioning is something an engine that
 #: has assets does for itself, which is also what `Prepared.open` means.
-def piper_engine() -> Engine:
+def piper_engine() -> AbstractContextManager[Engine]:
     """The real thing, opened exactly as `main.build` opens it.
 
     Timings on, because a subject that declined the capability would take the
     conformance suite's most interesting property with it — and what an operator
     can turn off is not what the interface is being tested about.
     """
-    return piper_prepared(
-        MODELS_DIR, voices=(INSTALLED_VOICE,), timings=True, allow_download=True
-    ).open()
+    return nullcontext(
+        piper_prepared(
+            MODELS_DIR, voices=(INSTALLED_VOICE,), timings=True, allow_download=True
+        ).open()
+    )
 
 
-def kokoro_engine() -> Engine:
+def kokoro_engine() -> AbstractContextManager[Engine]:
     """The second real engine, opened exactly as `main.build` opens it.
 
     The default export, which reports durations. The export that does not is the
@@ -94,7 +102,25 @@ def kokoro_engine() -> Engine:
     being withheld — and this suite is about engines living up to what they
     declared, whichever set that is.
     """
-    return kokoro_prepared(MODELS_DIR, allow_download=True).open()
+    return nullcontext(kokoro_prepared(MODELS_DIR, allow_download=True).open())
+
+
+@contextmanager
+def router_engine() -> Iterator[Engine]:
+    """The router over a real elvenspeak server, opened as `main.build` opens it.
+
+    The third real engine, and the one whose conformance is least obvious: every
+    property below has to survive a round trip through HTTP, an encode to PCM and
+    a decode back, and — for the timed path — an alignment that was built from
+    the backend's durations and has to be turned back into durations here.
+
+    Its backend is the `DeclaredEngine` stand-in rather than Piper, because what
+    is under test is the *routing* keeping the contract, and a real model behind
+    it would only make the same assertions slower. That the fleet is real HTTP is
+    the part that matters, and it is real.
+    """
+    with cluster(("declared", DECLARED_VOICES, frozenset(Capability))) as consul:
+        yield router.configure({router.CONSUL_URL: consul}, frozenset()).open()
 
 
 #: Every engine this project can put behind the API surface, and the suite below
@@ -105,26 +131,41 @@ def kokoro_engine() -> Engine:
 #: as data made into a test fixture. `frozenset(Capability)` rather than the
 #: members spelled out, so a capability added to the enum is immediately claimed
 #: by a subject that then has to live up to it.
+#:
+#: Every entry hands back a context manager, because one of them has a lifetime:
+#: the router's engines are other servers, and they have to be running for as
+#: long as it is asked anything. An engine with nothing to tear down says so with
+#: `nullcontext` rather than by being a different shape, so `subject` builds all
+#: of them one way ([LAW:dataflow-not-control-flow]).
 ENGINES = [
     pytest.param(
-        lambda: DeclaredEngine(frozenset(Capability)), id="declares-everything"
+        lambda: nullcontext(DeclaredEngine(frozenset(Capability))),
+        id="declares-everything",
     ),
-    pytest.param(lambda: DeclaredEngine(frozenset()), id="declares-nothing"),
+    pytest.param(
+        lambda: nullcontext(DeclaredEngine(frozenset())), id="declares-nothing"
+    ),
     pytest.param(piper_engine, id="piper"),
     pytest.param(kokoro_engine, id="kokoro"),
+    pytest.param(router_engine, id="router"),
 ]
 
 
 @pytest.fixture(scope="module", params=ENGINES)
-def subject(request) -> Engine:
+def subject(request) -> Iterator[Engine]:
     """One engine under test, built once for the whole module.
 
     Building is the expensive part for a real one — Piper opens a 60 MB ONNX
     session, Kokoro a 114 MB one — and it is also the part the interface
     promises happens before anything is served, so paying it once here is
     faithful as well as cheap.
+
+    Entered rather than merely called, because the router's engines are other
+    processes and stopping them is part of building it. Every subject is entered
+    the same way whether or not it has anything to tear down.
     """
-    return request.param()
+    with request.param() as engine:
+        yield engine
 
 
 @pytest.fixture

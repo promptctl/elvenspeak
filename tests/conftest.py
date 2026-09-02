@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from elvenspeak import router
 from elvenspeak.engine import (
     Capability,
     Prosody,
@@ -52,6 +53,12 @@ _ENVIRONMENT = (
     "KOKORO_MODELS_DIR",
     "KOKORO_MODEL",
     "KOKORO_ALLOW_DOWNLOAD",
+    # Read from the module that owns the name rather than spelled again. Piper's
+    # and Kokoro's are literals here because those modules expose no constant to
+    # read; this one does, and a second spelling of it would stop clearing the
+    # real variable the day it changed ([LAW:one-source-of-truth]).
+    router.CONSUL_URL,
+    router.BACKEND_API_KEY,
     "HOST",
     "PORT",
 )
@@ -266,16 +273,26 @@ class DeclaredEngine:
     engines these tests need is a value, so it is passed as one — which is the
     same argument the interface itself makes, tested here by being relied upon.
 
+    The voice list is a value for the same reason, and the router is what needed
+    it: a fleet whose members all offer identical ids can only ever demonstrate
+    the collision, never the routing, so proving a voice reached *its own* engine
+    means two stand-ins that differ in what they offer.
+
     Honest in both directions, which is what lets it stand as a subject of the
     conformance suite rather than only as a foil for the API's headers: what it
     declares, it really does, and what it does not declare, it really refuses.
     """
 
-    def __init__(self, capabilities: frozenset[Capability]) -> None:
+    def __init__(
+        self,
+        capabilities: frozenset[Capability],
+        voices: tuple[Voice, ...] = DECLARED_VOICES,
+    ) -> None:
         self._capabilities = capabilities
+        self._voices = voices
 
     def voices(self) -> tuple[Voice, ...]:
-        return DECLARED_VOICES
+        return self._voices
 
     def capabilities(self) -> frozenset[Capability]:
         return self._capabilities
