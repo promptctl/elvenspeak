@@ -666,7 +666,7 @@ jobs:
           # on a branch before it lands, which is a real need — but proving a build and
           # blessing it as the default are different acts, and only prose used to separate
           # them. It was not enough: dispatching this branch during development published
-          # both images and moved both `:latest` aliases to an unreviewed commit, which
+          # every image and moved every `:latest` alias to an unreviewed commit, which
           # CLAUDE.md said was impossible. Now the ref decides, and a branch dispatch gets
           # its dated tag and cannot touch the alias. [LAW:types-are-the-program]
           # ---------------------------------------------------------------------------

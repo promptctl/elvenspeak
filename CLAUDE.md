@@ -27,9 +27,29 @@ The workflow is `.gitea/workflows/publish-image.yaml`, and it runs on every ref 
 
 Read a green branch run as exactly that and no more. `reachability` never builds the real Dockerfile: it reads line 1 for the `# syntax=` directive and checks the daemon covers the `--mount` kinds the Dockerfile uses, then builds a synthetic busybox image. A broken `RUN`, a missing apt package or a failed asset download is not caught there — the first real build of the Dockerfile is the one that publishes.
 
-To prove a Dockerfile change before it lands, dispatch the workflow on the branch. Know what that costs: it is a real publish, and it consumes a dated tag that is then spent forever. It does not move `:latest` — the tag step only adds that alias when the ref is `refs/heads/master`, so an unreviewed build cannot become what a break-glass `nomad job run` with no `-var` picks up. That guard is enforced in the workflow rather than asked for here, because during this pipeline's own development a branch dispatch published both images and moved both `:latest` aliases while this file claimed that was impossible.
+To prove a Dockerfile change before it lands, dispatch the workflow on the branch. Know what that costs: it is a real publish, and it consumes a dated tag that is then spent forever. It does not move `:latest` — the tag step only adds that alias when the ref is `refs/heads/master`, so an unreviewed build cannot become what a break-glass `nomad job run` with no `-var` picks up. That guard is enforced in the workflow rather than asked for here, because during this pipeline's own development a branch dispatch published every image and moved every `:latest` alias while this file claimed that was impossible.
 
-A publish produces two images, one per engine, because an image bakes that engine's assets and installs its Python extra: `elvenspeak-piper:YYYY.MM.DD.N` and `elvenspeak-kokoro:YYYY.MM.DD.N`, `:latest` only from master. The engine is in the image *name*; the tag is a pure date sequence, N read from what the registry has already published, never from a run number. Both tags then go into home-infra's `service-versions.auto.tfvars.json` under two service keys, one per image, and Atlantis deploys. CI holds no home-infra credential, so that last step is deliberately a human's.
+A publish produces one image per row of the `engine` matrix in `.gitea/workflows/publish-image.yaml`, because an image bakes that engine's assets and installs its Python extra. Today that matrix reads `[piper, kokoro, router]`, so a publish is three images — `elvenspeak-piper:YYYY.MM.DD.N`, `elvenspeak-kokoro:YYYY.MM.DD.N`, `elvenspeak-router:YYYY.MM.DD.N`, `:latest` only from master. Count them off the matrix rather than off this sentence: `tests/test_workflow.py` holds that list equal to `elvenspeak.engines.ENGINES`, so the matrix is the authority and the three names here are only its shadow — the day a fourth engine is added, this sentence is the thing that went stale, not the pipeline. The router rides the matrix even though it synthesizes nothing — its Python extra is deliberately empty, because its backends are other elvenspeak deployments. The engine is in the image *name*; the tag is a pure date sequence, N read from what the registry has already published, never from a run number.
+
+Every image's tag then goes into home-infra's `service-versions.auto.tfvars.json`, one service key per image — `elvenspeak-piper`, `elvenspeak-kokoro`, `elvenspeak-router` — and Atlantis deploys. CI holds no home-infra credential, so that last step is deliberately a human's.
+
+Move all of those keys in one commit. The three images are not independently deployable, and the router is the one that cannot lead: since `piper-routing-7e2.17` it asks each backend which models its voices speak, and a backend image older than that answers nothing, so `remote._voice` raises `ConfigError` while the router is still constructing itself. It never reaches the point of serving a request — it exits. Rehearse the moment, because it is the shape a careful deploy takes: you have the diff open, the router's own code did not change this cycle, and you think *"I'll bump the two engine keys and leave the router pinned — deploy only what changed."* That instinct is right nearly everywhere and wrong here, because the tags are not three independent versions; they are one fleet-wide handshake, and half of it does not answer. This is what a split rollout looks like:
+
+    WRONG — the router left behind:
+
+      "elvenspeak-piper":  "2026.09.14.1",   moved
+      "elvenspeak-kokoro": "2026.09.14.1",   moved
+      "elvenspeak-router": "2026.09.02.5",   pinned — an old router fronting new
+                                             backends, running none of the routing
+                                             the tag it is pinned to predates
+
+    RIGHT — one commit, one tag, every key:
+
+      "elvenspeak-piper":  "2026.09.14.1",
+      "elvenspeak-kokoro": "2026.09.14.1",
+      "elvenspeak-router": "2026.09.14.1",
+
+Observed, not theorised: at 2026.09.02.5 the router's first allocation exited 2 and restarted once, and it recovered only because all three keys had moved together.
 
 <!-- BEGIN LIT INTEGRATION -->
 ## lit Agent-Native Workflow
