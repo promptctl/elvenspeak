@@ -309,7 +309,7 @@ def test_models_listing_has_the_elevenlabs_shape(client):
     assert body[0]["can_do_text_to_speech"] is True
 
 
-def test_the_listing_names_every_model_id_the_service_will_accept():
+def test_the_listing_names_every_model_id_the_service_will_accept(client):
     """[LAW:one-source-of-truth] Advertised and accepted are one answer.
 
     The endpoint exists so a caller can find out what `model_id` values are legal
@@ -322,29 +322,28 @@ def test_the_listing_names_every_model_id_the_service_will_accept():
     two readers agreeing inside one object is not the property — the property is
     that the endpoint a caller reads and the gate a caller hits agree.
     """
-    with served(settings_for()) as client:
-        listed = [entry["model_id"] for entry in client.get("/v1/models").json()]
+    listed = [entry["model_id"] for entry in client.get("/v1/models").json()]
 
-        for model_id in listed:
-            response = client.post(
-                f"/v1/text-to-speech/{VOICE}/stream",
-                json={"text": "hello", "model_id": model_id},
-            )
-            assert response.status_code == 200, (model_id, response.text)
-            # Served means it chose the engine that spoke, so naming it as
-            # ignored would be the header lying about the one field this
-            # deployment did act on.
-            assert "model_id" not in response.headers.get("x-elvenspeak-ignored", "")
+    for model_id in listed:
+        response = client.post(
+            f"/v1/text-to-speech/{VOICE}/stream",
+            json={"text": "hello", "model_id": model_id},
+        )
+        assert response.status_code == 200, (model_id, response.text)
+        # Served means it chose the engine that spoke, so naming it as ignored
+        # would be the header lying about the one field this deployment did act
+        # on.
+        assert "model_id" not in response.headers.get("x-elvenspeak-ignored", "")
 
-        # The other engine and everything it claims are absent from both sides.
-        elsewhere = {"kokoro", *model_ids("kokoro")}
-        assert not elsewhere & set(listed)
+    # The other engine and everything it claims are absent from both sides.
+    elsewhere = {"kokoro", *model_ids("kokoro")}
+    assert not elsewhere & set(listed)
 
 
 @pytest.mark.parametrize(
     "path", ["", "/stream", "/with-timestamps", "/stream/with-timestamps"]
 )
-def test_asking_for_an_engine_this_deployment_is_not_running_is_refused(path):
+def test_asking_for_an_engine_this_deployment_is_not_running_is_refused(client, path):
     """The guarantee: that engine, or a refusal, never silently the other one.
 
     Parametrized over every synthesis endpoint because the gate is a line in each
@@ -352,16 +351,15 @@ def test_asking_for_an_engine_this_deployment_is_not_running_is_refused(path):
     added later without it would answer in Piper for a caller who asked for
     Kokoro, and the response would look exactly like success.
     """
-    with served(settings_for()) as client:
-        response = client.post(
-            f"/v1/text-to-speech/{VOICE}{path}",
-            json={"text": "hello", "model_id": "kokoro"},
-        )
-        assert response.status_code == 422, (path, response.text)
-        assert "kokoro" in response.text
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}{path}",
+        json={"text": "hello", "model_id": "kokoro"},
+    )
+    assert response.status_code == 422, (path, response.text)
+    assert "kokoro" in response.text
 
 
-def test_a_model_id_naming_no_engine_here_still_speaks():
+def test_a_model_id_naming_no_engine_here_still_speaks(client):
     """A stock ElevenLabs client sends a `model_id` on its very first request.
 
     Refusing the ones this deployment maps to nothing would reject most real
@@ -369,13 +367,12 @@ def test_a_model_id_naming_no_engine_here_still_speaks():
     which is what already happened when the field was omitted. The refusal above
     is for ids that name an engine, and this is the line between the two.
     """
-    with served(settings_for()) as client:
-        response = client.post(
-            f"/v1/text-to-speech/{VOICE}/stream",
-            json={"text": "hello", "model_id": "eleven_turbo_v2"},
-        )
-        assert response.status_code == 200, response.text
-        assert "model_id" in response.headers["x-elvenspeak-ignored"]
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}/stream",
+        json={"text": "hello", "model_id": "eleven_turbo_v2"},
+    )
+    assert response.status_code == 200, response.text
+    assert "model_id" in response.headers["x-elvenspeak-ignored"]
 
 
 def test_timestamps_cover_the_input_text(client):

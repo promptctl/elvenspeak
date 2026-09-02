@@ -135,7 +135,7 @@ def test_an_engine_with_no_assets_bakes_nothing_and_says_so():
     settings = Settings(
         engine=DeclaredPrepared(),
         engine_name="declared",
-        known_engines=frozenset(ENGINES),
+        known_engines=frozenset(ENGINES) | {"declared"},
         withheld=frozenset(),
         fallback=Substitution.FIRST_OFFERED,
         api_key=None,

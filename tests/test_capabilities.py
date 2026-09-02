@@ -354,7 +354,11 @@ def test_the_listing_names_an_engine_this_module_has_never_heard_of():
     answers for its own name and nothing else, which is also what a deployment
     of an engine written elsewhere looks like.
     """
-    settings = replace(_settings(), engine_name="stentor")
+    settings = replace(
+        _settings(),
+        engine_name="stentor",
+        known_engines=frozenset(ENGINES) | {"declared", "stentor"},
+    )
     with TestClient(api.create_app(settings, DeclaredEngine(frozenset()))) as client:
         listing = client.get("/v1/models").json()
 

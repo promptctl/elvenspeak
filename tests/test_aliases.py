@@ -231,12 +231,12 @@ def test_no_two_engines_claim_the_same_model_id():
 def test_no_declared_model_id_is_an_engine_name(name):
     """An engine's own name already reaches it, and another's is a false claim.
 
-    `Directory.for_engine` refuses the second case at startup, which is the right
-    place for a deployment and the wrong place to *learn* it: the failure lands
-    on whoever boots the image rather than on whoever edited the table. Its own
-    name is not a boot failure and is checked only here — harmless to serve,
-    and the tell that the list is being read as a roster of engines rather than
-    as the foreign ids this engine answers for besides its own.
+    `Directory.for_engine` refuses both at startup, which is the right place for
+    a deployment and the wrong place to *learn* it: the failure lands on whoever
+    boots the image rather than on whoever edited the table. This is the earlier
+    of the two checks, not the only one — it fails in CI, before an image exists,
+    and it is the tell that the list is being read as a roster of engines rather
+    than as the foreign ids this engine answers for besides its own.
     """
     claimed = sorted(set(model_ids(name)) & set(ENGINES))
     assert not claimed, (

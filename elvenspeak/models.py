@@ -89,16 +89,19 @@ class Directory:
         """
         declared = declarations.model_ids(name)
         absent = frozenset(known) - {name}
-        # [LAW:parse-dont-validate] An engine claiming another engine's name as
-        # one of its foreign ids would make `reach` answer SERVED for a request
-        # that plainly named someone else — the one contradiction this type
-        # cannot express its way out of, since both readings are in the table.
-        # Refused here, at construction, so no Directory that exists holds one.
-        contested = sorted(set(declared) & absent)
+        # [LAW:parse-dont-validate] A declared id may name no engine at all —
+        # that is what the table is for — but naming one is a contradiction this
+        # type cannot express its way out of, in either direction. Another
+        # engine's name would make `reach` answer SERVED for a request that
+        # plainly named someone else; this engine's own name is already served
+        # under `engine`, so declaring it again duplicates it in `listed()`, in
+        # the one endpoint whose job is saying which ids are legal. Refused here,
+        # at construction, so no Directory that exists holds either.
+        contested = sorted(set(declared) & (absent | {name}))
         if contested:
             raise ConfigError(
                 [
-                    f"{name} declares model id(s) naming another engine: "
+                    f"{name} declares model id(s) naming an engine: "
                     f"{', '.join(contested)}"
                 ]
             )

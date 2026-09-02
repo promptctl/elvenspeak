@@ -94,6 +94,23 @@ def test_a_declaration_claiming_another_engine_refuses_to_boot(tmp_path, monkeyp
     assert "kokoro" in str(raised.value)
 
 
+def test_a_declaration_claiming_its_own_engine_refuses_to_boot(tmp_path, monkeypatch):
+    """The other half of the same shape table, and the one that duplicates.
+
+    An engine's own name already reaches it under `engine`, so declaring it again
+    adds nothing but a second copy in `listed()` — a duplicate `model_id` in the
+    one endpoint whose job is saying which ids are legal. Refused rather than
+    filtered out: absorbing it silently would leave whoever wrote the table
+    believing the list means something it does not.
+    """
+    declare(tmp_path, "piper", 'elevenlabs_models = ["piper"]\n')
+    monkeypatch.setattr(declarations_mod, "_DIRECTORY", tmp_path)
+
+    with pytest.raises(ConfigError) as raised:
+        Directory.for_engine("piper", KNOWN)
+    assert "piper" in str(raised.value)
+
+
 def test_a_malformed_model_list_refuses_to_boot(tmp_path, monkeypatch):
     """The alternative is an engine that quietly answers for nothing.
 
