@@ -111,10 +111,9 @@ def test_two_engines_offering_the_same_voice_id_stop_the_boot():
     refusing on those would stop a router fronting both real engines on every
     boot, always. Two engines each offering their own substitute for one
     globally-unique foreign id is two compatibility mappings, not two answers to
-    one question. Nothing alias-shaped can reach this check today — the router
-    does not read backends' alias tables at all (`piper-routing-7e2.15`) — so the
-    rule is recorded here rather than as a test that could only assert the
-    absence of a code path.
+    one question. The router does read those tables now, so that rule is no longer
+    theoretical and has a test of its own —
+    `test_two_backends_claiming_one_foreign_id_pick_one_rather_than_refuse`.
     """
     shared = (Voice(id="contested", name="Contested", description="offered twice"),)
     with cluster(("alpha", shared, EVERYTHING), ("beta", shared, EVERYTHING)) as consul:
@@ -576,3 +575,90 @@ def test_a_backend_whose_voices_declare_no_capabilities_fails_the_boot():
     assert "elvenspeak-ancient" in message
     assert "old-one" in message
     assert "named no capabilities" in message
+
+
+def test_an_elevenlabs_voice_id_resolves_through_the_router():
+    """The ticket's acceptance criterion, and what makes a router a drop-in.
+
+    openconv's deployed default voice is `21m00Tcm4TlvDq8ikWAM` — an ElevenLabs id —
+    and a backend's alias table is what turns it into a voice that engine can speak.
+    A router used to answer for none of them: its catalog was built from its own
+    registry name, `router`, which ships no table and never will, so every foreign id
+    landed on the fallback. Against the one deployed caller that is not a corner case,
+    it is the default path.
+
+    The aliases arrive on the voices, from the backends that own them, so the router
+    holds no table of its own to be wrong with.
+    """
+    rachel = "21m00Tcm4TlvDq8ikWAM"
+    voices = (
+        Voice(
+            id="en_US-lessac-high",
+            name="Lessac",
+            description="piper's",
+            aliases=(rachel,),
+        ),
+    )
+    with cluster(("piper", voices, EVERYTHING)) as consul:
+        settings = Settings(
+            engine=router.configure({router.CONSUL_URL: consul}, NOTHING),
+            engine_name="router",
+            known_engines=frozenset(ENGINES),
+            withheld=NOTHING,
+            fallback=Substitution.FIRST_OFFERED,
+            api_key=None,
+            host="127.0.0.1",
+            port=0,
+        )
+        with TestClient(create_app(settings, settings.engine.open())) as client:
+            spoken = client.post(
+                f"/v1/text-to-speech/{rachel}/stream", json={"text": "hello"}
+            )
+            listed = client.get("/v1/voices").json()["voices"]
+
+    assert spoken.status_code == 200, spoken.text
+    # The substitute the backend chose, not the fallback that would have answered
+    # anyway — which is the difference this test exists to see. With one voice in the
+    # fleet the fallback is the same voice, so the header alone would not tell them
+    # apart; `x-elvenspeak-voice-requested` only appears when a substitution happened.
+    assert spoken.headers["x-elvenspeak-voice"] == "en_US-lessac-high"
+    assert spoken.headers["x-elvenspeak-voice-requested"] == rachel
+
+    # And round-tripped, so a client can discover it rather than try it.
+    #
+    # `in` rather than equality, and the reason is the strongest evidence here: the
+    # backend calls itself `piper`, so its own catalog read the shipped
+    # `aliases/piper.toml` and reported every foreign id that file maps onto this
+    # voice — not only the one this test invented. What crosses the router is a real
+    # engine's real table, arriving on the voice it belongs to.
+    assert rachel in listed[0]["aliases"]
+    assert len(listed[0]["aliases"]) > 1, listed[0]["aliases"]
+
+
+def test_two_backends_claiming_one_foreign_id_pick_one_rather_than_refuse():
+    """Settled on 7e2.8 and 7e2.3: a shared ElevenLabs alias is not a collision.
+
+    Every engine's table claims the same nine ids by design, so refusing would stop a
+    router fronting both real engines on every boot. The ids are globally unique and
+    foreign to every engine here, so two substitutes are two compatibility mappings —
+    either is a correct answer, and what matters is that it is the *same* answer on
+    every boot rather than whichever backend replied first.
+    """
+    rachel = "21m00Tcm4TlvDq8ikWAM"
+    piper_voices = (Voice(id="lessac", name="L", description="", aliases=(rachel,)),)
+    kokoro_voices = (Voice(id="af_heart", name="H", description="", aliases=(rachel,)),)
+
+    with cluster(
+        ("piper", piper_voices, EVERYTHING), ("kokoro", kokoro_voices, EVERYTHING)
+    ) as consul:
+        engine = opened(consul)
+        chosen = {
+            voice.id: voice.aliases for voice in engine.voices() if rachel in voice.aliases
+        }
+
+    # Both still offered, both still claiming it — the refusal is scoped to local ids.
+    assert len(chosen) == 2
+    # Discovery order is sorted by service name, so `elvenspeak-kokoro` precedes
+    # `elvenspeak-piper` and its voice takes the id. Asserted so the tiebreak is a
+    # decision on the record rather than whatever the dict happened to do.
+    assert [voice.id for voice in engine.voices()][0] == "af_heart"

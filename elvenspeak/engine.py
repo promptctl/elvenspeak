@@ -140,6 +140,23 @@ class Voice:
     #: engine, so a voice that undersells itself is merely pessimistic while one
     #: that oversells lies in the audio.
     capabilities: frozenset["Capability"] = frozenset()
+    #: Foreign ids that also reach this voice — ElevenLabs voice ids, mostly.
+    #:
+    #: For an engine that ships a declaration file, this is empty and the table is
+    #: read server-side by the voice id's registry name, which an engine does not
+    #: know about itself. It is here for the engine that *discovers* its voices
+    #: rather than shipping them: [`elvenspeak.router`] answers for other servers'
+    #: voices, and their compatibility mappings are theirs, arriving with them.
+    #:
+    #: Without it a router resolved no foreign id at all — every ElevenLabs id
+    #: landed on the fallback, which for the one deployed caller is its default
+    #: voice, so a routed deployment silently stopped being a drop-in for a direct
+    #: one.
+    #:
+    #: Carrying them on the voice rather than in a table beside it makes a whole
+    #: class of mistake unrepresentable: an alias here cannot name a voice this
+    #: engine does not have, because it *is* on the voice it names.
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
