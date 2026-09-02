@@ -177,6 +177,23 @@ EXPOSE ${PORT}
 # this file, and Nomad's docker driver never runs it. `/health` owns the verdict
 # now, so this and the cluster's own check reach the same answer by reading the
 # same thing.
+#
+# `piper-build-82n`: still a string, and the one `python -c` this file keeps.
+# What made the bake step dangerous was that its source named symbols in this
+# package, so a rename broke code no import ever reached; this names none — two
+# stdlib calls and one environment variable — so that failure is not available
+# to it. Giving it an `elvenspeak/health.py` would add a module whose body is
+# those same two calls, then reach it only through the venv interpreter and the
+# package `__init__`. Measured at 0.09s bare against 0.31s once `elvenspeak` is
+# imported: small either way against a 30s interval, so cost is not the argument.
+# The argument is that the conversion buys nothing.
+#
+# What was actually missing is that nothing held this against the endpoint it
+# reads. `tests/test_dockerfile.py` now lifts this command out of this file and
+# runs it against a real server whose voices are open and one that can speak
+# nothing, under an interpreter with no site-packages. So `/health` cannot stop
+# distinguishing the two while the image goes on reporting healthy, and this
+# cannot quietly acquire an import the base image's `python` could not resolve.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s \
   CMD python -c "import urllib.request,os; \
 urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ['PORT'])"
