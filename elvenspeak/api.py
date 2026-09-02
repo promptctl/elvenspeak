@@ -559,6 +559,31 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
             headers=headers(resolution, body),
         )
 
+    # ------------------------------------------------------------------ models
+
+    @app.get("/v1/models", dependencies=guarded)
+    def list_models() -> list[dict]:
+        """What this deployment can be asked for by `model_id`.
+
+        ElevenLabs' own text-to-speech documentation names this as the way to
+        discover legal `model_id` values, and without it nothing downstream can
+        find out what a deployment can do. It earns its keep in a single-engine
+        image on its own: a caller learns it is talking to piper rather than
+        inferring it from the shape of a voice name.
+
+        [LAW:one-source-of-truth] Derived from what this process actually has —
+        the engine the environment chose and the capabilities that survived the
+        deployment's withholding — never from a list written beside it. A roster
+        here would be a second answer to "what can this server do", free to
+        advertise an engine the image does not carry.
+
+        A bare array rather than an object with a `models` key, because that is
+        what ElevenLabs returns and a stock client indexes it directly. `GET
+        /v1/voices` wraps its list because ElevenLabs wraps that one; the
+        difference is theirs, and mirroring it is the whole job.
+        """
+        return [_model_json(settings.engine_name, capabilities)]
+
     # ------------------------------------------------------------------ voices
 
     @app.get("/v1/voices", dependencies=guarded)
@@ -687,6 +712,57 @@ def _voice_json(voice: Voice, aliases: tuple[str, ...]) -> dict:
         # discover that the ElevenLabs id it holds will reach this voice, instead
         # of finding out by trying it.
         "aliases": list(aliases),
+    }
+
+
+def _model_json(model_id: str, capabilities: frozenset[Capability]) -> dict:
+    """One synthesis engine in the shape `GET /v1/models` returns.
+
+    Field names are ElevenLabs', for the same reason [`_voice_json`]'s are: an
+    unmodified client has to be able to read the response. The flags they publish
+    are answered honestly rather than flatteringly — this service converts no
+    voices, fine-tunes nothing, and honours neither `style` nor
+    `use_speaker_boost`, and a client that believed otherwise would send
+    parameters that come back named in `x-elvenspeak-ignored`.
+
+    [LAW:one-source-of-truth] `capabilities` is the same set that decides the 501
+    gate and that header, spelled the same way the startup log spells it. A
+    caller reading this before a call learns that timestamps are unavailable
+    here; the alternative is discovering it from a 501 in the middle of a
+    conversation. Rendering it from a second list would let the advertisement and
+    the refusal disagree, which is the one thing this endpoint exists to prevent.
+
+    The capability names go in a field of our own rather than being forced into
+    ElevenLabs' flags, exactly as `aliases` is on a voice. `SPEED` is not
+    `can_use_style`, and mapping one onto the other to fill a familiar-looking
+    field would be a lie that renders nicely.
+    """
+    return {
+        "model_id": model_id,
+        "name": model_id,
+        "description": f"Local {model_id} synthesis, served by elvenspeak",
+        "can_do_text_to_speech": True,
+        "can_do_voice_conversion": False,
+        "can_be_finetuned": False,
+        "can_use_style": False,
+        "can_use_speaker_boost": False,
+        "serves_pro_voices": False,
+        "requires_alpha_access": False,
+        # Nothing here is metered: the audio is made on the machine serving it.
+        # Zero is the true multiplier, not a placeholder for one nobody set.
+        "token_cost_factor": 0.0,
+        "max_characters_request_free_user": None,
+        "max_characters_request_subscribed_user": None,
+        "maximum_text_length_per_request": None,
+        # Left empty rather than guessed. A voice's language is a fact its engine
+        # publishes in `Voice.labels`, and inventing a model-level answer here
+        # would be a second, coarser copy of it — wrong the moment an engine
+        # bakes voices in two languages, which both of ours already could.
+        "languages": [],
+        # Not an ElevenLabs field. The capabilities this deployment will actually
+        # honour, so they can be read before a call rather than inferred from
+        # what came back refused.
+        "capabilities": sorted(item.name.lower() for item in capabilities),
     }
 
 

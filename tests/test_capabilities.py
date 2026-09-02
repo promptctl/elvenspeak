@@ -16,6 +16,8 @@ anticipated here is described accurately — and, below, asked accurately too.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from conftest import DECLARED_VOICES, DeclaredEngine, DeclaredPrepared
 from fastapi.testclient import TestClient
@@ -252,3 +254,92 @@ def test_withholding_what_the_engine_never_had_is_not_an_error():
             params={"output_format": "pcm_22050"},
         )
         assert response.status_code == 200, response.text
+
+
+def listed(client: TestClient) -> set[str]:
+    """The capabilities `GET /v1/models` advertises for this deployment."""
+    response = client.get("/v1/models")
+    assert response.status_code == 200, response.text
+    entry, = response.json()
+    return set(entry["capabilities"])
+
+
+def _timestamps_declined(client: TestClient) -> bool:
+    return (
+        client.post(
+            f"/v1/text-to-speech/{VOICE.id}/with-timestamps", json={"text": "hello"}
+        ).status_code
+        == 501
+    )
+
+
+def _speed_declined(client: TestClient) -> bool:
+    return "voice_settings.speed" in ignored(client, voice_settings={"speed": 1.5})
+
+
+#: How to find out, by asking the service rather than by reading its listing,
+#: whether it will really honour each capability. One probe per member, held
+#: beside the assertion that the table covers the enum exactly — the same shape
+#: as [`_ASKS_FOR`] above and for the same reason: a capability added without a
+#: probe fails here rather than shipping advertised but never checked.
+#:
+#: The probes deliberately read different mechanisms. TIMESTAMPS is enforced by
+#: the 501 gate and SPEED by the ignored header, and the point of the tests below
+#: is that one capability set decides both — so a table that asked only one of
+#: them would leave the agreement it claims to test half unexamined.
+_DECLINES = {
+    Capability.TIMESTAMPS: _timestamps_declined,
+    Capability.SPEED: _speed_declined,
+}
+
+
+def test_every_capability_can_be_asked_for_below():
+    """The coverage the parametrized tests cannot assert about themselves."""
+    assert set(_DECLINES) == set(Capability)
+
+
+@pytest.mark.parametrize("capability", sorted(Capability, key=lambda item: item.name))
+def test_a_capability_the_service_withholds_leaves_the_listing(capability):
+    """Withholding reaches the advertisement, not only the refusal.
+
+    The engine declares everything, so the only reason the capability is gone is
+    the deployment's own subtraction. Asserted together with a probe that the
+    service really does decline it, because either half alone is satisfiable by a
+    bug: a listing rendered from its own roster would keep advertising what the
+    gate refuses, and a gate reading a second set would refuse what the listing
+    still offers. The endpoint exists to stop a caller discovering a limit from a
+    501 mid-conversation, which it does only while those two agree.
+    """
+    with served_by(DeclaredEngine(frozenset(Capability)), capability) as client:
+        assert capability.name.lower() not in listed(client)
+        assert _DECLINES[capability](client)
+
+
+@pytest.mark.parametrize("capability", sorted(Capability, key=lambda item: item.name))
+def test_a_capability_the_service_honours_is_listed(capability):
+    """The other direction, which is where a listing this cautious would fail.
+
+    Omitting a capability the service will honour is as wrong as advertising one
+    it will not: a caller that trusted the listing would work around a limit this
+    deployment does not have.
+    """
+    with served_by(DeclaredEngine(frozenset(Capability))) as client:
+        assert capability.name.lower() in listed(client)
+        assert not _DECLINES[capability](client)
+
+
+def test_the_listing_names_an_engine_this_module_has_never_heard_of():
+    """[LAW:one-source-of-truth] The model id is the name the deployment settled on.
+
+    `api.py` is arranged never to import the engine registry, so the id it
+    publishes can only be the one `Settings` carries — the registry key kept at
+    the point the choice was actually made. Driven with a name no table in this
+    package mentions, because a listing that inferred the engine from anything it
+    could recognise would answer correctly for `piper` and wrongly for the
+    remote engine the router is going to hand it.
+    """
+    settings = replace(_settings(), engine_name="stentor")
+    with TestClient(api.create_app(settings, DeclaredEngine(frozenset()))) as client:
+        entry, = client.get("/v1/models").json()
+
+    assert entry["model_id"] == "stentor"

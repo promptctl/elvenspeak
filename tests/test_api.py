@@ -287,6 +287,22 @@ def test_voices_listing_has_the_elevenlabs_shape(client):
     assert "labels" in body["voices"][0]
 
 
+def test_models_listing_has_the_elevenlabs_shape(client):
+    """A bare array, where `/v1/voices` above wraps its list in an object.
+
+    The asymmetry is ElevenLabs' own and mirroring it is the whole job: a stock
+    client indexes this response directly, and helpfully wrapping it in a
+    `models` key for consistency with the endpoint above would break exactly the
+    callers this surface exists for. Pinned here because it looks like an
+    oversight, and the next reader to tidy it will find this test instead.
+    """
+    body = client.get("/v1/models").json()
+
+    assert isinstance(body, list)
+    assert [entry["model_id"] for entry in body] == ["piper"]
+    assert body[0]["can_do_text_to_speech"] is True
+
+
 def test_timestamps_cover_the_input_text(client):
     response = client.post(
         f"/v1/text-to-speech/{VOICE}/with-timestamps",
@@ -324,6 +340,15 @@ def test_api_key_is_enforced_when_configured():
             headers={"xi-api-key": "s3cret"},
         )
         assert allowed.status_code == 200
+        # The discovery endpoints are guarded too. What a deployment can speak
+        # with is not public just because answering costs nothing — and this is
+        # the half a new endpoint forgets, since it works either way in every
+        # test that does not set a key.
+        assert guarded.get("/v1/models").status_code == 401
+        assert (
+            guarded.get("/v1/models", headers={"xi-api-key": "s3cret"}).status_code
+            == 200
+        )
         # Health stays open so a load balancer does not need the credential.
         assert guarded.get("/health").status_code == 200
 
