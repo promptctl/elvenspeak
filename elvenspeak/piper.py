@@ -219,6 +219,11 @@ class _Prepared:
     #: by [`acquire`], which fetches by definition — see its docstring.
     allow_download: bool
     timings: bool
+    #: Every `model_id` this deployment answers to, stamped onto each voice beside
+    #: its capabilities and for the same reason — it is a fact about what will
+    #: speak. Arrives from [`configure`] because the name it was derived from is
+    #: the key this module is registered under, which this module never learns.
+    serves: frozenset[str]
 
     def acquire(self) -> tuple[engine.Voice, ...]:
         """Puts every configured voice on disk, and says what they turned out to be.
@@ -231,7 +236,7 @@ class _Prepared:
         The lifecycle moment is carried by which method the caller reached for.
         """
         return tuple(
-            replace(ready.voice, capabilities=self.capabilities())
+            replace(ready.voice, capabilities=self.capabilities(), models=self.serves)
             for ready in _install(
                 self.keys, self.models_dir, allow_download=True
             ).values()
@@ -266,7 +271,9 @@ class _Prepared:
         ).items():
             _LOGGER.info("loading voice %s", key)
             installed[key] = _Installed(
-                voice=replace(ready.voice, capabilities=capabilities),
+                voice=replace(
+                    ready.voice, capabilities=capabilities, models=self.serves
+                ),
                 sample_rate=ready.sample_rate,
                 model=PiperVoice.load(
                     str(ready.model_path), include_alignments=self.timings
@@ -277,7 +284,9 @@ class _Prepared:
 
 
 def configure(
-    env: "Mapping[str, str]", withheld: frozenset[engine.Capability]
+    env: "Mapping[str, str]",
+    withheld: frozenset[engine.Capability],
+    serves: frozenset[str],
 ) -> _Prepared:
     """Reads Piper's own environment, or says everything wrong with it at once.
 
@@ -334,6 +343,7 @@ def configure(
         # TIMESTAMPS buys back, and it can only be unpatched by a session that
         # was never opened patched. Decided here, before anything is opened.
         timings=engine.Capability.TIMESTAMPS not in withheld,
+        serves=serves,
     )
 
 

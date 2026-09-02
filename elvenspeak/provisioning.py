@@ -161,7 +161,21 @@ def flag(env: Mapping[str, str], name: str, default: bool) -> bool:
 #: distinction is what makes the setting engine-agnostic: an engine whose
 #: capabilities are derived from the assets it opened, rather than chosen, cannot
 #: know its own baseline until long after this call, and does not have to.
-Configure = Callable[[Mapping[str, str], frozenset[Capability]], Prepared]
+#: The third argument is every `model_id` a server running *this* engine answers
+#: to ([`elvenspeak.models.declared_by`]), which the engine stamps onto each voice
+#: it offers as [`Voice.models`]. An engine is told rather than asked because the
+#: name that selects it is the key it is registered under and nothing in an engine
+#: module knows it — [`elvenspeak.settings`] is where that name exists, so the
+#: declaration is read there and the answer arrives already parsed.
+#:
+#: [`elvenspeak.router`] is the engine this argument is shaped by and the one that
+#: ignores it: it offers no voices of its own, and the voices it routes to arrive
+#: from their backends already carrying their own engine's answer. A deployment
+#: holding voices from several engines is exactly why the value lives on the voice
+#: rather than beside it.
+Configure = Callable[
+    [Mapping[str, str], frozenset[Capability], frozenset[str]], Prepared
+]
 
 #: The engines a deployment may choose between, by the name that selects one.
 #:

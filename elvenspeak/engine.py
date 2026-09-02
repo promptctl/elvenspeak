@@ -140,6 +140,30 @@ class Voice:
     #: engine, so a voice that undersells itself is merely pessimistic while one
     #: that oversells lies in the audio.
     capabilities: frozenset["Capability"] = frozenset()
+    #: Every `model_id` the server that speaks this voice answers to — its engine's
+    #: own name, plus the foreign ids that engine declares.
+    #:
+    #: [LAW:one-source-of-truth] On the voice for the reason `capabilities` is, and
+    #: discovered to be the same reason: which engine will speak is a fact about
+    #: *what will speak*, and the voice is what names that. It was
+    #: `models.Directory`, built from the deployment's own engine name, which was
+    #: the same thing only while one process meant one engine. Behind
+    #: [`elvenspeak.router`] it was not: a router's name declares nothing, so it
+    #: advertised itself as the only engine it served while routing to two, and
+    #: every `model_id` its own backends honour came back reported as ignored
+    #: (`piper-routing-7e2.17`, measured against the running cluster).
+    #:
+    #: The deployment-wide set is still available and is *derived*: the union over
+    #: the voices on offer ([`elvenspeak.models.Directory.over`]). Held instead, it
+    #: would be a second source free to disagree with the voices it summarises —
+    #: which is exactly how it came to disagree.
+    #:
+    #: Empty by default, because absence is the safe answer: a voice whose server
+    #: names no model id makes every `model_id` unrecognised rather than refused,
+    #: and an unrecognised id is reported in `x-elvenspeak-ignored` and steers
+    #: nothing. A voice that undersells itself is merely unselectable by engine,
+    #: while one that oversells answers in an engine the caller did not ask for.
+    models: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

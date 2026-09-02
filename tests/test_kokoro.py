@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import pytest
 from conftest import (
+    SERVES,
     declared,
     KOKORO_MODEL,
     KOKORO_TIMELESS_MODEL,
@@ -348,7 +349,7 @@ def test_a_measured_utterance_honours_speed_too(engine):
 
 
 def test_the_defaults_name_a_real_export_and_real_voices():
-    prepared = kokoro.configure({}, frozenset())
+    prepared = kokoro.configure({}, frozenset(), SERVES)
 
     assert prepared.model == kokoro.DEFAULT_MODEL
     assert prepared.keys == kokoro.DEFAULT_VOICES
@@ -367,7 +368,7 @@ def test_a_voice_id_it_cannot_read_a_language_out_of_is_refused(key):
     making. Refused at the parse rather than discovered at synthesis.
     """
     with pytest.raises(ConfigError, match="KOKORO_VOICES"):
-        kokoro.configure({"KOKORO_VOICES": key}, frozenset())
+        kokoro.configure({"KOKORO_VOICES": key}, frozenset(), SERVES)
 
 
 @pytest.mark.parametrize("typo", ["tru", "yess", "0.0", "maybe"])
@@ -380,7 +381,7 @@ def test_a_boolean_that_is_not_one_is_reported_rather_than_read_as_off(typo):
     from the audio.
     """
     with pytest.raises(ConfigError, match="KOKORO_ALLOW_DOWNLOAD"):
-        kokoro.configure({"KOKORO_ALLOW_DOWNLOAD": typo}, frozenset())
+        kokoro.configure({"KOKORO_ALLOW_DOWNLOAD": typo}, frozenset(), SERVES)
 
 
 @pytest.mark.parametrize(
@@ -396,7 +397,7 @@ def test_a_present_but_blank_setting_is_not_an_absent_one(name, value):
     reported nothing.
     """
     with pytest.raises(ConfigError, match=name):
-        kokoro.configure({name: value}, frozenset())
+        kokoro.configure({name: value}, frozenset(), SERVES)
 
 
 def test_every_problem_in_this_engine_s_configuration_is_reported_together():
@@ -409,6 +410,7 @@ def test_every_problem_in_this_engine_s_configuration_is_reported_together():
                 "KOKORO_ALLOW_DOWNLOAD": "maybe",
             },
             frozenset(),
+            SERVES,
         )
 
     joined = " ".join(raised.value.problems)

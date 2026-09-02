@@ -15,6 +15,8 @@ from fastapi import FastAPI, Response
 from fastapi.testclient import TestClient
 from fleet import Registered, cluster, engine_app, registered_consul, serving
 
+from conftest import SERVES
+
 from elvenspeak import router
 from elvenspeak.api import create_app
 from elvenspeak.engine import Capability, Prosody, Voice
@@ -27,13 +29,26 @@ from elvenspeak.voices import Substitution
 EVERYTHING = frozenset(Capability)
 NOTHING: frozenset[Capability] = frozenset()
 
-ALPHA_VOICES = (Voice(id="alpha-one", name="Alpha One", description="alpha's"),)
-BETA_VOICES = (Voice(id="beta-one", name="Beta One", description="beta's"),)
+#: Each stand-in backend answers to its own engine name and to one foreign id, so
+#: a test can tell "reached alpha" from "reached whichever backend answered" — the
+#: distinction `piper-routing-7e2.17` is about. Alpha and beta share none of them,
+#: which is what makes a router that dropped the engine axis visible here.
+ALPHA_MODELS = frozenset({"alpha", "eleven_alpha_v1"})
+BETA_MODELS = frozenset({"beta", "eleven_beta_v1"})
+
+ALPHA_VOICES = (
+    Voice(
+        id="alpha-one", name="Alpha One", description="alpha's", models=ALPHA_MODELS
+    ),
+)
+BETA_VOICES = (
+    Voice(id="beta-one", name="Beta One", description="beta's", models=BETA_MODELS),
+)
 
 
 def opened(consul_url: str) -> router.RouterEngine:
     """The router a deployment pointed at `consul_url` would boot with."""
-    return router.configure({router.CONSUL_URL: consul_url}, NOTHING).open()
+    return router.configure({router.CONSUL_URL: consul_url}, NOTHING, SERVES).open()
 
 
 def routed(consul_url: str) -> TestClient:
@@ -45,7 +60,7 @@ def routed(consul_url: str) -> TestClient:
     not one per test.
     """
     settings = Settings(
-        engine=router.configure({router.CONSUL_URL: consul_url}, NOTHING),
+        engine=router.configure({router.CONSUL_URL: consul_url}, NOTHING, SERVES),
         engine_name="router",
         known_engines=frozenset(ENGINES),
         withheld=NOTHING,
@@ -137,7 +152,17 @@ def test_two_engines_offering_the_same_voice_id_stop_the_boot():
     rule is recorded here rather than as a test that could only assert the
     absence of a code path.
     """
-    shared = (Voice(id="contested", name="Contested", description="offered twice"),)
+    # One engine name for both, which is what two deployments running the same
+    # engine really report — and why the message below names services rather than
+    # engines.
+    shared = (
+        Voice(
+            id="contested",
+            name="Contested",
+            description="offered twice",
+            models=frozenset({"shared-engine"}),
+        ),
+    )
     with cluster(("alpha", shared, EVERYTHING), ("beta", shared, EVERYTHING)) as consul:
         with pytest.raises(ConfigError) as raised:
             opened(consul)
@@ -307,7 +332,7 @@ def test_a_router_without_somewhere_to_ask_refuses_to_configure(env, expected):
     statement about a false cause.
     """
     with pytest.raises(ConfigError) as raised:
-        router.configure(env, NOTHING)
+        router.configure(env, NOTHING, SERVES)
     assert expected in str(raised.value)
 
 
@@ -360,15 +385,16 @@ def test_a_backend_that_cannot_describe_itself_fails_the_boot_by_name():
 
     @stale.get("/v1/voices")
     def voices() -> dict:
-        # Its voices are well-formed and declare their capabilities; what it lacks
-        # is `/v1/models`. Otherwise the boot fails at the voice check first and
-        # this stops testing the thing it names.
+        # Its voices are well-formed and declare their capabilities and their model
+        # ids; what it lacks is `/v1/models`. Otherwise the boot fails at the voice
+        # check first and this stops testing the thing it names.
         return {
             "voices": [
                 {
                     "voice_id": "ancient",
                     "name": "Ancient",
                     "capabilities": ["speed"],
+                    "models": ["ancient"],
                 }
             ]
         }
@@ -434,7 +460,9 @@ def test_a_router_can_front_a_guarded_fleet_and_says_so_when_it_cannot():
     """
     with cluster(("alpha", ALPHA_VOICES, EVERYTHING), api_key="s3cret") as consul:
         carrying = router.configure(
-            {router.CONSUL_URL: consul, router.BACKEND_API_KEY: "s3cret"}, NOTHING
+            {router.CONSUL_URL: consul, router.BACKEND_API_KEY: "s3cret"},
+            NOTHING,
+            SERVES,
         ).open()
         assert [voice.id for voice in carrying.voices()] == ["alpha-one"]
         # Drained, so the guarded `/stream` request is actually made. `voices()`
@@ -443,7 +471,7 @@ def test_a_router_can_front_a_guarded_fleet_and_says_so_when_it_cannot():
         assert b"".join(carrying.speak(ALPHA_VOICES[0], "hello", Prosody()).audio)
 
         with pytest.raises(ConfigError) as raised:
-            router.configure({router.CONSUL_URL: consul}, NOTHING).open()
+            router.configure({router.CONSUL_URL: consul}, NOTHING, SERVES).open()
 
     assert "elvenspeak-alpha" in str(raised.value)
 
@@ -455,7 +483,7 @@ def test_a_router_installs_nothing_and_says_so():
     names for exactly this case, not a failure — which is what lets the build
     stay one command with no branch that knows routers exist.
     """
-    prepared = router.configure({router.CONSUL_URL: "http://consul:8500"}, NOTHING)
+    prepared = router.configure({router.CONSUL_URL: "http://consul:8500"}, NOTHING, SERVES)
     assert prepared.acquire() == ()
 
 
@@ -498,6 +526,7 @@ def test_a_timestamp_that_is_not_a_usable_number_fails_the_request(alignment):
                     "voice_id": "alpha-one",
                     "name": "Alpha One",
                     "capabilities": ["speed", "timestamps"],
+                    "models": ["odd"],
                 }
             ]
         }
@@ -607,3 +636,119 @@ def test_a_backend_whose_voices_declare_no_capabilities_fails_the_boot():
     assert "elvenspeak-ancient" in message
     assert "old-one" in message
     assert "named no capabilities" in message
+
+
+# ------------------------------------------------- the engine axis, end to end
+#
+# `piper-routing-7e2.17`, whose symptoms were all measured against the running
+# router at 2026.09.02.4 rather than inferred: `/v1/models` answered `["router"]`,
+# every `eleven_*` id its own backends honour came back in `x-elvenspeak-ignored`,
+# and `model_id=piper` was refused as "an engine this deployment is not running"
+# by the router that was running it. Voice routing was sound throughout, which is
+# why these are their own tests rather than an amendment to the ones above.
+
+
+def test_the_router_advertises_the_engines_it_fronts_rather_than_itself():
+    """The listing is the union over the voices, so it names the fleet.
+
+    A caller cannot choose an engine it cannot discover, and the router used to
+    publish only the name of the image it was built from — a name that declares
+    nothing and speaks nothing. Both backends' own names and both of their foreign
+    ids appear; `router` does not, because no voice answers to it.
+    """
+    with cluster(
+        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", BETA_VOICES, EVERYTHING)
+    ) as consul:
+        with routed(consul) as client:
+            listing = client.get("/v1/models").json()
+
+    listed = [entry["model_id"] for entry in listing]
+    assert listed == ["alpha", "beta", "eleven_alpha_v1", "eleven_beta_v1"]
+    assert "router" not in listed
+
+
+def test_a_voice_reports_the_engine_that_will_speak_it():
+    """`GET /v1/voices` carries the answer the listing above is derived from.
+
+    The round trip that makes the whole thing possible: a backend publishes what
+    it answers to per voice, the router reads it in the same response that brought
+    the voices, and republishes it. Asserted here because a router that derived
+    the listing correctly while dropping the field would leave the next router in
+    a chain unable to do the same ([LAW:composability]).
+    """
+    with cluster(
+        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", BETA_VOICES, EVERYTHING)
+    ) as consul:
+        with routed(consul) as client:
+            published = client.get("/v1/voices").json()["voices"]
+
+    answers = {entry["voice_id"]: sorted(entry["models"]) for entry in published}
+    assert answers == {
+        "alpha-one": ["alpha", "eleven_alpha_v1"],
+        "beta-one": ["beta", "eleven_beta_v1"],
+    }
+
+
+@pytest.mark.parametrize("model_id", ["alpha", "eleven_alpha_v1"])
+def test_naming_the_engine_that_speaks_the_voice_is_honoured(model_id):
+    """The epic's stated outcome, at the endpoint openconv actually calls.
+
+    Both spellings, because a caller may name the engine or one of the ids it
+    declares and neither is a second-class way to ask. The absence of the header
+    is the whole assertion: the service reports every parameter it could not act
+    on, so `model_id` missing from it is the service saying the field steered
+    this request.
+    """
+    with cluster(
+        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", BETA_VOICES, EVERYTHING)
+    ) as consul:
+        with routed(consul) as client:
+            response = client.post(
+                "/v1/text-to-speech/alpha-one/stream",
+                json={"text": "hello there", "model_id": model_id},
+            )
+
+    assert response.status_code == 200, response.text
+    assert "model_id" not in response.headers.get("x-elvenspeak-ignored", "")
+
+
+def test_naming_an_engine_that_is_not_speaking_this_voice_is_refused():
+    """Refusal, not override — the epic's one rule, on the engine axis.
+
+    `alpha` is running and reachable, so this is not the "engine this deployment
+    is not running" case: it is the caller asking for two things that do not go
+    together. Answering in beta would be fluent, 200, and in an engine the caller
+    explicitly did not ask for. The served list names the real backends, which is
+    what makes the 422 actionable rather than a dead end.
+    """
+    with cluster(
+        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", BETA_VOICES, EVERYTHING)
+    ) as consul:
+        with routed(consul) as client:
+            response = client.post(
+                "/v1/text-to-speech/beta-one/stream",
+                json={"text": "hello there", "model_id": "alpha"},
+            )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "beta-one" in detail["message"]
+    assert detail["served"] == ["alpha", "beta", "eleven_alpha_v1", "eleven_beta_v1"]
+
+
+def test_an_id_no_backend_answers_to_is_still_ignored_rather_than_refused():
+    """A router does not turn a stock ElevenLabs id into a 422.
+
+    The reason has not changed with the number of engines behind the endpoint: a
+    client sending `eleven_turbo_v2` is not naming an engine, so it gets audio and
+    the field named back — the behaviour the router already had, kept.
+    """
+    with cluster(("alpha", ALPHA_VOICES, EVERYTHING)) as consul:
+        with routed(consul) as client:
+            response = client.post(
+                "/v1/text-to-speech/alpha-one/stream",
+                json={"text": "hello there", "model_id": "eleven_turbo_v2"},
+            )
+
+    assert response.status_code == 200, response.text
+    assert "model_id" in response.headers["x-elvenspeak-ignored"]

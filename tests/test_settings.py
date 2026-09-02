@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from conftest import _ENVIRONMENT, DeclaredPrepared
+from conftest import _ENVIRONMENT, DeclaredPrepared, serves
 
 from elvenspeak import piper
 from elvenspeak.engine import Capability
@@ -54,7 +54,7 @@ def test_the_unnamed_engine_is_the_registry_s_first_entry():
     outside the registry that could come to name an engine that is not in it.
     """
     registry: Registry = {
-        "first": lambda _env, _withheld: DeclaredPrepared(),
+        "first": lambda _env, _withheld, _serves: DeclaredPrepared(),
         "second": lambda *_: pytest.fail("the second entry is not the default"),
     }
     settings = Settings.from_env(registry, {})
@@ -78,7 +78,7 @@ def test_the_engine_and_its_name_come_back_from_the_same_lookup():
     """
     registry: Registry = {
         "first": lambda *_: pytest.fail("an explicitly named engine was not built"),
-        "second": lambda _env, _withheld: DeclaredPrepared(),
+        "second": lambda _env, _withheld, _serves: DeclaredPrepared(),
     }
     settings = Settings.from_env(registry, {"ELVENSPEAK_ENGINE": "second"})
     assert isinstance(settings.engine, DeclaredPrepared)
@@ -100,7 +100,7 @@ def test_the_roster_is_the_registry_that_was_handed_in():
     repository happens to ship two engines today.
     """
     registry: Registry = {
-        "first": lambda _env, _withheld: DeclaredPrepared(),
+        "first": lambda _env, _withheld, _serves: DeclaredPrepared(),
         "second": lambda *_: pytest.fail("the unnamed engine is the first entry"),
     }
     settings = Settings.from_env(registry, {})
@@ -348,7 +348,7 @@ def test_a_good_environment_comes_back_as_settings(clean_env):
     # empty environment produces — the point being that `from_env` chose Piper
     # and handed it the same environment, rather than that Piper's own defaults
     # are what they are, which is `test_piper.py`'s business.
-    assert settings.engine == piper.configure({}, frozenset())
+    assert settings.engine == piper.configure({}, frozenset(), serves("piper"))
 
 
 def _settings_read_from_the_environment() -> dict[str, str]:

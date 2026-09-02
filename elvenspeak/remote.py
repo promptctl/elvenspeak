@@ -253,6 +253,24 @@ def _voice(published: Any, service: str) -> engine.Voice:
                 f"cannot tell what it will honour."
             ]
         )
+    # Checked to the same standard as `capabilities`, and refused rather than
+    # defaulted for the same reason: an empty set here is indistinguishable from
+    # "this backend answers to no model id", which would make the router quietly
+    # drop the engine axis for that backend instead of saying the fleet is mixed.
+    # [LAW:parse-dont-validate] Entry types are checked, not coerced — `str(entry)`
+    # over a JSON `null` yields the model id `"None"`, an id no engine has and
+    # every caller could send.
+    serves = published.get("models")
+    if not isinstance(serves, list) or not all(
+        isinstance(entry, str) and entry for entry in serves
+    ):
+        raise ConfigError(
+            [
+                f"{service}: voice {voice_id!r} named no models. "
+                f"This backend predates per-voice model ids and a router "
+                f"cannot tell which engine answers for it."
+            ]
+        )
     labels = published.get("labels")
     return engine.Voice(
         id=voice_id,
@@ -269,6 +287,12 @@ def _voice(published: Any, service: str) -> engine.Voice:
         capabilities=frozenset(
             item for item in engine.Capability if item.name.lower() in declared
         ),
+        # [LAW:one-source-of-truth] Read per voice, from the voice, exactly as
+        # `capabilities` is and for the reason spelled out above it: the
+        # deployment-wide set `GET /v1/models` publishes is the union across a
+        # fleet, which is the right answer to "what can be reached at all" and the
+        # wrong one to decide whether *this* voice's engine was the one named.
+        models=frozenset(serves),
     )
 
 

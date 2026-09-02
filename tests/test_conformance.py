@@ -121,7 +121,7 @@ def router_engine() -> Iterator[Engine]:
     the part that matters, and it is real.
     """
     with cluster(("declared", DECLARED_VOICES, frozenset(Capability))) as consul:
-        yield router.configure({router.CONSUL_URL: consul}, frozenset()).open()
+        yield router.configure({router.CONSUL_URL: consul}, frozenset(), frozenset({"router"})).open()
 
 
 #: Every engine this project can put behind the API surface, and the suite below

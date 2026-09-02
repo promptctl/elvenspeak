@@ -19,7 +19,13 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from conftest import declaring, DECLARED_VOICES, DeclaredEngine, DeclaredPrepared
+from conftest import (
+    DECLARED_VOICES,
+    DeclaredEngine,
+    DeclaredPrepared,
+    answering,
+    declaring,
+)
 from fastapi.testclient import TestClient
 
 from elvenspeak import api, models
@@ -342,25 +348,32 @@ def test_a_capability_the_service_honours_is_listed(capability):
 
 
 def test_the_listing_names_an_engine_this_module_has_never_heard_of():
-    """[LAW:one-source-of-truth] The model id is the name the deployment settled on.
+    """[LAW:one-source-of-truth] The model id is what the voices on offer answer to.
 
     `api.py` is arranged never to import the engine registry, so the id it
-    publishes can only be the one `Settings` carries — the registry key kept at
-    the point the choice was actually made. Driven with a name no table in this
-    package mentions, because a listing that inferred the engine from anything it
-    could recognise would answer correctly for `piper` and wrongly for the
-    remote engine the router is going to hand it.
+    publishes can only come from what it was handed. Driven with a name no table
+    in this package mentions, because a listing that inferred the engine from
+    anything it could recognise would answer correctly for `piper` and wrongly
+    for the remote engines a router hands it.
 
-    Exactly one entry, still: an engine that declares no foreign model ids
-    answers for its own name and nothing else, which is also what a deployment
-    of an engine written elsewhere looks like.
+    Stated on the voice rather than in the settings, which is the correction
+    `piper-routing-7e2.17` made: the deployment's own name is right for one engine
+    and silent for a router, whose name declares nothing while it fronts engines
+    that declare plenty. Here the two are deliberately different — the settings
+    say `stentor` and the voices say so too — so a listing that had gone back to
+    reading `engine_name` still passes, and one that read neither fails.
+
+    Exactly one entry, still: an engine that declares no foreign model ids answers
+    for its own name and nothing else, which is also what a deployment of an
+    engine written elsewhere looks like.
     """
     settings = replace(
         _settings(),
         engine_name="stentor",
         known_engines=frozenset(ENGINES) | {"declared", "stentor"},
     )
-    with TestClient(api.create_app(settings, DeclaredEngine(declaring(frozenset())))) as client:
+    engine = DeclaredEngine(declaring(frozenset(), answering(frozenset({"stentor"}))))
+    with TestClient(api.create_app(settings, engine)) as client:
         listing = client.get("/v1/models").json()
 
     assert [entry["model_id"] for entry in listing] == ["stentor"]

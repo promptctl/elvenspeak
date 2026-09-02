@@ -217,6 +217,11 @@ class _Prepared:
     #: Whether [`open`] may fetch an asset that is missing at boot. Not consulted
     #: by [`acquire`], which fetches by definition — see its docstring.
     allow_download: bool
+    #: Every `model_id` this deployment answers to, stamped onto each voice beside
+    #: its capabilities and for the same reason — it is a fact about what will
+    #: speak. Arrives from [`configure`] because the name it was derived from is
+    #: the key this module is registered under, which this module never learns.
+    serves: frozenset[str]
 
     def acquire(self) -> tuple[engine.Voice, ...]:
         """Puts this engine's assets on disk, and says what they turned out to be.
@@ -244,7 +249,7 @@ class _Prepared:
         model, installed, _ = _open(
             self.keys, self.models_dir, self.model, allow_download=True
         )
-        return tuple(_declaring(model, installed).values())
+        return tuple(_declaring(model, installed, self.serves).values())
 
     def open(self) -> KokoroEngine:
         """Opens the export and returns the engine that speaks every named voice."""
@@ -259,12 +264,14 @@ class _Prepared:
         # by that one session, so they all carry the same set.
         return KokoroEngine(
             model,
-            _declaring(model, installed),
+            _declaring(model, installed, self.serves),
             sample_rate=sample_rate,
         )
 
 
-def _declaring(model: "Kokoro", installed: dict[str, engine.Voice]) -> dict[str, engine.Voice]:
+def _declaring(
+    model: "Kokoro", installed: dict[str, engine.Voice], serves: frozenset[str]
+) -> dict[str, engine.Voice]:
     """`installed`, every voice declaring what this export can actually do.
 
     [LAW:one-source-of-truth] Read by both lifecycle methods rather than computed
@@ -272,19 +279,25 @@ def _declaring(model: "Kokoro", installed: dict[str, engine.Voice]) -> dict[str,
     outputs, so the opened session is the only thing that knows, and a build that
     derived it separately could describe a voice that boots differently.
 
-    Every voice is spoken by that one session, so they all carry the same set.
+    `serves` joins it here rather than in a second pass for the same reason: what
+    a voice answers to and what it can do are both facts about the one thing that
+    will speak, and stamping them in two places is two chances to stamp one.
+
+    Every voice is spoken by that one session, so they all carry the same sets.
     """
     capabilities = _INHERENT | (
         frozenset({engine.Capability.TIMESTAMPS}) if model.has_timings else frozenset()
     )
     return {
-        key: replace(voice, capabilities=capabilities)
+        key: replace(voice, capabilities=capabilities, models=serves)
         for key, voice in installed.items()
     }
 
 
 def configure(
-    env: "Mapping[str, str]", withheld: frozenset[engine.Capability]
+    env: "Mapping[str, str]",
+    withheld: frozenset[engine.Capability],
+    serves: frozenset[str],
 ) -> _Prepared:
     """Reads Kokoro's own environment, or says everything wrong with it at once.
 
@@ -354,6 +367,7 @@ def configure(
         models_dir=models_dir,
         model=model,
         allow_download=allow_download,
+        serves=serves,
     )
 
 
