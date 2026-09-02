@@ -140,9 +140,12 @@ class _Found:
 def _fleet(consul_url: str, api_key: str | None) -> tuple[_Found, ...]:
     """Every discovered backend, with what it offers and what it calls itself.
 
-    Each backend is asked each question exactly once, and the answers are kept
-    together, so a name and a voice list cannot come from two different moments of
-    a rolling deploy and be reported as one engine that never existed.
+    Two requests per backend, with nothing synchronising them: a rolling deploy
+    that replaces one in between can pair a stale name with a fresh voice list.
+    Tolerable only because the name reaches the startup log and nothing else —
+    the voices decide routing and each arrives with its own capabilities from the
+    one request, so what is load-bearing is consistent with itself. Anything that
+    made the name matter would have to close that gap first.
     """
     return tuple(
         _Found(
