@@ -73,6 +73,16 @@ class Settings:
     #: [LAW:one-source-of-truth] Filled from the same lookup that produced
     #: [`engine`], so the two cannot name different engines.
     engine_name: str
+    #: Every engine this build could have run: the keys of the registry
+    #: [`from_env`] was handed, [`engine_name`] among them.
+    #:
+    #: Carried because a `model_id` naming an engine this deployment is *not*
+    #: running has to be refused rather than served by the one that is, and
+    #: telling that apart from an id naming no engine at all is the one question
+    #: neither the running engine nor the request can answer
+    #: ([`elvenspeak.models.Reach`]). Names only — where those engines are and
+    #: what voices they have stays theirs to advertise.
+    known_engines: frozenset[str]
     #: Capabilities this deployment does not offer, whatever the engine can do.
     #: Subtracted from the engine's own declaration in
     #: [`elvenspeak.api.create_app`], which is the one place the two meet — and
@@ -151,6 +161,7 @@ class Settings:
         return Settings(
             engine=chosen.engine,
             engine_name=chosen.name,
+            known_engines=frozenset(engines),
             withheld=withheld,
             fallback=fallback,
             api_key=env.get("ELVENSPEAK_API_KEY") or None,

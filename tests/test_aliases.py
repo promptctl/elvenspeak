@@ -34,13 +34,13 @@ being checked for, committed by the check itself.
 from __future__ import annotations
 
 import re
-import tomllib
 
 import pytest
 
+from elvenspeak.declarations import _DIRECTORY, model_ids, voice_aliases
 from elvenspeak.engine import Voice
 from elvenspeak.engines import ENGINES
-from elvenspeak.voices import _DECLARATIONS, load_aliases
+from elvenspeak.voices import load_aliases
 from test_dockerfile import DOCKERFILE, instructions
 
 #: `ARG <ENGINE>_VOICES=<comma-separated ids>`, matched against the Dockerfile
@@ -59,7 +59,7 @@ def declaring_engines() -> list[str]:
     be a third place to remember — and the one that fails open, since an engine
     missing from it is an engine whose table nobody checks.
     """
-    return sorted(path.stem for path in _DECLARATIONS.glob("*.toml"))
+    return sorted(path.stem for path in _DIRECTORY.glob("*.toml"))
 
 
 def baked_by_engine() -> dict[str, list[str]]:
@@ -84,12 +84,14 @@ def baked_voices(name: str) -> list[str]:
 def declared_aliases(name: str) -> dict[str, str]:
     """Every foreign id `name`'s table claims, before anything is dropped.
 
-    Read from the file rather than through `load_aliases`, which is the one thing
-    this file cannot reuse: dropping the dead entries is precisely the behaviour
-    under test, so the unfiltered table is what the comparison needs on the left.
+    Read through `elvenspeak.declarations` rather than through `load_aliases`,
+    which is the one thing this file cannot reuse: dropping the dead entries is
+    precisely the behaviour under test, so the unfiltered table is what the
+    comparison needs on the left. Parsing the file a second time here would be a
+    second answer to how a declaration is spelled, free to keep passing after the
+    server had stopped reading it that way.
     """
-    with (_DECLARATIONS / f"{name}.toml").open("rb") as handle:
-        return tomllib.load(handle).get("elevenlabs", {})
+    return dict(voice_aliases(name))
 
 
 def test_the_dockerfile_still_declares_voice_lists():
@@ -107,7 +109,7 @@ def test_the_dockerfile_still_declares_voice_lists():
 
 def test_some_engine_declares_aliases():
     """The other half of the control, over the side read from the filesystem."""
-    assert declaring_engines(), f"found no alias tables under {_DECLARATIONS}"
+    assert declaring_engines(), f"found no alias tables under {_DIRECTORY}"
 
 
 @pytest.mark.parametrize("name", sorted(baked_by_engine()))
@@ -178,6 +180,68 @@ def test_no_engine_offers_a_voice_twice(name):
     """
     voices = baked_voices(name)
     assert len(voices) == len(set(voices)), voices
+
+
+def test_some_engine_declares_a_model_id():
+    """Positive control over the model half, matching the voice half above.
+
+    Every check below is satisfied by a build in which no engine claims any model
+    id at all, which is the state this repository was in before
+    `piper-routing-7e2.2` and the state a mistyped key would silently restore.
+    """
+    claimed = {name: model_ids(name) for name in declaring_engines()}
+    assert any(claimed.values()), (
+        f"no engine declares an `elevenlabs_models` list: {claimed}"
+    )
+
+
+def test_no_two_engines_claim_the_same_model_id():
+    """[LAW:one-source-of-truth] One model id, one engine that answers for it.
+
+    The model-id half of the property `tests/test_aliases.py` was written for and
+    could only build half of: a model id's entire job is to name an engine, so an
+    id two engines both claim has two answers and no rule that picks between
+    them. `elvenspeak.models.Directory` cannot see this — it reads the running
+    engine's declaration and no other — so the contest is only visible from here,
+    across the tree, before an image exists.
+
+    Unlike a shared *voice* alias, which is two independent compatibility
+    mappings and deliberately allowed: ElevenLabs voice ids are globally unique
+    and nobody expects the real ElevenLabs voices here, so two engines each
+    substituting their own local voice for one agree about everything that
+    matters. Two engines answering for `eleven_flash_v2_5` agree about nothing.
+    """
+    claimants: dict[str, set[str]] = {}
+    for name in declaring_engines():
+        for model in model_ids(name):
+            claimants.setdefault(model, set()).add(name)
+
+    contested = sorted(
+        f"{model} is claimed by {', '.join(sorted(names))}"
+        for model, names in claimants.items()
+        if len(names) > 1
+    )
+    assert not contested, (
+        "two engines claim one model id, which names an engine and so cannot be "
+        "resolved:\n  " + "\n  ".join(contested)
+    )
+
+
+@pytest.mark.parametrize("name", declaring_engines())
+def test_no_declared_model_id_is_an_engine_name(name):
+    """An engine's own name already reaches it, and another's is a false claim.
+
+    `Directory.for_engine` refuses both at startup, which is the right place for
+    a deployment and the wrong place to *learn* it: the failure lands on whoever
+    boots the image rather than on whoever edited the table. This is the earlier
+    of the two checks, not the only one — it fails in CI, before an image exists,
+    and it is the tell that the list is being read as a roster of engines rather
+    than as the foreign ids this engine answers for besides its own.
+    """
+    claimed = sorted(set(model_ids(name)) & set(ENGINES))
+    assert not claimed, (
+        f"{name}.toml declares model id(s) that name engines: {', '.join(claimed)}"
+    )
 
 
 @pytest.mark.parametrize("name", declaring_engines())

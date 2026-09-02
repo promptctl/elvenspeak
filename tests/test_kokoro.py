@@ -28,6 +28,7 @@ from conftest import (
 
 from elvenspeak import kokoro
 from elvenspeak.engine import Capability, Prosody
+from elvenspeak.engines import ENGINES
 from elvenspeak.provisioning import ConfigError
 
 TEXT = "Compatibility is measurable, and this sentence is long enough to measure."
@@ -115,6 +116,7 @@ def test_a_timestamps_request_is_refused_rather_than_answered_with_invented_numb
     settings = Settings(
         engine=prepared,
         engine_name="kokoro",
+        known_engines=frozenset(ENGINES),
         withheld=frozenset(),
         fallback=KOKORO_VOICES[0],
         api_key=None,

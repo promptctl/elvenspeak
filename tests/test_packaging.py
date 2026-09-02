@@ -44,7 +44,7 @@ PYPROJECT = tomllib.loads(
 NOT_AN_ENGINE = frozenset({"dev"})
 
 #: Where an engine's alias declarations ship. Read from the package's own
-#: directory rather than from `voices._DECLARATIONS`, because what is under test
+#: directory rather than from `declarations._DIRECTORY`, because what is under test
 #: is which files this repository ships — a check that asked the module would go
 #: green by agreeing with whatever the module had been changed to look at.
 ALIAS_TABLES = Path(elvenspeak.__file__).parent / "aliases"
