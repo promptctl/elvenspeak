@@ -338,19 +338,34 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         settings.engine_name, settings.known_engines
     )
 
-    # The negotiation, and the only one. Asked once here rather than per request
-    # because the interface promises the answer is fixed for the engine's life,
-    # and holding one answer is what makes the 501 gate and the ignored header
-    # two readings of a single fact instead of two facts free to disagree.
-    #
-    # [LAW:single-enforcer] The subtraction is here, where the engine's answer and
-    # the deployment's meet, and nowhere else. An engine told what was withheld
-    # may spare itself the machinery, but it is never the thing enforcing the
-    # deployment's decision — an engine that ignored the setting used to serve the
-    # capability anyway, silently, which is the whole reason this line exists.
-    # Applied after the engine declared, so an engine whose capabilities are read
-    # off the assets it opened is subtracted from rather than second-guessed.
-    capabilities = engine.capabilities() - settings.withheld
+    def honoured(voice: Voice) -> frozenset[Capability]:
+        """What this deployment will really do when speaking in `voice`.
+
+        The negotiation, and the only one — the 501 gate and the ignored header
+        are two readings of this, so they cannot disagree.
+
+        Per voice rather than per process. It was one set asked of the engine at
+        startup, which was the same thing only while one process meant one engine:
+        behind [`elvenspeak.router`] a deployment holds voices from several, and
+        one answer for all of them either refuses calls that would have worked or
+        promises ones that will not.
+
+        [LAW:single-enforcer] The subtraction is here, where the voice's answer
+        and the deployment's meet, and nowhere else. An engine told what was
+        withheld may spare itself the machinery, but it is never the thing
+        enforcing the deployment's decision — an engine that ignored the setting
+        used to serve the capability anyway, silently, which is the whole reason
+        this exists. Withholding stays deployment-wide; it now applies to every
+        voice rather than to a single shared value.
+        """
+        return voice.capabilities - settings.withheld
+
+    # The union over what is on offer, for the two answers that are about the
+    # deployment rather than about one voice: the startup log and `GET /v1/models`.
+    # Derived here rather than held, because a stored summary is a second source
+    # free to disagree with the voices it summarises ([LAW:one-source-of-truth]).
+    def offered() -> frozenset[Capability]:
+        return frozenset().union(*(honoured(voice) for voice in cat.installed))
 
     app = FastAPI(
         title="elvenspeak",
@@ -371,7 +386,10 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         "serving %s (fallback: %s; offering: %s; withheld: %s)",
         ", ".join(voice.id for voice in cat.installed) or "no voices",
         cat.fallback or "none",
-        ", ".join(sorted(item.name.lower() for item in capabilities)) or "nothing "
+        # The union, so this line stays a summary of the deployment. A fleet whose
+        # engines differ has voices that differ, and `GET /v1/voices` is where a
+        # caller reads which is which.
+        ", ".join(sorted(item.name.lower() for item in offered())) or "nothing "
         "beyond plain speech",
         ", ".join(sorted(item.name.lower() for item in settings.withheld)) or "nothing",
     )
@@ -393,11 +411,16 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
 
     guarded = [Depends(require_key)]
 
-    def require(capability: Capability) -> None:
-        """Refuses an endpoint whose answer this service cannot really produce.
+    def require(capability: Capability, voice: Voice) -> None:
+        """Refuses an endpoint whose answer this voice cannot really produce.
 
-        "Service" rather than "engine": a capability is missing either because
-        the engine has no way to do it or because the deployment withheld it, and
+        Asked of the voice that will speak, not of the deployment: behind a router
+        `/with-timestamps` can legitimately succeed for one voice and refuse for
+        another in the same process, and only the voice knows which.
+
+        "Service" rather than "engine" in the message: a capability is missing
+        either because the engine has no way to do it or because the deployment
+        withheld it, and
         a refusal that blamed the engine would send an operator who switched it
         off themselves to read an engine's source. Which of the two it was is in
         the startup log, where it can be said without naming a setting to a
@@ -416,7 +439,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         has no phonemizer would send that instruction to someone who could follow
         it all afternoon.
         """
-        if capability not in capabilities:
+        if capability not in honoured(voice):
             raise HTTPException(
                 status_code=501, detail=f"this service cannot {capability.value}"
             )
@@ -489,7 +512,9 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         }
         if resolution.substituted:
             out["x-elvenspeak-voice-requested"] = (resolution.requested,)
-        ignored = body.ignored(_honoured(capabilities, directory.reach(body.model_id)))
+        ignored = body.ignored(
+            _honoured(honoured(resolution.voice), directory.reach(body.model_id))
+        )
         if ignored:
             out["x-elvenspeak-ignored"] = ignored
         # An endpoint with a header of its own passes it here rather than
@@ -528,7 +553,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
 
         def synthesize() -> tuple[int, bytes]:
             spoken = engine.speak(
-                resolution.voice, body.text, body.prosody(capabilities)
+                resolution.voice, body.text, body.prosody(honoured(resolution.voice))
             )
             return spoken.sample_rate, b"".join(spoken.audio)
 
@@ -562,7 +587,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         # samples are still pulled later, by the encoder's pump, so a client that
         # disconnects between request and read costs nothing.
         spoken = await asyncio.to_thread(
-            engine.speak, resolution.voice, body.text, body.prosody(capabilities)
+            engine.speak, resolution.voice, body.text, body.prosody(honoured(resolution.voice))
         )
         return StreamingResponse(
             encoding.encode_stream(spoken.audio, spoken.sample_rate, fmt),
@@ -579,10 +604,10 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         fmt = parse_format(output_format)
         require_served(body)
         resolution = resolve(voice_id)
-        require(Capability.TIMESTAMPS)
+        require(Capability.TIMESTAMPS, resolution.voice)
 
         spoken = await asyncio.to_thread(
-            engine.speak_timed, resolution.voice, body.text, body.prosody(capabilities)
+            engine.speak_timed, resolution.voice, body.text, body.prosody(honoured(resolution.voice))
         )
         audio = await encoding.encode(spoken.pcm, spoken.sample_rate, fmt)
         aligned = align_mod.align(body.text, spoken)
@@ -606,8 +631,8 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         fmt = parse_format(output_format)
         require_served(body)
         resolution = resolve(voice_id)
-        require(Capability.TIMESTAMPS)
-        prosody = body.prosody(capabilities)
+        require(Capability.TIMESTAMPS, resolution.voice)
+        prosody = body.prosody(honoured(resolution.voice))
 
         async def stream() -> AsyncIterator[bytes]:
             # Split here rather than letting the engine split internally, because an
@@ -680,7 +705,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         difference is theirs, and mirroring it is the whole job.
         """
         return [
-            _model_json(model_id, capabilities) for model_id in directory.listed()
+            _model_json(model_id, offered()) for model_id in directory.listed()
         ]
 
     # ------------------------------------------------------------------ voices
@@ -689,7 +714,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     def list_voices() -> dict:
         return {
             "voices": [
-                _voice_json(voice, cat.aliases_for(voice.id))
+                _voice_json(voice, cat.aliases_for(voice.id), honoured(voice))
                 for voice in cat.installed
             ]
         }
@@ -716,7 +741,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         voice = cat.get(voice_id)
         if voice is None:
             raise HTTPException(status_code=404, detail=f"unknown voice {voice_id!r}")
-        return _voice_json(voice, cat.aliases_for(voice.id))
+        return _voice_json(voice, cat.aliases_for(voice.id), honoured(voice))
 
     @app.get("/v1/voices/{voice_id}/settings", dependencies=guarded)
     def voice_settings(voice_id: str) -> dict:
@@ -776,7 +801,9 @@ def _escaped(char: str) -> str:
     return f"\\U{code:08x}"
 
 
-def _voice_json(voice: Voice, aliases: tuple[str, ...]) -> dict:
+def _voice_json(
+    voice: Voice, aliases: tuple[str, ...], honoured: frozenset[Capability]
+) -> dict:
     """One voice in the shape the voice endpoints return.
 
     Field names are ElevenLabs', not any engine's, because the whole point is
@@ -811,6 +838,13 @@ def _voice_json(voice: Voice, aliases: tuple[str, ...]) -> dict:
         # discover that the ElevenLabs id it holds will reach this voice, instead
         # of finding out by trying it.
         "aliases": list(aliases),
+        # Not an ElevenLabs field either, and per voice rather than per server
+        # because that is what it is: behind a router one voice may be timed and
+        # the next not. A caller reads this to know which of its voices can carry
+        # captions without discovering it from a 501 mid-conversation, and
+        # `elvenspeak.remote` reads it to route on the truth rather than on a
+        # deployment-wide average.
+        "capabilities": sorted(item.name.lower() for item in honoured),
     }
 
 
@@ -824,12 +858,16 @@ def _model_json(model_id: str, capabilities: frozenset[Capability]) -> dict:
     `use_speaker_boost`, and a client that believed otherwise would send
     parameters that come back named in `x-elvenspeak-ignored`.
 
-    [LAW:one-source-of-truth] `capabilities` is the same set that decides the 501
-    gate and that header, spelled the same way the startup log spells it. A
-    caller reading this before a call learns that timestamps are unavailable
-    here; the alternative is discovering it from a 501 in the middle of a
-    conversation. Rendering it from a second list would let the advertisement and
-    the refusal disagree, which is the one thing this endpoint exists to prevent.
+    `capabilities` here is the **union** over the voices on offer, derived at the
+    point of use rather than stored. It answers "what can this deployment do at
+    all", which is a coarser question than the one a request asks — behind a
+    router the honest per-voice answer is on each voice in `GET /v1/voices`, and
+    that is what the 501 gate and the ignored header read. A caller choosing a
+    model reads this; a caller choosing a voice reads that.
+
+    [LAW:one-source-of-truth] Derived, never held. A stored summary beside the
+    voices it summarises is a second source free to disagree with them, which is
+    exactly the drift this endpoint exists to prevent.
 
     The capability names go in a field of our own rather than being forced into
     ElevenLabs' flags, exactly as `aliases` is on a voice. `SPEED` is not

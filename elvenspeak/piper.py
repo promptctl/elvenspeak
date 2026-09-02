@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -129,13 +129,8 @@ class PiperEngine:
     arranged to make unreachable.
     """
 
-    def __init__(
-        self,
-        installed: dict[str, _Installed],
-        capabilities: frozenset[engine.Capability],
-    ) -> None:
+    def __init__(self, installed: dict[str, _Installed]) -> None:
         self._installed = installed
-        self._capabilities = capabilities
 
     def voices(self) -> tuple[engine.Voice, ...]:
         """Every configured voice, in the order the operator named them.
@@ -153,14 +148,6 @@ class PiperEngine:
         sorts for display on its own.
         """
         return tuple(installed.voice for installed in self._installed.values())
-
-    def capabilities(self) -> frozenset[engine.Capability]:
-        # Settled by `_Prepared.open` from the flag the sessions were really
-        # opened under, not recomputed from the setting that produced it:
-        # `include_alignments`
-        # patches the graph at load time, so these particular sessions are the
-        # only thing that knows whether durations can be reported.
-        return self._capabilities
 
     def speak(
         self, voice: engine.Voice, text: str, prosody: engine.Prosody
@@ -254,29 +241,30 @@ class _Prepared:
         """Opens every configured voice and returns the engine that speaks them."""
         from piper import PiperVoice
 
+        # Settled here, beside the loop that opens the sessions, rather than
+        # recomputed later from the setting that produced it: `include_alignments`
+        # patches the graph at load time, so these particular sessions are the only
+        # thing that knows whether durations can be reported. Every Piper voice in
+        # one process is opened the same way, so they all carry the same set — the
+        # per-voice shape costs nothing here and is what a router needs.
+        capabilities = _INHERENT | (
+            {engine.Capability.TIMESTAMPS} if self.timings else frozenset()
+        )
+
         installed: dict[str, _Installed] = {}
         for key, ready in _install(
             self.keys, self.models_dir, self.allow_download
         ).items():
             _LOGGER.info("loading voice %s", key)
             installed[key] = _Installed(
-                voice=ready.voice,
+                voice=replace(ready.voice, capabilities=frozenset(capabilities)),
                 sample_rate=ready.sample_rate,
                 model=PiperVoice.load(
                     str(ready.model_path), include_alignments=self.timings
                 ),
             )
 
-        # Decided here, beside the loop that opened the sessions, rather than
-        # stored as a flag the engine re-reads later: this is the only line that
-        # can see both what was asked for and what the voices were actually
-        # opened with, and an engine holding the setting instead would keep
-        # answering for the setting if those two ever came apart.
-        return PiperEngine(
-            installed,
-            capabilities=_INHERENT
-            | ({engine.Capability.TIMESTAMPS} if self.timings else set()),
-        )
+        return PiperEngine(installed)
 
 
 def configure(

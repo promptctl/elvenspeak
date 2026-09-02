@@ -53,7 +53,7 @@ from dataclasses import dataclass
 
 from . import discovery, engine
 from .provisioning import ConfigError
-from .remote import Description, Remote
+from .remote import Remote
 
 _LOGGER = logging.getLogger("elvenspeak.router")
 
@@ -95,27 +95,18 @@ class RouterEngine:
     #: they are built from one pass in [`_Prepared.open`] — which is why nothing
     #: below checks for a miss.
     _speakers: Mapping[str, Remote]
-    _capabilities: frozenset[engine.Capability]
 
     def voices(self) -> tuple[engine.Voice, ...]:
-        return self._voices
+        """Every voice the fleet offers, each carrying what its own backend honours.
 
-    def capabilities(self) -> frozenset[engine.Capability]:
-        """What every backend in the fleet will honour — the intersection.
-
-        Intersection and not union, because this one answer is given for every
-        voice ([`elvenspeak.engine.Engine.capabilities`] is constant for the
-        engine's life), and a union would advertise timestamps that the backend
-        owning some particular voice cannot produce. Absence is the safe default
-        there for exactly this reason: a router that undersells is pessimistic,
-        one that oversells lies in the audio.
-
-        The cost is real — one backend without timestamps switches them off for
-        the whole fleet — and it is the honest price of a fleet-wide answer.
-        `piper-routing-7e2.4` makes capability a per-voice question, and this
-        becomes a union of what each voice's own backend declares.
+        There is no fleet-wide capability answer here and that is the whole of
+        `piper-routing-7e2.4`: it used to be the *intersection*, which switched
+        timestamps off for every voice as soon as one backend could not measure.
+        A union would have lied the other way. Each voice arrives from
+        [`elvenspeak.remote`] carrying its own backend's answer, so the router
+        holds no opinion to be wrong with.
         """
-        return self._capabilities
+        return self._voices
 
     def speak(
         self, voice: engine.Voice, text: str, prosody: engine.Prosody
@@ -139,19 +130,24 @@ class _Found:
 
     remote: Remote
     voices: tuple[engine.Voice, ...]
-    description: Description
+    #: The engine this backend runs, for the startup log and nothing else. What it
+    #: will honour travels on each voice above.
+    engine_name: str
 
 
 def _fleet(consul_url: str, api_key: str | None) -> tuple[_Found, ...]:
     """Every discovered backend, with what it offers and what it calls itself.
 
     Each backend is asked each question exactly once, and the answers are kept
-    together: a name taken from one request and capabilities from another could
-    describe two different moments of a rolling deploy, and the pair would be
-    reported as one engine that never existed.
+    together, so a name and a voice list cannot come from two different moments of
+    a rolling deploy and be reported as one engine that never existed.
     """
     return tuple(
-        _Found(remote=remote, voices=remote.voices(), description=remote.describe())
+        _Found(
+            remote=remote,
+            voices=remote.voices(),
+            engine_name=remote.engine_name(),
+        )
         for remote in (
             Remote(backend, api_key) for backend in discovery.engines(consul_url)
         )
@@ -240,7 +236,7 @@ class _Prepared:
             _LOGGER.info(
                 "routing %d voice(s) to %s at %s",
                 len(backend.voices),
-                backend.description.engine_name,
+                backend.engine_name,
                 backend.remote.backend.base_url,
             )
 
@@ -262,14 +258,6 @@ class _Prepared:
         return RouterEngine(
             _voices=tuple(offered_voices),
             _speakers=speakers,
-            # An empty fleet has no intersection to take, and `frozenset` is the
-            # right answer rather than a special case: a router with no backends
-            # honours nothing, which is exactly what it can do.
-            _capabilities=frozenset.intersection(
-                *(backend.description.capabilities for backend in found)
-            )
-            if found
-            else frozenset(),
         )
 
 

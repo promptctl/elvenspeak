@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import pytest
 from conftest import (
+    declared,
     KOKORO_MODEL,
     KOKORO_TIMELESS_MODEL,
     KOKORO_VOICES,
@@ -45,8 +46,8 @@ def engine(kokoro_installed):
 
 def test_the_export_that_reports_durations_declares_it(engine):
     """The default deployment, whose export carries a `duration` output."""
-    assert Capability.TIMESTAMPS in engine.capabilities()
-    assert Capability.SPEED in engine.capabilities()
+    assert Capability.TIMESTAMPS in declared(engine)
+    assert Capability.SPEED in declared(engine)
 
 
 def test_the_export_without_durations_does_not_declare_the_capability(
@@ -62,10 +63,10 @@ def test_the_export_without_durations_does_not_declare_the_capability(
     """
     engine = kokoro_prepared(model=KOKORO_TIMELESS_MODEL).open()
 
-    assert Capability.TIMESTAMPS not in engine.capabilities()
+    assert Capability.TIMESTAMPS not in declared(engine)
     # Still a working engine, so this is a capability absent rather than a
     # deployment broken — the distinction the whole negotiation rests on.
-    assert Capability.SPEED in engine.capabilities()
+    assert Capability.SPEED in declared(engine)
     assert engine.voices()
 
 
@@ -172,7 +173,7 @@ def test_a_deployment_that_withheld_timestamps_is_obeyed_by_this_engine_too(
     # The engine still declares it: the export has a `duration` output and
     # saying otherwise would be this engine lying about itself. What changes is
     # what the server offers, which is the deployment's answer and not its.
-    assert Capability.TIMESTAMPS in opened.capabilities()
+    assert Capability.TIMESTAMPS in declared(opened)
 
     client = TestClient(create_app(settings, opened))
     assert client.post(

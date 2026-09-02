@@ -192,23 +192,23 @@ def test_a_replica_still_loading_its_voices_is_not_routed_to():
         assert b"".join(engine.speak(ALPHA_VOICES[0], "hello", Prosody()).audio)
 
 
-def test_capabilities_are_what_every_backend_will_honour():
-    """Intersection, because one answer is given for every voice.
+def test_each_voice_carries_what_its_own_backend_will_honour():
+    """The point of `piper-routing-7e2.4`, and what a router is for.
 
-    A union would advertise timestamps that the backend owning some particular
-    voice cannot produce, and `Engine.capabilities` is explicit that absence is
-    the safe default: a router that undersells is pessimistic, one that oversells
-    lies in the audio.
+    This was the intersection of the fleet's, because one answer was given for
+    every voice — so a single backend that could not measure switched timestamps
+    off for every voice in the deployment. A union would have lied the other way,
+    promising captions for voices that cannot produce them. Neither is true, and
+    per-voice is: alpha's voice measures because alpha does, and beta's does not
+    because beta does not, in one process at the same time.
     """
     with cluster(
         ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", BETA_VOICES, NOTHING)
     ) as consul:
-        assert opened(consul).capabilities() == NOTHING
+        offered = {voice.id: voice.capabilities for voice in opened(consul).voices()}
 
-    with cluster(
-        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", BETA_VOICES, EVERYTHING)
-    ) as consul:
-        assert opened(consul).capabilities() == EVERYTHING
+    assert offered["alpha-one"] == EVERYTHING
+    assert offered["beta-one"] == NOTHING
 
 
 def test_a_fleet_with_no_engines_boots_and_offers_nothing():
@@ -223,7 +223,6 @@ def test_a_fleet_with_no_engines_boots_and_offers_nothing():
         engine = opened(consul)
 
     assert engine.voices() == ()
-    assert engine.capabilities() == NOTHING
 
 
 def test_an_unreachable_consul_fails_the_boot_rather_than_finding_nothing():
@@ -435,7 +434,15 @@ def test_a_timestamp_that_is_not_a_usable_number_fails_the_request(alignment):
 
     @backend.get("/v1/voices")
     def voices():
-        return {"voices": [{"voice_id": "alpha-one", "name": "Alpha One"}]}
+        return {
+            "voices": [
+                {
+                    "voice_id": "alpha-one",
+                    "name": "Alpha One",
+                    "capabilities": ["speed", "timestamps"],
+                }
+            ]
+        }
 
     @backend.post("/v1/text-to-speech/{voice_id}/with-timestamps")
     def timed(voice_id: str):
@@ -454,3 +461,66 @@ def test_a_timestamp_that_is_not_a_usable_number_fails_the_request(alignment):
         engine = opened(consul)
         with pytest.raises(RemoteFailure):
             engine.speak_timed(ALPHA_VOICES[0], "hello", Prosody())
+
+
+def test_one_deployment_tells_the_truth_about_each_of_its_voices():
+    """The ticket's acceptance criterion, asserted where a caller stands.
+
+    One process, two voices, two different answers — in both places the server
+    answers about capability. Before this, a deployment had one set for
+    everything it served and had to choose which of its voices to lie about:
+    refuse `/with-timestamps` for alpha's voice, which works, or promise it for
+    beta's, which cannot.
+
+    Both halves are checked because they are two readings of one fact and a fix
+    that corrected only the gate would leave the header telling callers the
+    opposite of what the endpoint does.
+    """
+    with cluster(
+        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", BETA_VOICES, NOTHING)
+    ) as consul:
+        settings = Settings(
+            engine=router.configure({router.CONSUL_URL: consul}, NOTHING),
+            engine_name="router",
+            known_engines=frozenset(ENGINES),
+            withheld=NOTHING,
+            fallback=Substitution.FIRST_OFFERED,
+            api_key=None,
+            host="127.0.0.1",
+            port=0,
+        )
+        with TestClient(create_app(settings, settings.engine.open())) as client:
+            timed = {
+                voice_id: client.post(
+                    f"/v1/text-to-speech/{voice_id}/with-timestamps",
+                    json={"text": "hello there"},
+                )
+                for voice_id in ("alpha-one", "beta-one")
+            }
+            spoken = {
+                voice_id: client.post(
+                    f"/v1/text-to-speech/{voice_id}/stream",
+                    json={"text": "hello", "voice_settings": {"speed": 2.0}},
+                )
+                for voice_id in ("alpha-one", "beta-one")
+            }
+            listed = {
+                entry["voice_id"]: entry["capabilities"]
+                for entry in client.get("/v1/voices").json()["voices"]
+            }
+
+    # The 501 gate: alpha measures, beta does not, in the same process.
+    assert timed["alpha-one"].status_code == 200, timed["alpha-one"].text
+    assert timed["beta-one"].status_code == 501, timed["beta-one"].text
+
+    # The ignored header, which has to agree with the gate rather than with some
+    # deployment-wide average.
+    assert "voice_settings.speed" not in spoken["alpha-one"].headers.get(
+        "x-elvenspeak-ignored", ""
+    )
+    assert "voice_settings.speed" in spoken["beta-one"].headers["x-elvenspeak-ignored"]
+
+    # And a caller can read it before calling, per voice, rather than discovering
+    # it from a 501 partway through a conversation.
+    assert listed["alpha-one"] == ["speed", "timestamps"]
+    assert listed["beta-one"] == []

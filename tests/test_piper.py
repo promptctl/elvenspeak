@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import make_voice, piper_prepared
+from conftest import declared, make_voice, piper_prepared
 
 from elvenspeak import piper
 from elvenspeak.engine import Capability, Prosody
@@ -272,7 +272,7 @@ def test_the_engine_declares_the_flag_its_sessions_were_opened_under(tmp_path, t
     """
     make_voice(tmp_path)
     loaded = load(tmp_path, timings=timings)
-    assert (Capability.TIMESTAMPS in loaded.capabilities()) is timings
+    assert (Capability.TIMESTAMPS in declared(loaded)) is timings
 
 
 def test_piper_always_declares_speed_whatever_timings_was(tmp_path):
@@ -284,7 +284,7 @@ def test_piper_always_declares_speed_whatever_timings_was(tmp_path):
     with no `speed` in it behaves identically either way.
     """
     make_voice(tmp_path)
-    assert Capability.SPEED in load(tmp_path).capabilities()
+    assert Capability.SPEED in declared(load(tmp_path))
 
 
 def test_acquiring_does_not_open_any_session(tmp_path, monkeypatch):

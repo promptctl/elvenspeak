@@ -183,8 +183,14 @@ def measuring(subject: Engine) -> Engine:
 
 
 def _declaring(subject: Engine, capability: Capability) -> Engine:
-    if capability not in subject.capabilities():
-        pytest.skip(f"engine does not declare {capability.name}")
+    """`subject`, if the voice these tests speak in declares `capability`.
+
+    Asked of the voice rather than of the engine, because that is where the
+    answer lives now. Every test that reaches here speaks in `first_voice`, so
+    that is the voice whose claim has to hold.
+    """
+    if capability not in first_voice(subject).capabilities:
+        pytest.skip(f"voice does not declare {capability.name}")
     return subject
 
 
@@ -233,18 +239,23 @@ def test_no_two_voices_share_an_id(subject: Engine):
     assert len(set(ids)) == len(ids)
 
 
-def test_what_the_engine_says_it_can_do_does_not_change_between_calls(
+def test_what_a_voice_says_it_can_do_does_not_change_between_calls(
     subject: Engine,
 ):
     """The negotiation happens once, at startup, and is held for the process.
 
-    `create_app` asks exactly once, which is what makes the 501 gate and the
-    ignored header two readings of one fact. An engine whose answer varied per
-    call would have that fact captured at an arbitrary moment, and every later
-    answer the server gave about it would be stale rather than wrong — the kind
+    The server reads a voice's claim on the request that names it, so a claim
+    that varied between calls would make the 501 gate and the ignored header two
+    readings of two different facts — stale rather than wrong, which is the kind
     that never surfaces as a failure.
+
+    Since the claim travels on a frozen `Voice`, this is now asking the same
+    question as "the voice list does not change", from the one angle that matters
+    for what the server promises about it.
     """
-    assert subject.capabilities() == subject.capabilities()
+    assert {voice.id: voice.capabilities for voice in subject.voices()} == {
+        voice.id: voice.capabilities for voice in subject.voices()
+    }
 
 
 # --------------------------------------------------------- what it then does
@@ -313,7 +324,7 @@ def test_the_pace_varies_exactly_when_speed_is_declared(subject: Engine):
     varies = samples_of(subject, voice, LONG, speed=2.0) < samples_of(
         subject, voice, LONG, speed=0.5
     )
-    assert varies == (Capability.SPEED in subject.capabilities())
+    assert varies == (Capability.SPEED in voice.capabilities)
 
 
 def test_a_declared_measurement_accounts_for_every_sample(measuring: Engine):

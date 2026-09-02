@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -76,6 +76,20 @@ _ENVIRONMENT = (
 #: added to one list and forgotten in the other, and the file that forgot goes
 #: quietly vacuous rather than red.
 ENGINE_LIBRARIES = frozenset({"piper", "kokoro_onnx"})
+
+
+def declared(engine) -> frozenset[Capability]:
+    """Everything any voice this engine offers can do — the union.
+
+    The coarse answer, computed where it is wanted rather than stored, which is
+    the whole shape of `piper-routing-7e2.4`: capability lives on the voice, and
+    an engine-wide summary kept as its own value would be a second source free to
+    disagree with the voices it summarises.
+
+    Right for a test asking "does this engine do X at all". A test about what a
+    *request* gets reads the voice, because behind a router those differ.
+    """
+    return frozenset().union(*(voice.capabilities for voice in engine.voices()))
 
 
 def _use_a_working_espeak() -> None:
@@ -289,13 +303,17 @@ class DeclaredEngine:
         voices: tuple[Voice, ...] = DECLARED_VOICES,
     ) -> None:
         self._capabilities = capabilities
-        self._voices = voices
+        # Stamped onto the voices, because that is where a capability lives. Taken
+        # as one argument rather than per voice because every voice this stand-in
+        # offers is spoken the same way — which is true of the real single-engine
+        # implementations too, and is exactly why the per-voice shape costs them
+        # nothing.
+        self._voices = tuple(
+            replace(voice, capabilities=capabilities) for voice in voices
+        )
 
     def voices(self) -> tuple[Voice, ...]:
         return self._voices
-
-    def capabilities(self) -> frozenset[Capability]:
-        return self._capabilities
 
     def speak(self, voice: Voice, text: str, prosody: Prosody) -> Speech:
         return Speech(

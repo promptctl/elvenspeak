@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import logging
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -139,12 +139,10 @@ class KokoroEngine:
         self,
         model: "Kokoro",
         installed: dict[str, engine.Voice],
-        capabilities: frozenset[engine.Capability],
         sample_rate: int,
     ) -> None:
         self._model = model
         self._installed = installed
-        self._capabilities = capabilities
         self._sample_rate = sample_rate
 
     def voices(self) -> tuple[engine.Voice, ...]:
@@ -157,13 +155,6 @@ class KokoroEngine:
         voice its operator listed first.
         """
         return tuple(self._installed.values())
-
-    def capabilities(self) -> frozenset[engine.Capability]:
-        # Settled by `_Prepared.open` from the session that was really opened,
-        # not recomputed from the filename that produced it: whether durations
-        # can be reported is a property of the export's graph outputs, so the
-        # opened session is the only thing that knows.
-        return self._capabilities
 
     def speak(
         self, voice: engine.Voice, text: str, prosody: engine.Prosody
@@ -249,15 +240,21 @@ class _Prepared:
         model, installed, sample_rate = _open(
             self.keys, self.models_dir, self.model, self.allow_download
         )
-        # Decided here, beside the session that was opened, rather than stored
-        # as a setting the engine re-reads later: this is the only line that can
-        # see what the export really offers, and an engine holding the filename
-        # instead would keep answering for the filename.
+        # Settled here, beside the session that was opened, rather than stored as
+        # a setting the engine re-reads later: whether durations can be reported is
+        # a property of the export's graph outputs, so the opened session is the
+        # only thing that knows, and an engine holding the filename instead would
+        # keep answering for the filename. Every voice this export speaks is spoken
+        # by that one session, so they all carry the same set.
+        capabilities = _INHERENT | (
+            {engine.Capability.TIMESTAMPS} if model.has_timings else frozenset()
+        )
         return KokoroEngine(
             model,
-            installed,
-            capabilities=_INHERENT
-            | ({engine.Capability.TIMESTAMPS} if model.has_timings else set()),
+            {
+                key: replace(voice, capabilities=frozenset(capabilities))
+                for key, voice in installed.items()
+            },
             sample_rate=sample_rate,
         )
 
