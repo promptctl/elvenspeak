@@ -33,12 +33,31 @@ _DIRECTORY = Path(__file__).parent / "aliases"
 
 
 def _read(engine_name: str) -> Mapping[str, object]:
-    """Everything in `engine_name`'s declaration file, or nothing if it has none."""
+    """Everything in `engine_name`'s declaration file, or nothing if it has none.
+
+    [LAW:parse-dont-validate] The checkpoint where bytes become a table, so its
+    failure arm has to be the one every other startup problem uses.
+    [`voice_aliases`] and [`model_ids`] each prove the *shape* of what comes back
+    and raise [`ConfigError`] naming the file — but a file that never parses
+    reaches neither, and `tomllib`'s own error escaped past
+    [`elvenspeak.settings.reported_or_exit`], which catches `ConfigError` and
+    nothing else. One misplaced bracket therefore answered an operator with a
+    traceback where every other typo in the same file answers with a sentence.
+
+    The parse error is quoted rather than summarised: `tomllib` reports the line
+    and column it gave up at, which is the only part of this an operator can act
+    on, and this module knows nothing that would improve on it.
+    """
     declared = _DIRECTORY / f"{engine_name}.toml"
     if not declared.exists():
         return {}
     with declared.open("rb") as handle:
-        return tomllib.load(handle)
+        try:
+            return tomllib.load(handle)
+        except tomllib.TOMLDecodeError as unparseable:
+            raise ConfigError(
+                [f"{engine_name}.toml: not valid TOML ({unparseable})"]
+            ) from None
 
 
 def voice_aliases(engine_name: str) -> Mapping[str, str]:

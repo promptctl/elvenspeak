@@ -277,18 +277,30 @@ def declare(directory, engine_name: str, body: str):
 def test_a_malformed_alias_table_refuses_to_boot(tmp_path, monkeypatch):
     """The reason aliases are read while the app is built, not on first use.
 
-    Read lazily it surfaced as an uncaught TOMLDecodeError on whichever
-    synthesis call first needed an alias — invisible to a healthcheck that never
-    touches resolution, and reported nowhere near the file that caused it.
+    Read lazily it surfaced on whichever synthesis call first needed an alias —
+    invisible to a healthcheck that never touches resolution, and reported
+    nowhere near the file that caused it.
+
+    [LAW:behavior-not-structure] This used to assert that the escaping exception
+    came from the `tomllib` module, which pinned the *plumbing*: it passed only
+    while the failure stayed untranslated, and `settings.reported_or_exit`
+    catches `ConfigError` and nothing else, so what it was really guarding was an
+    operator getting a traceback. The contract is the one its valid-TOML
+    neighbour already states — the file is named, in the list every other startup
+    problem joins — and the parse position rides along because a bracket in a
+    hundred-line table is not findable from the filename alone.
     """
     declare(tmp_path, "piper", "[elevenlabs\nnot = valid")
     monkeypatch.setattr(declarations_mod, "_DIRECTORY", tmp_path)
 
-    with pytest.raises(Exception) as raised:
+    with pytest.raises(ConfigError) as raised:
         Catalog.for_engine(
             "piper", _Engine("en_US-lessac-medium"), fallback=Substitution.OFF
         )
-    assert "toml" in type(raised.value).__module__.lower()
+    assert "piper.toml" in str(raised.value)
+    # Where the unclosed `[elevenlabs` is, quoted from `tomllib` rather than
+    # restated: the position is the only part of this an operator can act on.
+    assert "line 1, column 12" in str(raised.value)
 
 
 def test_an_engine_reads_its_own_declarations_and_no_others(tmp_path, monkeypatch):
