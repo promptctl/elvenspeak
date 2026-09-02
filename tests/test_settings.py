@@ -14,8 +14,10 @@ each had a second home that already knew more than this module could.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
-from conftest import DeclaredPrepared
+from conftest import _ENVIRONMENT, DeclaredPrepared
 
 from elvenspeak import piper
 from elvenspeak.engine import Capability
@@ -347,3 +349,81 @@ def test_a_good_environment_comes_back_as_settings(clean_env):
     # and handed it the same environment, rather than that Piper's own defaults
     # are what they are, which is `test_piper.py`'s business.
     assert settings.engine == piper.configure({}, frozenset())
+
+
+def _settings_read_from_the_environment() -> dict[str, str]:
+    """Every variable name the package reads out of an environment, by module.
+
+    Found rather than listed. `env.get("NAME")` and `flag(env, "NAME", …)` are the
+    only two shapes a setting is read through, and a name reached through either
+    is a name a startup answers for.
+
+    `provisioning.flag`'s own `env.get(name)` resolves to a parameter and is
+    skipped, which is correct: that function reads whichever name its caller
+    passed, and those callers are found here individually.
+    """
+    import ast
+
+    import elvenspeak
+
+    found: dict[str, str] = {}
+    for path in sorted(Path(elvenspeak.__file__).parent.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        # Module-level `NAME = "VALUE"`, so a setting exported as a constant —
+        # `router.CONSUL_URL` — is resolved to the variable it names.
+        constants = {
+            target.id: node.value.value
+            for node in tree.body
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+            for target in node.targets
+            if isinstance(target, ast.Name) and isinstance(node.value.value, str)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            reads_env = (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "env"
+                and node.args
+            )
+            reads_flag = (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "flag"
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "env"
+            )
+            named = (
+                node.args[0] if reads_env else node.args[1] if reads_flag else None
+            )
+            if isinstance(named, ast.Constant) and isinstance(named.value, str):
+                found[named.value] = path.name
+            elif isinstance(named, ast.Name) and named.id in constants:
+                found[constants[named.id]] = path.name
+    return found
+
+
+def test_the_clean_environment_clears_every_setting_a_startup_reads():
+    """[FRAMING:representation] A map the machine redraws, not one somebody remembers.
+
+    `conftest._ENVIRONMENT` is what `clean_env` strips before a test parses an
+    environment, and its own docstring predicts what happens when it falls behind:
+    "the test that forgot goes flaky later with nothing pointing at the cause". It
+    then fell behind twice while the router was being added — once for each of that
+    engine's two settings — which is the law's point exactly. Two representations
+    that can diverge do not merely risk it.
+
+    One-directional on purpose. A name in the list that nothing reads is fine and
+    deliberate: the docstring keeps retired names like `ELVENSPEAK_TIMESTAMPS` so a
+    shell still exporting one cannot leak into a test either. What must never
+    happen is a setting that is read and not cleared.
+    """
+    read = _settings_read_from_the_environment()
+    missing = {name: module for name, module in read.items() if name not in _ENVIRONMENT}
+
+    assert not missing, (
+        "these are read at startup but not cleared by `clean_env`: "
+        + ", ".join(f"{name} ({module})" for name, module in sorted(missing.items()))
+    )

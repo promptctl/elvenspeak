@@ -65,9 +65,19 @@ An id this server does not know still gets audio, in the fallback voice, because
 clients hold ElevenLabs voice ids in saved settings and a server that 404s all
 of them replaces nothing.
 
-`elvenspeak/aliases/` holds one table per engine — `piper.toml`, `kokoro.toml` —
-each named after that engine's key in the registry, and an engine reads only the
-file named after itself. Every table maps the nine original ElevenLabs voices
+`elvenspeak/aliases/` holds one table per engine that declares any —
+`piper.toml`, `kokoro.toml` — each named after that engine's key in the registry,
+and an engine reads only the file named after itself. An engine with nothing to
+declare has no file.
+
+**The router has none, and aliases do not resolve through it.** A voice id from
+the list above reaches a substitute on a piper or kokoro deployment; sent to a
+router in front of those same engines it lands on the fallback voice instead,
+exactly as a completely unknown id would. The router's own table is empty, and a
+backend is only ever asked for an already-resolved local voice id, so its table
+is never consulted either. Tracked as `piper-routing-7e2.15`; until it is done, a
+routed deployment is not a drop-in for a direct one where saved ElevenLabs voice
+ids are concerned. Every table maps the nine original ElevenLabs voices
 onto that engine's own voices, comparable in register, **not** in likeness. The
 scoping is what keeps them honest: one shared table can only name one engine's
 voices, and a Piper voice name is meaningless inside the Kokoro image. An engine
@@ -109,6 +119,23 @@ depending on what you named.
   and `model_id` comes back in `x-elvenspeak-ignored`. Deliberately not a
   `422`: every stock ElevenLabs client sends a `model_id`, and refusing the
   unrecognised ones would turn most real callers away on their first request.
+
+A router deployment answers to `router` and to nothing else, including the
+engines it is actually fronting, and the two ways of naming a backend fail
+differently:
+
+- `model_id: "piper"` to a router in front of a piper backend is the **second**
+  case above — a `422` naming an engine this deployment is not running — even
+  though the router does route to exactly that engine.
+- `model_id: "eleven_flash_v2_5"`, one of the ids piper declares, is the
+  **third** case: served, with the voice deciding, and `model_id` returned in
+  `x-elvenspeak-ignored`. The same request to a piper deployment directly is
+  served *and* not ignored, so a client that reads that header sees a different
+  answer depending only on whether a router was in the way.
+
+Both have one cause — the three answers are decided by what this *deployment*
+runs, and a router runs the router — and one ticket: `piper-routing-7e2.6`, where
+the chosen engine travels with the request.
 
 Which ElevenLabs ids reach an engine is declared by that engine, in the same
 `elvenspeak/aliases/<engine>.toml` file that holds its voice aliases, under the
@@ -176,7 +203,9 @@ library that works would be a silent fallback inside the component whose job is
 to fail loudly.
 
 ```
-uv run --extra piper main.py            # or --extra kokoro, to run the other one
+uv run --extra piper main.py            # or --extra kokoro, to run that one.
+                                        # --extra router installs nothing: its
+                                        # backends are other elvenspeak servers.
 ```
 
 The extra is not optional in practice, it is the engine. Each engine's libraries
@@ -193,8 +222,8 @@ nothing here touches the network.
 
 ```
 # The server's own, true whichever engine runs:
-ELVENSPEAK_ENGINE=piper            # or kokoro; any other name refuses to start,
-                                   # and says which names are real
+ELVENSPEAK_ENGINE=piper            # or kokoro, or router; any other name refuses
+                                   # to start, and says which names are real
 ELVENSPEAK_FALLBACK_VOICE=…        # default: the first voice the engine offers.
                                    # Empty string turns substitution off (404s).
 ELVENSPEAK_API_KEY=                # unset accepts every request
@@ -221,6 +250,21 @@ KOKORO_VOICES=af_heart,am_michael,bf_emma,bm_george
 KOKORO_MODELS_DIR=./models
 KOKORO_MODEL=kokoro-v1.0.int8.onnx # which published ONNX export to open
 KOKORO_ALLOW_DOWNLOAD=1            # 0 to require assets be present already
+
+# The router engine's own, read only when it is the engine:
+ROUTER_CONSUL_URL=                 # required, e.g. http://10.0.0.4:8500. Where
+                                   # to ask which engines are running. Never
+                                   # defaulted: guessing the local agent is right
+                                   # only on a host network, and on a bridge
+                                   # network it would discover nothing and blame
+                                   # the fleet.
+ROUTER_BACKEND_API_KEY=            # the key the engines behind it are guarded
+                                   # with, sent inward as xi-api-key. Unset sends
+                                   # no header, for a fleet reachable only from
+                                   # inside the cluster. Distinct from
+                                   # ELVENSPEAK_API_KEY, which guards the
+                                   # router's own callers — the two sides of a
+                                   # router need not share a secret.
 ```
 
 `ELVENSPEAK_WITHHOLD` is in the server's group and stays there whichever engine

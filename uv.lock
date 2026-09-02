@@ -127,7 +127,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.4" },
 ]
-provides-extras = ["piper", "kokoro", "dev"]
+provides-extras = ["piper", "kokoro", "router", "dev"]
 
 [[package]]
 name = "espeakng-loader"
