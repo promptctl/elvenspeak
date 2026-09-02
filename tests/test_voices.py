@@ -274,21 +274,76 @@ def declare(directory, engine_name: str, body: str):
     return directory
 
 
-def test_a_malformed_alias_table_refuses_to_boot(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("body", "tells"),
+    [
+        # An unclosed `[elevenlabs`, which `tomllib` gives up on at column 12.
+        pytest.param(b"[elevenlabs\nnot = valid", "line 1, column 12", id="bad-syntax"),
+        # A file saved in some other encoding. It never reaches the parser at
+        # all: `tomllib.load` decodes as UTF-8 first, so this used to be the
+        # second door out of the same room -- a `UnicodeDecodeError` is no kind
+        # of `TOMLDecodeError`, and a handler naming that type would have let
+        # this one back out as the traceback the other case no longer is.
+        pytest.param(b"\xff\xfe[elevenlabs]\n", "utf-8", id="bad-encoding"),
+    ],
+)
+def test_a_malformed_alias_table_refuses_to_boot(tmp_path, monkeypatch, body, tells):
     """The reason aliases are read while the app is built, not on first use.
 
-    Read lazily it surfaced as an uncaught TOMLDecodeError on whichever
-    synthesis call first needed an alias — invisible to a healthcheck that never
-    touches resolution, and reported nowhere near the file that caused it.
+    Read lazily it surfaced on whichever synthesis call first needed an alias —
+    invisible to a healthcheck that never touches resolution, and reported
+    nowhere near the file that caused it.
+
+    [LAW:behavior-not-structure] This used to assert that the escaping exception
+    came from the `tomllib` module, which pinned the *plumbing*: it passed only
+    while the failure stayed untranslated, and `settings.reported_or_exit`
+    catches `ConfigError` and nothing else, so what it was really guarding was an
+    operator getting a traceback. The contract is the one its valid-TOML
+    neighbour already states — the file is named, in the list every other startup
+    problem joins — and whatever `tomllib` said about where it stopped rides
+    along, because a bad byte in a hundred-line table is not findable from the
+    filename alone.
+
+    [LAW:one-type-per-behavior] The two bodies are one behaviour's instances, not
+    two tests: "this file could not be turned into a table" is the whole of what
+    an operator is being told, and the two ways to earn that sentence differ only
+    in which bytes provoke it.
     """
-    declare(tmp_path, "piper", "[elevenlabs\nnot = valid")
+    (tmp_path / "piper.toml").write_bytes(body)
     monkeypatch.setattr(declarations_mod, "_DIRECTORY", tmp_path)
 
-    with pytest.raises(Exception) as raised:
+    with pytest.raises(ConfigError) as raised:
         Catalog.for_engine(
             "piper", _Engine("en_US-lessac-medium"), fallback=Substitution.OFF
         )
-    assert "toml" in type(raised.value).__module__.lower()
+    assert "piper.toml" in str(raised.value)
+    assert tells in str(raised.value)
+
+
+def test_a_declaration_that_cannot_be_opened_refuses_to_boot(tmp_path, monkeypatch):
+    """The third door out of the same room: the file never opens at all.
+
+    Neither a parse nor a decode, so it reaches neither of the arms above --
+    `OSError` is no kind of `ValueError` -- and it would have gone back to being
+    the traceback the other two no longer are. Answered in its own sentence
+    because it sends the operator somewhere else entirely: a mount or a
+    permission bit, not the file's contents.
+
+    A directory rather than a `chmod 000` file, and that is not fussiness: the
+    gitea runner executes this suite as root (`user: root (uid 0)`, printed by
+    the publish workflow), and root reads a mode-000 file happily. That test
+    would pass here and quietly stop testing anything in the gate that matters.
+    `open("rb")` on a directory refuses whoever asks.
+    """
+    (tmp_path / "piper.toml").mkdir()
+    monkeypatch.setattr(declarations_mod, "_DIRECTORY", tmp_path)
+
+    with pytest.raises(ConfigError) as raised:
+        Catalog.for_engine(
+            "piper", _Engine("en_US-lessac-medium"), fallback=Substitution.OFF
+        )
+    assert "piper.toml" in str(raised.value)
+    assert "could not be opened" in str(raised.value)
 
 
 def test_an_engine_reads_its_own_declarations_and_no_others(tmp_path, monkeypatch):
