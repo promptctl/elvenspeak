@@ -330,6 +330,36 @@ def test_aliases_pointing_at_uninstalled_voices_are_dropped(tmp_path, monkeypatc
     }
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        'elevenlabs = "oops"\n',
+        '[elevenlabs]\n"live" = 3\n',
+        '[elevenlabs]\n"live" = ["en_US-lessac-medium"]\n',
+    ],
+    ids=["not-a-table", "target-is-a-number", "target-is-a-list"],
+)
+def test_an_alias_table_of_the_wrong_shape_refuses_to_boot(tmp_path, monkeypatch, body):
+    """The operator should read which file they mistyped, not a traceback.
+
+    Distinct from the unparseable file above: this one is valid TOML saying
+    something the table cannot mean, so it gets past `tomllib` and the shape is
+    the only thing left that can catch it.
+
+    Every shape here used to travel as far as `Catalog.for_engine` and die on a
+    bare `AttributeError` or `TypeError`, which `reported_or_exit` does not catch
+    because it catches `ConfigError` and nothing else — so a one-character typo
+    came back as a stack trace rather than as the file's name. Held to the same
+    standard as `elevenlabs_models`, for the same reason and in the same place.
+    """
+    declare(tmp_path, "piper", body)
+    monkeypatch.setattr(declarations_mod, "_DIRECTORY", tmp_path)
+
+    with pytest.raises(ConfigError) as raised:
+        load_aliases("piper", {"en_US-lessac-medium": object()})
+    assert "piper.toml" in str(raised.value)
+
+
 def test_an_engine_with_no_declarations_gets_an_empty_table(tmp_path, monkeypatch):
     """Aliases are optional; their absence is not a failure to boot.
 

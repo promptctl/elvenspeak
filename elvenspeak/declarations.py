@@ -46,8 +46,28 @@ def voice_aliases(engine_name: str) -> Mapping[str, str]:
 
     Returned unfiltered. Whether a target is a voice the engine actually has is
     [`elvenspeak.voices.load_aliases`]' question, asked where the voice list is.
+
+    [LAW:parse-dont-validate] Shape proved here, for the same reason [`model_ids`]
+    proves its own: the annotation is a theorem, and until something checks it a
+    table written as `elevenlabs = "oops"` reaches `load_aliases` and dies there
+    on a bare `AttributeError`. [`elvenspeak.settings.reported_or_exit`] catches
+    [`ConfigError`] and nothing else, so that is the difference between an
+    operator reading which file they mistyped and reading a traceback.
+
+    Keys go unchecked because TOML has no other kind: a table's keys are strings
+    or the parse already failed, and a guard that cannot fire says nothing.
     """
-    return _read(engine_name).get("elevenlabs", {})
+    declared = _read(engine_name).get("elevenlabs", {})
+    if not isinstance(declared, Mapping) or not all(
+        isinstance(target, str) for target in declared.values()
+    ):
+        raise ConfigError(
+            [
+                f"{engine_name}.toml: elevenlabs must be a table mapping each "
+                f"foreign voice id to one local voice id"
+            ]
+        )
+    return declared
 
 
 def model_ids(engine_name: str) -> tuple[str, ...]:

@@ -40,19 +40,26 @@ def settings_for(timings: bool = True, **overrides) -> Settings:
     """A deployment's settings. `timings` is the engine's, which is why it is not
     an override: whether durations can be reported is fixed when the model is
     opened, so it has to be said to the engine and not to the server.
+
+    [LAW:one-source-of-truth] `known_engines` is derived from whichever
+    `engine_name` won rather than sitting beside it as its own override. In
+    `from_env` both come out of one registry lookup, so a deployment missing its
+    own engine from its own roster is a state production cannot reach — and a
+    helper that let a caller name an engine without adding it to the roster
+    would hand every test the job of remembering to say it twice.
     """
+    fields = {
+        "engine": piper_prepared(MODELS, voices=(VOICE,), timings=timings),
+        "engine_name": "piper",
+        "withheld": frozenset(),
+        "fallback": VOICE,
+        "api_key": None,
+        "host": "127.0.0.1",
+        "port": 0,
+        **overrides,
+    }
     return Settings(
-        **{
-            "engine": piper_prepared(MODELS, voices=(VOICE,), timings=timings),
-            "engine_name": "piper",
-            "known_engines": frozenset(ENGINES),
-            "withheld": frozenset(),
-            "fallback": VOICE,
-            "api_key": None,
-            "host": "127.0.0.1",
-            "port": 0,
-            **overrides,
-        }
+        known_engines=frozenset(ENGINES) | {fields["engine_name"]}, **fields
     )
 
 
