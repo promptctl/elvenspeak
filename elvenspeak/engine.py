@@ -187,6 +187,28 @@ class Speech:
     audio: Iterator[bytes]
 
 
+class Silence(Exception):
+    """An engine finished without producing a single sample.
+
+    Its own type rather than a bare `ValueError` so one handler can recognise it
+    without matching on a message — which would be a second, weaker copy of the
+    decision about what a caller is told.
+
+    It lives here, beside the [`Speech`] it is the absence of, rather than in
+    [`elvenspeak.api`] where it is answered. Both sides of this seam raise it and
+    neither imports the other: an engine reports that it produced nothing, and a
+    remote engine ([`elvenspeak.remote`]) reports the same fact after reading it
+    off a backend's response. Putting it in the module that answers it would mean
+    the engines importing the web layer to say a thing about themselves.
+    """
+
+    def __init__(self, voice: Voice, text: str) -> None:
+        super().__init__(
+            f"engine produced no audio for voice {voice.id!r} "
+            f"from {len(text)} characters of text"
+        )
+
+
 @dataclass(frozen=True)
 class Timing:
     """One stretch of an utterance the engine can account for.

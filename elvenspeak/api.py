@@ -56,7 +56,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import alignment as align_mod
 from . import encoding, models, text, voices
-from .engine import Capability, Engine, Prosody, Voice
+from .engine import Capability, Engine, Prosody, Silence, Voice
 from .formats import (
     DEFAULT_OUTPUT_FORMAT,
     SUPPORTED_OUTPUT_FORMATS,
@@ -305,21 +305,6 @@ def _honoured(
         )
         | _HONOURED_BY_REACH[reach]
     )
-
-
-class Silence(Exception):
-    """An engine finished without producing a single sample.
-
-    Its own type rather than a bare `ValueError` so one handler can recognise it
-    without matching on a message — which would be a second, weaker copy of the
-    decision about what a caller is told.
-    """
-
-    def __init__(self, voice: Voice, text: str) -> None:
-        super().__init__(
-            f"engine produced no audio for voice {voice.id!r} "
-            f"from {len(text)} characters of text"
-        )
 
 
 def _audible(voice: Voice, text: str, chunks: Iterator[bytes]) -> Iterator[bytes]:
