@@ -121,12 +121,21 @@ depending on what you named.
   unrecognised ones would turn most real callers away on their first request.
 
 A router deployment answers to `router` and to nothing else, including the
-engines it is actually fronting. `model_id: "piper"` sent to a router in front of
-a piper backend is the second case above — a `422` naming an engine this
-deployment is not running — even though the router does route to exactly that
-engine. The three answers are decided by what this *deployment* runs, and a
-router runs the router. Making `model_id` name a backend is
-`piper-routing-7e2.6`, where the chosen engine travels with the request.
+engines it is actually fronting, and the two ways of naming a backend fail
+differently:
+
+- `model_id: "piper"` to a router in front of a piper backend is the **second**
+  case above — a `422` naming an engine this deployment is not running — even
+  though the router does route to exactly that engine.
+- `model_id: "eleven_flash_v2_5"`, one of the ids piper declares, is the
+  **third** case: served, with the voice deciding, and `model_id` returned in
+  `x-elvenspeak-ignored`. The same request to a piper deployment directly is
+  served *and* not ignored, so a client that reads that header sees a different
+  answer depending only on whether a router was in the way.
+
+Both have one cause — the three answers are decided by what this *deployment*
+runs, and a router runs the router — and one ticket: `piper-routing-7e2.6`, where
+the chosen engine travels with the request.
 
 Which ElevenLabs ids reach an engine is declared by that engine, in the same
 `elvenspeak/aliases/<engine>.toml` file that holds its voice aliases, under the

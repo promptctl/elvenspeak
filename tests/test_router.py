@@ -9,7 +9,7 @@ different program. The engines behind those servers are the existing
 from __future__ import annotations
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.testclient import TestClient
 from fleet import Registered, cluster, consul_app, serving
 
@@ -281,6 +281,37 @@ def test_a_backend_that_cannot_describe_itself_fails_the_boot_by_name():
             opened(consul)
 
     assert "elvenspeak-ancient" in str(raised.value)
+
+
+def test_a_backend_that_dies_mid_answer_fails_the_boot_by_name():
+    """[LAW:no-silent-failure] The failure is at the transfer, not the connect.
+
+    A backend that accepts the connection, sends its headers and then dies raises
+    `ConnectionResetError` or `IncompleteRead` — neither of which is a
+    `URLError`, so catching only that pair left `_asked`'s documented guarantee
+    ("every way this can go wrong becomes a `ConfigError`") false, and a fleet in
+    the middle of a rolling restart could crash the boot with a traceback.
+
+    Modelled by a server that promises more body than it sends, which is exactly
+    what a process killed mid-response leaves on the wire.
+    """
+    truncating = FastAPI()
+
+    @truncating.get("/v1/voices")
+    def voices():
+        return Response(
+            content=b'{"voices": [',
+            media_type="application/json",
+            headers={"content-length": "4096"},
+        )
+
+    with serving(truncating) as backend, serving(
+        consul_app([Registered(service="elvenspeak-broken", base_url=backend)])
+    ) as consul:
+        with pytest.raises(ConfigError) as raised:
+            opened(consul)
+
+    assert "elvenspeak-broken" in str(raised.value)
 
 
 def test_a_router_installs_nothing_and_says_so():

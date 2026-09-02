@@ -128,7 +128,13 @@ def _address(entry: Any, service: str) -> str:
         raise ConfigError(
             [f"{service}: health entry named no address and port ({entry!r})"]
         )
-    return f"http://{host}:{port}"
+    # An IPv6 literal has to be bracketed or its own colons are read as the port
+    # separator: `http://fd00::4:29280` has no unambiguous authority, and every
+    # request built from it afterwards is against a different address than the
+    # one Consul named. A hostname or IPv4 address contains no colon and is
+    # unaffected, so this is the whole rule rather than a special case.
+    authority = f"[{host}]" if ":" in host else host
+    return f"http://{authority}:{port}"
 
 
 def engines(consul_url: str) -> tuple[Backend, ...]:

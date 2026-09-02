@@ -88,6 +88,23 @@ def test_a_service_with_its_own_address_is_reached_at_that_address():
     assert backend.base_url == "http://192.168.7.218:29280"
 
 
+def test_an_ipv6_node_is_bracketed_into_a_usable_url():
+    """Its own colons are the port separator otherwise.
+
+    `http://fd00::4:29280` has no unambiguous authority, so every request the
+    router later builds from it would go somewhere other than where Consul said —
+    or nowhere. Consul returns IPv6 for a dual-stack node as a matter of course.
+    """
+    app = catalog_serving(
+        catalog={"elvenspeak-piper": [discovery.ENGINE_TAG]},
+        health={"elvenspeak-piper": [instance("fd00::4", 29280)]},
+    )
+    with serving(app) as consul:
+        (backend,) = discovery.engines(consul)
+
+    assert backend.base_url == "http://[fd00::4]:29280"
+
+
 def test_every_healthy_instance_of_one_service_is_a_backend():
     """A service scaled to two allocations is two places to send a request."""
     app = catalog_serving(

@@ -28,6 +28,7 @@ caller actually asked for, which is a resample that was always going to happen.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -74,6 +75,31 @@ class RemoteFailure(RuntimeError):
     """
 
 
+#: Everything another process can do to a socket we are reading. `URLError` and
+#: `TimeoutError` are both `OSError`, so this covers the connect *and* the
+#: transfer: a backend that crashes after its headers raises `ConnectionResetError`
+#: and one that truncates its body raises `IncompleteRead`, neither of which is a
+#: `URLError`. Catching only that narrower pair is how the boot path came to have
+#: a documented guarantee it did not keep.
+_TRANSPORT_FAILURES = (OSError, http.client.HTTPException)
+
+
+def _read_json(url: str, body: dict | None, timeout: float) -> Any:
+    """One whole JSON exchange with a backend, or a [`RemoteFailure`].
+
+    [LAW:single-enforcer] The one place a backend's answer is read and parsed, so
+    "reading a backend can fail, and it fails as `RemoteFailure`" is stated once.
+    Reading outside the request's own error handling was how a connection that
+    dropped mid-body escaped as a raw `OSError` — the failure is at the transfer,
+    not the connect, so the conversion has to span both.
+    """
+    try:
+        with _request(url, body, "application/json", timeout) as response:
+            return json.load(response)
+    except (*_TRANSPORT_FAILURES, ValueError) as failure:
+        raise RemoteFailure(f"{url}: {failure}") from None
+
+
 def _request(url: str, body: dict | None, accept: str, timeout: float) -> Any:
     """Opens `url`, returning the live response for the caller to drain.
 
@@ -98,7 +124,7 @@ def _request(url: str, body: dict | None, accept: str, timeout: float) -> Any:
     )
     try:
         return urllib.request.urlopen(request, timeout=timeout)
-    except (urllib.error.URLError, TimeoutError) as failure:
+    except _TRANSPORT_FAILURES as failure:
         raise RemoteFailure(f"{url}: {failure}") from None
 
 
@@ -191,11 +217,8 @@ class Remote:
         """
         try:
             url = f"{self.backend.base_url}{path}"
-            with _request(
-                url, None, "application/json", _ASKING_TIMEOUT_SECONDS
-            ) as response:
-                return json.load(response)
-        except (RemoteFailure, ValueError) as failure:
+            return _read_json(url, None, _ASKING_TIMEOUT_SECONDS)
+        except RemoteFailure as failure:
             raise ConfigError([f"{self.backend.service}: {what} ({failure})"]) from None
 
     def voices(self) -> tuple[engine.Voice, ...]:
@@ -273,11 +296,18 @@ class Remote:
             # socket held open by a `Speech` nobody ever drains — reclaimed by the
             # garbage collector rather than by leaving this block.
             with _request(url, body, "audio/pcm", _SPEAKING_TIMEOUT_SECONDS) as live:
-                while True:
-                    block = live.read(_CHUNK)
-                    if not block:
-                        return
-                    yield block
+                try:
+                    while True:
+                        block = live.read(_CHUNK)
+                        if not block:
+                            return
+                        yield block
+                except _TRANSPORT_FAILURES as failure:
+                    # A backend that dies mid-utterance fails this request, in
+                    # this module's own terms. The audio already handed onward
+                    # stands; what must not happen is a raw socket error
+                    # surfacing from inside somebody's streaming response.
+                    raise RemoteFailure(f"{url}: {failure}") from None
 
         # Known before any audio and before any connection: the rate is this
         # module's own choice of wire format, not something a backend reports.
@@ -294,17 +324,21 @@ class Remote:
         an alignment and presenting it as one.
         """
         url = _spoken_at(self.backend.base_url, voice, "/with-timestamps")
-        with _request(
-            url, _body(text, prosody), "application/json", _SPEAKING_TIMEOUT_SECONDS
-        ) as response:
-            published = json.load(response)
+        published = _read_json(url, _body(text, prosody), _SPEAKING_TIMEOUT_SECONDS)
         if not isinstance(published, dict) or "audio_base64" not in published:
             raise RemoteFailure(f"{url}: no timed audio in the response")
-        pcm = base64.b64decode(published["audio_base64"])
+        try:
+            pcm = base64.b64decode(published["audio_base64"])
+            timings = _timings(published.get("alignment"), len(pcm) // 2)
+        except (ValueError, TypeError) as failure:
+            # Audio that will not decode, or timestamps that are not numbers, are
+            # this backend failing this request — the same thing an unreachable
+            # one is, from the caller's side. `binascii.Error` is a `ValueError`.
+            raise RemoteFailure(f"{url}: unreadable timed audio ({failure})") from None
         return engine.TimedSpeech(
             pcm=pcm,
             sample_rate=WIRE_RATE,
-            timings=_timings(published.get("alignment"), len(pcm) // 2),
+            timings=timings,
             # `word-exact` is what the surface calls a measured alignment and
             # `interpolated` what it calls a spread one, so this reads the
             # backend's own word for it rather than guessing from the numbers.
