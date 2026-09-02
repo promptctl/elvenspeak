@@ -310,9 +310,9 @@ def _honoured(
 class Silence(Exception):
     """An engine finished without producing a single sample.
 
-    Its own type rather than a bare `ValueError` because the four synthesis
-    endpoints all have to turn it into the same answer, and matching on a
-    message would be a second, weaker copy of that decision.
+    Its own type rather than a bare `ValueError` so one handler can recognise it
+    without matching on a message — which would be a second, weaker copy of the
+    decision about what a caller is told.
     """
 
     def __init__(self, voice: Voice, text: str) -> None:
