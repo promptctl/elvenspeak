@@ -532,15 +532,36 @@ def _stream(
         yield pcm[start : start + step]
 
 
-#: What numpy says when `max()` is asked for the largest of nothing, which is
-#: what `kokoro_onnx.pauses._quiet_frames` does to an empty result.
+#: The ways kokoro_onnx says "I synthesized nothing", as substrings of the
+#: `ValueError` it raises. A tuple and not one string because the library has two
+#: doors onto the same fact and they read nothing alike; a third is a new entry
+#: here and no new branch anywhere.
 #:
-#: The operation name is part of the match on purpose. numpy words every
-#: identity-less reduction this way — `min`, `argmax` and the rest each name
-#: their own — so matching only the common prefix would catch an unrelated
-#: reduction elsewhere in the library and report it as "the engine produced no
-#: audio", which is this fix telling the lie it exists to stop.
-_EMPTY_REDUCTION = "zero-size array to reduction operation maximum"
+#: Both were MEASURED against the running 2026.09.02.3 image rather than read out
+#: of the library, because what matters is the wording this pinned version emits.
+#:
+#: 1. Nothing survived synthesis. `pauses._quiet_frames` takes `loudness.max()`
+#:    of the frames it was handed, and numpy refuses `max()` of an empty array.
+#:    This is the door piper-routing-7e2.12 was filed for.
+#:
+#:    The operation name is part of the match on purpose. numpy words every
+#:    identity-less reduction this way — `min`, `argmax` and the rest each name
+#:    their own — so matching only the common prefix would catch an unrelated
+#:    reduction elsewhere in the library and report it as "the engine produced no
+#:    audio", which is this fix telling the lie it exists to stop.
+#:
+#: 2. Nothing reached synthesis. `_prepare` refuses text the phonemizer emptied —
+#:    live, `"'"` and `"-"` do this in every baked voice. Matched without the text
+#:    itself, which the library interpolates into the message: the caller's own
+#:    string is the one part of it guaranteed to differ every time.
+#:
+#: The two are one fact to a caller — kokoro produced no audio — so they answer
+#: alike. They are NOT one fact to an operator, which is why `_created` logs the
+#: exception it caught rather than a sentence of its own.
+_SILENT_FAILURES = (
+    "zero-size array to reduction operation maximum",
+    "produced no phonemes",
+)
 
 
 def _created(create: "Callable[[], tuple]", voice_id: str, text: str) -> tuple | None:
@@ -552,13 +573,11 @@ def _created(create: "Callable[[], tuple]", voice_id: str, text: str) -> tuple |
     would be free to drift from the first in exactly the direction that matters:
     one of them quietly keeping the bare 500.
 
-    [LAW:no-silent-failure] `kokoro_onnx.pauses._quiet_frames` takes
-    `loudness.max()` of the frames it was given, and `max()` of an empty array
-    raises rather than returning an identity — so zero samples escape as a 500
-    with no body, telling a caller nothing (piper-routing-7e2.12). None says the
-    true thing in the vocabulary the seam already has, and lets
-    [`elvenspeak.api`] decide once what every caller is told: the engine
-    reports, the boundary answers.
+    [LAW:no-silent-failure] Both of [`_SILENT_FAILURES`] escape as a 500 with no
+    body, telling a caller nothing (piper-routing-7e2.12). None says the true
+    thing in the vocabulary the seam already has, and lets [`elvenspeak.api`]
+    decide once what every caller is told: the engine reports, the boundary
+    answers.
 
     Narrow on purpose. Any other `ValueError` is re-raised untouched, because a
     blanket catch would turn a real bug in this engine into a tidy report that
@@ -567,11 +586,14 @@ def _created(create: "Callable[[], tuple]", voice_id: str, text: str) -> tuple |
     try:
         return create()
     except ValueError as error:
-        if _EMPTY_REDUCTION not in str(error):
+        if not any(known in str(error) for known in _SILENT_FAILURES):
             raise
+        # The library's own words, not a summary of them. Which door this came
+        # through is the whole of what an operator has to go on -- text that
+        # never phonemized and audio that came back empty want different
+        # investigations -- and a message of our own would flatten them into one.
         _LOGGER.error(
-            "kokoro synthesized nothing for voice %r from %d characters; "
-            "its pause insertion then failed on the empty result (%s)",
+            "kokoro synthesized nothing for voice %r from %d characters: %s",
             voice_id,
             len(text),
             error,

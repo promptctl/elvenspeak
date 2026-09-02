@@ -19,11 +19,18 @@ a short successful body, and the boundary owes every one of them the same answer
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+
+import fleet
 import pytest
 from conftest import DECLARED_VOICES, DeclaredEngine, DeclaredPrepared, declaring
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
-from elvenspeak import api, kokoro
+from elvenspeak import api, kokoro, remote
+from elvenspeak import engine as engine_mod
+from elvenspeak.discovery import Backend
 from elvenspeak.engine import Capability, Prosody, Speech, TimedSpeech, Voice
 from elvenspeak.engines import ENGINES
 from elvenspeak.settings import Settings
@@ -195,6 +202,21 @@ EMPTY_REDUCTION = ValueError(
     "zero-size array to reduction operation maximum which has no identity"
 )
 
+#: kokoro's other way of producing nothing, and the one that reproduces on
+#: demand: text the phonemizer empties never reaches synthesis at all. Copied
+#: from what the running 2026.09.02.3 image actually raised for `"'"`, because
+#: the wording is the whole of what `_created` has to recognise.
+NO_PHONEMES = ValueError("Nothing to synthesize, \"'\" produced no phonemes")
+
+#: Both doors, as one parameter set. They are one fact to a caller -- kokoro made
+#: no audio -- so every test that pins the translation runs over both, and a
+#: third door is an entry here rather than a copied test
+#: ([LAW:one-type-per-behavior]).
+SILENT = [
+    pytest.param(EMPTY_REDUCTION, id="nothing-survived-synthesis"),
+    pytest.param(NO_PHONEMES, id="nothing-reached-synthesis"),
+]
+
 
 class _Crashing:
     """Stands in for `Kokoro`, raising what numpy raises on an empty result.
@@ -218,7 +240,8 @@ def _engine_over(model) -> kokoro.KokoroEngine:
     return kokoro.KokoroEngine(model, {KOKORO_VOICE.id: KOKORO_VOICE}, 24000)
 
 
-def test_kokoro_reports_no_samples_rather_than_letting_numpy_escape():
+@pytest.mark.parametrize("error", SILENT)
+def test_kokoro_reports_no_samples_rather_than_letting_the_library_escape(error):
     """The library's crash becomes the seam's way of saying it made no sound.
 
     Not the API's exception: the engine reports in the engine's vocabulary and
@@ -226,9 +249,7 @@ def test_kokoro_reports_no_samples_rather_than_letting_numpy_escape():
     never served over HTTP at all.
     """
     assert (
-        kokoro._synthesized(
-            _Crashing(EMPTY_REDUCTION), KOKORO_VOICE, "Hi", Prosody(speed=1.0)
-        )
+        kokoro._synthesized(_Crashing(error), KOKORO_VOICE, "Hi", Prosody(speed=1.0))
         == b""
     )
 
@@ -270,8 +291,9 @@ def test_kokoro_does_not_swallow_another_reduction_that_is_not_the_pause_one():
 # can silently stop wiring one of them up.
 
 
-def test_speak_timed_reports_no_samples_rather_than_letting_numpy_escape():
-    spoken = _engine_over(_Crashing(EMPTY_REDUCTION)).speak_timed(
+@pytest.mark.parametrize("error", SILENT)
+def test_speak_timed_reports_no_samples_rather_than_letting_the_library_escape(error):
+    spoken = _engine_over(_Crashing(error)).speak_timed(
         KOKORO_VOICE, "Hi", Prosody(speed=1.0)
     )
     assert spoken.pcm == b""
@@ -283,3 +305,150 @@ def test_speak_timed_does_not_swallow_an_unrelated_value_error():
         _engine_over(_Crashing(ValueError("voice pack is corrupt"))).speak_timed(
             KOKORO_VOICE, "Hi", Prosody(speed=1.0)
         )
+
+
+# ------------------------------------------------- silence that arrives over HTTP
+
+
+# A routed request is the case that matters in production -- openconv talks to the
+# router, not to an engine -- and it is the case that was broken while every test
+# above was green. `remote._request` handed urllib's `HTTPError` to the arm that
+# catches transport failures, which it reaches because `HTTPError` IS an
+# `OSError`, so a backend that answered 502 and a backend that was never reached
+# arrived as the same `RemoteFailure` and a caller got a bare 500.
+#
+# MEASURED, not imagined: against elvenspeak-piper 2026.09.02.3 in the cluster,
+# `{"text": "'"}` answered 502 with the voice named, and the identical request
+# through elvenspeak-router 2026.09.02.3 answered `Internal Server Error`.
+#
+# These start real servers for the same reason `tests/test_router.py` does: the
+# fault lived in what urllib raises for a non-2xx status, which no stub of the
+# transport would have reproduced -- a fake raising `RemoteFailure` directly
+# would have passed against the broken code.
+
+
+def _mute_backend_url(stack, chunks: tuple[bytes, ...] = ()) -> str:
+    """A served elvenspeak deployment whose engine declares voices and says nothing."""
+    return stack.enter_context(
+        fleet.serving(api.create_app(_settings(), MuteEngine(chunks)))
+    )
+
+
+def _remote_to(url: str) -> remote.Remote:
+    return remote.Remote(Backend(service="mute", base_url=url))
+
+
+def test_a_routed_stream_reports_the_backend_s_silence_as_silence():
+    """[LAW:parse-dont-validate] The stamped 502 is parsed back into `Silence`.
+
+    The router raises exactly what a local engine raises, so the one handler in
+    [`elvenspeak.api`] answers a routed silence without knowing it was routed.
+    """
+    with ExitStack() as stack:
+        spoken = _remote_to(_mute_backend_url(stack)).speak(
+            VOICE, "hi", Prosody(speed=1.0)
+        )
+        with pytest.raises(engine_mod.Silence, match=repr(VOICE.id)):
+            list(spoken.audio)
+
+
+def test_a_routed_with_timestamps_reports_the_backend_s_silence_as_silence():
+    """The other speaking path, which reaches the checkpoint through `_read_json`.
+
+    Driven end to end rather than through `_heard`, because one path being left
+    unwired is precisely the failure the shared helper exists to prevent and the
+    one a direct test of the helper could not see.
+    """
+    with ExitStack() as stack:
+        with pytest.raises(engine_mod.Silence, match=repr(VOICE.id)):
+            _remote_to(_mute_backend_url(stack)).speak_timed(
+                VOICE, "hi", Prosody(speed=1.0)
+            )
+
+
+def test_a_routed_request_answers_502_end_to_end():
+    """The whole path a caller actually takes: router surface, HTTP, mute backend.
+
+    Asserting the status and not just the exception, because the exception was
+    always going to be raised somewhere -- what production got was a 500, and the
+    number is the entire finding.
+    """
+    with ExitStack() as stack:
+        url = _mute_backend_url(stack)
+        client = TestClient(api.create_app(_settings(), _remote_to(url)))
+        answer = client.post(f"/v1/text-to-speech/{VOICE.id}", json={"text": "hi"})
+    assert answer.status_code == 502
+    assert VOICE.id in answer.json()["detail"]
+
+
+def test_a_backend_that_refuses_for_another_reason_is_not_called_silent():
+    """[LAW:no-silent-failure] The narrowness, again, in the other direction.
+
+    A backend refusing an unauthenticated caller has not gone mute, and reporting
+    it as silence would invent a diagnosis. Only a response stamped with
+    `Silence.WIRE_HEADER` -- which `elvenspeak.api` writes in exactly one place,
+    the `Silence` handler -- crosses back.
+
+    A guarded backend rather than an unknown voice, because an unknown voice is
+    not a refusal at all: the fleet's fallback resolves it to a real one and the
+    request succeeds. That is the backend behaving correctly, and it took a red
+    test to notice this case had to be built out of something else.
+    """
+    with ExitStack() as stack:
+        url = stack.enter_context(
+            fleet.serving(
+                fleet.engine_app("declared", DECLARED_VOICES, api_key="let-me-in")
+            )
+        )
+        # No key on this side, which is the whole of what makes it a 401.
+        with pytest.raises(remote.RemoteFailure) as refused:
+            _remote_to(url).speak_timed(VOICE, "hi", Prosody(speed=1.0))
+    assert not isinstance(refused.value, engine_mod.Silence)
+    assert refused.value.status == 401
+
+
+def test_an_unstamped_502_from_the_path_is_not_called_silent():
+    """A proxy's 502 is about reaching the backend, not about the engine speaking.
+
+    [LAW:one-source-of-truth] The third fact the status alone cannot separate, and
+    the one that made reading 502 as silence unsound: an ingress, sidecar or load
+    balancer between the router and a backend answers 502 for its own reasons, and
+    nothing in the number distinguishes that from a mute engine. Told apart here
+    by the stamp `elvenspeak.api` writes and no intermediary does, so the answer
+    stops depending on what happens to be deployed in the path.
+
+    Standing in for the proxy with a bare app rather than asserting the topology
+    has none: what is deployed between two of these processes is home-infra's to
+    decide and can change without this repository changing, which is exactly why
+    the guarantee has to live in the response instead of in a comment about the
+    cluster.
+    """
+    proxy = FastAPI()
+
+    @proxy.api_route("/{_path:path}", methods=["GET", "POST"])
+    async def _unreachable(_path: str) -> JSONResponse:
+        return JSONResponse(status_code=502, content={"detail": "upstream refused"})
+
+    with ExitStack() as stack:
+        with pytest.raises(remote.RemoteFailure) as refused:
+            _remote_to(stack.enter_context(fleet.serving(proxy))).speak_timed(
+                VOICE, "hi", Prosody(speed=1.0)
+            )
+    assert not isinstance(refused.value, engine_mod.Silence)
+    assert not isinstance(refused.value, remote.RemoteSilence)
+    assert refused.value.status == 502
+
+
+def test_a_backend_that_cannot_be_reached_is_not_called_silent():
+    """Unreachable and silent are the two facts the old code collapsed into one.
+
+    Kept as a test rather than trusted to the type, because the collapse was
+    invisible: both arrived as `RemoteFailure`, both looked handled, and the only
+    symptom was a status code nobody was asserting.
+    """
+    with ExitStack() as stack:
+        url = _mute_backend_url(stack)
+    # The server is stopped on leaving the block, so the port now refuses.
+    with pytest.raises(remote.RemoteFailure) as failed:
+        _remote_to(url).speak_timed(VOICE, "hi", Prosody(speed=1.0))
+    assert not isinstance(failed.value, engine_mod.Silence)

@@ -56,7 +56,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import alignment as align_mod
 from . import encoding, models, text, voices
-from .engine import Capability, Engine, Prosody, Voice
+from .engine import Capability, Engine, Prosody, Silence, Voice
 from .formats import (
     DEFAULT_OUTPUT_FORMAT,
     SUPPORTED_OUTPUT_FORMATS,
@@ -307,21 +307,6 @@ def _honoured(
     )
 
 
-class Silence(Exception):
-    """An engine finished without producing a single sample.
-
-    Its own type rather than a bare `ValueError` so one handler can recognise it
-    without matching on a message — which would be a second, weaker copy of the
-    decision about what a caller is told.
-    """
-
-    def __init__(self, voice: Voice, text: str) -> None:
-        super().__init__(
-            f"engine produced no audio for voice {voice.id!r} "
-            f"from {len(text)} characters of text"
-        )
-
-
 def _audible(voice: Voice, text: str, chunks: Iterator[bytes]) -> Iterator[bytes]:
     """The engine's samples, proven to contain at least one.
 
@@ -452,9 +437,19 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         sentence: that endpoint's status line is committed when the
         `StreamingResponse` is constructed, before the body is advanced at all.
         Silence there aborts the response instead of answering it.
+
+        [`Silence.WIRE_HEADER`] is what makes the 502 recognisable as *this*
+        answer rather than as any 502. A router in front of a fleet reads it back
+        into `Silence`; the status alone could not tell this response apart from
+        one an ingress or sidecar wrote about a backend it could not reach, and
+        guessing wrong there names the wrong system at 3 a.m.
         """
         _LOGGER.error("%s", error)
-        return JSONResponse(status_code=502, content={"detail": str(error)})
+        return JSONResponse(
+            status_code=502,
+            headers={Silence.WIRE_HEADER: "1"},
+            content={"detail": str(error)},
+        )
     # The capabilities are logged because nothing else tells an operator why a
     # request came back refused or a parameter came back ignored. The 501 used to
     # carry that explanation itself, in the form of a Piper environment variable

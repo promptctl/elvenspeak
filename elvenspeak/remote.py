@@ -29,9 +29,10 @@ from __future__ import annotations
 
 import base64
 import json
+import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -70,6 +71,44 @@ class RemoteFailure(RuntimeError):
     a voice the caller did not ask for, which is the wrong-engine answer this
     whole epic exists to refuse. A voice belongs to one backend; if that backend
     cannot speak, the caller is told.
+    """
+
+
+class RemoteRefusal(RemoteFailure):
+    """A backend answered, and its answer was a refusal.
+
+    A subclass so that every `except RemoteFailure` already written keeps
+    catching it: boot, discovery and description want "this backend did not give
+    me what I asked for" and none of them care which way.
+
+    It exists because the two are not one fact where synthesis is concerned. A
+    backend that cannot be reached and a backend that answered "I produced no
+    audio" are different things to the caller, and the second is one this service
+    has a word for. Collapsing them is the answer-shaped void
+    [`elvenspeak.engine.Silence`] exists to refuse, re-formed one layer up: a
+    router is a caller of engines, so it inherits the obligation to say what it
+    was told rather than what it guessed.
+    """
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class RemoteSilence(RemoteRefusal):
+    """A backend's refusal that the backend itself stamped as [`engine.Silence`].
+
+    [LAW:types-are-the-program] The discriminator lives in the type rather than in
+    a status number every reader has to interpret, so [`_heard`] has nothing to
+    decide: the one place that holds the response ([`_request`]) is the one place
+    that classifies it, and everything above reads the class.
+
+    Narrower than "the backend answered 502" on purpose. 502 is what any proxy,
+    ingress or sidecar in the path says when it cannot reach what is behind it,
+    and translating one of those into silence would report a mute engine to an
+    operator whose engine is fine and whose network is not. Only a response
+    carrying [`engine.Silence.WIRE_HEADER`] — which nothing but
+    [`elvenspeak.api`]'s own handler writes — is that fact.
     """
 
 
@@ -126,8 +165,53 @@ def _request(
     )
     try:
         return urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as refusal:
+        # Before the transport arm, and it has to be: `HTTPError` IS an
+        # `OSError`, so the broader `except` below would swallow this one whole
+        # and every answer a backend gave would come back indistinguishable from
+        # never having reached it. That is what it did until 7e2.12 was verified
+        # against the cluster, and it is why a routed request met a backend's 502
+        # as a bare 500.
+        #
+        # [LAW:parse-dont-validate] Which class is decided here and only here,
+        # because this is the last frame that still holds the response and can
+        # see its headers at all. Above this the answer is a type, and no caller
+        # re-reads a status to work out what it meant.
+        refused = (
+            RemoteSilence
+            if engine.Silence.WIRE_HEADER in refusal.headers
+            else RemoteRefusal
+        )
+        raise refused(refusal.code, f"{url}: {refusal}") from None
     except TRANSPORT_FAILURES as failure:
         raise RemoteFailure(f"{url}: {failure}") from None
+
+
+def _heard(call: Callable[[], Any], voice: engine.Voice, text: str) -> Any:
+    """`call`'s result, with a backend's silence retold as this service's own.
+
+    [LAW:parse-dont-validate] The checkpoint where a routed synthesis crosses
+    back from HTTP into the domain. Above it nothing re-asks what a status meant:
+    a remote engine raises [`elvenspeak.engine.Silence`] exactly as a local one
+    does, so [`elvenspeak.api`]'s one handler answers both without knowing which
+    it has.
+
+    Both speaking paths call it and neither restates the rule, for the reason
+    `_audible_pcm` routes through `_audible`: two spellings of one rule drift,
+    and the direction they drift in is one path quietly keeping the bare 500.
+
+    Any other refusal stays a [`RemoteRefusal`] and travels on untouched. A
+    backend answering 404 or 401 is not silent, and neither is a proxy answering
+    502 about a backend it could not reach; reporting either as silence would
+    invent a diagnosis — the same lie in the other direction.
+    """
+    try:
+        return call()
+    except RemoteSilence:
+        # Rebuilt here rather than relayed out of the backend's body: the message
+        # a caller reads is `Silence`'s to write, so a routed answer and a direct
+        # one read alike and there is one sentence to change if it ever changes.
+        raise engine.Silence(voice, text) from None
 
 
 def _spoken_at(base_url: str, voice: engine.Voice, suffix: str) -> str:
@@ -295,8 +379,17 @@ class Remote:
             # away", and a connection opened before the generator exists is a
             # socket held open by a `Speech` nobody ever drains — reclaimed by the
             # garbage collector rather than by leaving this block.
-            with _request(
-                url, body, "audio/pcm", _SPEAKING_TIMEOUT_SECONDS, self.api_key
+            # The refusal arrives on the open, before a single byte, which is the
+            # only moment it can still become a status line: `_audible` is what
+            # pulls this generator's first chunk, and it does so before the
+            # `StreamingResponse` exists. A backend answering 502 here therefore
+            # reaches a caller as a 502, not as a stream that dies mid-body.
+            with _heard(
+                lambda: _request(
+                    url, body, "audio/pcm", _SPEAKING_TIMEOUT_SECONDS, self.api_key
+                ),
+                voice,
+                text,
             ) as live:
                 try:
                     while True:
@@ -326,8 +419,12 @@ class Remote:
         an alignment and presenting it as one.
         """
         url = _spoken_at(self.backend.base_url, voice, "/with-timestamps")
-        published = _read_json(
-            url, _body(text, prosody), _SPEAKING_TIMEOUT_SECONDS, self.api_key
+        published = _heard(
+            lambda: _read_json(
+                url, _body(text, prosody), _SPEAKING_TIMEOUT_SECONDS, self.api_key
+            ),
+            voice,
+            text,
         )
         if not isinstance(published, dict) or "audio_base64" not in published:
             raise RemoteFailure(f"{url}: no timed audio in the response")
