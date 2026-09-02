@@ -39,10 +39,12 @@ BETA_MODELS = frozenset({"beta", "eleven_beta_v1"})
 ALPHA_VOICES = (
     Voice(
         id="alpha-one", name="Alpha One", description="alpha's", models=ALPHA_MODELS
+    ,
+        language="en",
     ),
 )
 BETA_VOICES = (
-    Voice(id="beta-one", name="Beta One", description="beta's", models=BETA_MODELS),
+    Voice(id="beta-one", name="Beta One", description="beta's", models=BETA_MODELS, language="en"),
 )
 
 
@@ -161,6 +163,7 @@ def test_two_engines_offering_the_same_voice_id_stop_the_boot():
             name="Contested",
             description="offered twice",
             models=frozenset({"shared-engine"}),
+            language="en",
         ),
     )
     with cluster(("alpha", shared, EVERYTHING), ("beta", shared, EVERYTHING)) as consul:
@@ -395,6 +398,7 @@ def test_a_backend_that_cannot_describe_itself_fails_the_boot_by_name():
                     "name": "Ancient",
                     "capabilities": ["speed"],
                     "models": ["ancient"],
+                    "language": "en",
                 }
             ]
         }
@@ -527,6 +531,7 @@ def test_a_timestamp_that_is_not_a_usable_number_fails_the_request(alignment):
                     "name": "Alpha One",
                     "capabilities": ["speed", "timestamps"],
                     "models": ["odd"],
+                    "language": "en",
                 }
             ]
         }

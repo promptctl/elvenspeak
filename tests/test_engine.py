@@ -22,6 +22,7 @@ def voice() -> Voice:
         description="a voice",
         labels=(("engine", "test"), ("quality", "medium")),
         models=SERVES,
+        language="en",
     )
 
 

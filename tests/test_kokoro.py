@@ -210,21 +210,23 @@ def test_the_offered_order_is_the_configured_order(engine):
 
 
 @pytest.mark.parametrize(
-    "key,name,language,gender",
+    "key,name,language,iso,gender",
     [
-        ("af_heart", "Heart", "en-us", "female"),
-        ("am_michael", "Michael", "en-us", "male"),
-        ("bf_emma", "Emma", "en-gb", "female"),
-        ("bm_george", "George", "en-gb", "male"),
-        ("ef_dora", "Dora", "es", "female"),
-        ("jm_kumo", "Kumo", "ja", "male"),
+        ("af_heart", "Heart", "en-us", "en", "female"),
+        ("am_michael", "Michael", "en-us", "en", "male"),
+        ("bf_emma", "Emma", "en-gb", "en", "female"),
+        ("bm_george", "George", "en-gb", "en", "male"),
+        ("ef_dora", "Dora", "es", "es", "female"),
+        ("jm_kumo", "Kumo", "ja", "ja", "male"),
         # espeak calls Mandarin `cmn` and refuses `zh`, so a voice whose id
         # begins `z` is the one that catches a language map transcribed from the
-        # id prefixes instead of from what the phonemizer accepts.
-        ("zf_xiaoni", "Xiaoni", "cmn", "female"),
+        # id prefixes instead of from what the phonemizer accepts. It is also the
+        # one place the two spellings genuinely differ, which makes it the only
+        # row that can catch `language` being published where `iso` belongs.
+        ("zf_xiaoni", "Xiaoni", "cmn", "zh", "female"),
     ],
 )
-def test_a_voice_is_described_from_its_id(key, name, language, gender):
+def test_a_voice_is_described_from_its_id(key, name, language, iso, gender):
     """The id is the only source of metadata: the style pack carries no words.
 
     Several ids rather than one, and deliberately across languages. The language
@@ -232,16 +234,23 @@ def test_a_voice_is_described_from_its_id(key, name, language, gender):
     through, so a description that collapses every voice to `en-us` is also an
     engine reading Spanish with English phonemes. One English example would have
     agreed with that mutation perfectly.
+
+    Both spellings are asserted because both are load-bearing and they are not
+    interchangeable: espeak's is what the phonemizer is handed, ISO 639-1 is what
+    a caller's `language_code` is matched against. The `en-us`/`en` rows catch a
+    region suffix leaking into the match, and `cmn`/`zh` catches the one language
+    espeak and ISO name differently.
     """
     voice = kokoro._describe(key, SERVES)
 
     assert voice.id == key
     assert voice.name == name
-    assert dict(voice.labels) == {
-        "language": language,
-        "gender": gender,
-        "engine": "kokoro",
-    }
+    assert voice.language == iso
+    assert kokoro._language(key) == language
+    # The language is a field now, not a label. It was published here while
+    # nothing read it; a reader made it a field, and leaving the label behind
+    # would be the same fact in two places, free to disagree.
+    assert dict(voice.labels) == {"gender": gender, "engine": "kokoro"}
 
 
 def test_every_language_the_map_names_is_one_espeak_accepts():

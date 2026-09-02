@@ -289,7 +289,7 @@ def test_no_alias_points_at_a_voice_the_image_does_not_bake(name):
     assert declared, f"{name}.toml declares no aliases — the parser is wrong, not the file"
 
     installed = {
-        voice: Voice(id=voice, name=voice, description="", models=SERVES)
+        voice: Voice(id=voice, name=voice, description="", models=SERVES, language="en")
         for voice in baked
     }
     live = load_aliases(name, installed)

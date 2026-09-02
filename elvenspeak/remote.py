@@ -273,6 +273,21 @@ def _voice(published: Any, service: str) -> engine.Voice:
                 f"cannot tell which engine answers for it."
             ]
         )
+    # Checked to the same standard as `models`, and refused rather than defaulted
+    # for the same reason: there is no honest default. A missing language read as
+    # `""` matches no caller's `language_code`, so the router would quietly report
+    # every language request ignored for that backend's voices — a fleet-wide
+    # capability silently switched off by one stale image, which is exactly the
+    # shape of failure per-voice facts were moved onto the voice to prevent.
+    language = published.get("language")
+    if not isinstance(language, str) or not language:
+        raise ConfigError(
+            [
+                f"{service}: voice {voice_id!r} named no language. "
+                f"This backend predates per-voice languages and a router "
+                f"cannot tell which callers it can answer for."
+            ]
+        )
     labels = published.get("labels")
     return engine.Voice(
         id=voice_id,
@@ -295,6 +310,7 @@ def _voice(published: Any, service: str) -> engine.Voice:
         # fleet, which is the right answer to "what can be reached at all" and the
         # wrong one to decide whether *this* voice's engine was the one named.
         models=frozenset(serves),
+        language=language,
     )
 
 

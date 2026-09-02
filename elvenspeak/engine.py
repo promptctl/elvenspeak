@@ -169,6 +169,32 @@ class Voice:
     #: `kw_only` so this stays beside the field it belongs with rather than moving
     #: ahead of the defaulted ones to satisfy the constructor.
     models: frozenset[str] = field(kw_only=True)
+    #: The ISO 639-1 language this voice speaks — `es`, `en`, `pt`.
+    #:
+    #: [LAW:one-source-of-truth] On the voice for the third time, and by now the
+    #: reason is a pattern rather than a discovery: `capabilities` moved here
+    #: because a capability is a fact about *what will speak*, `models` moved here
+    #: because which engine speaks is the same kind of fact, and a language is the
+    #: most literal member of that family — it is the one thing a voice
+    #: unavoidably is. It lived in `labels` as a free-form string, which is where
+    #: both of the others started and for the same reason: a fact with no field of
+    #: its own goes in the open map until something needs to read it. Something
+    #: does now.
+    #:
+    #: [LAW:types-are-the-program] ISO 639-1, the family alone, because that is the
+    #: vocabulary ElevenLabs' `language_code` speaks and this field exists to be
+    #: compared against it. The engines do not agree on a spelling by themselves —
+    #: Piper's sidecar says `es_ES` and Kokoro's table holds espeak's `es`, `en-us`
+    #: and `cmn` — so each normalises on the way in. Two vocabularies meeting at a
+    #: comparison is a match that silently fails for one engine and succeeds for
+    #: the other, which is worse than not matching at all.
+    #:
+    #: [LAW:types-are-the-program] Required, and kw_only for the reason `models`
+    #: is: there is no such thing as a voice that speaks no language. A default
+    #: would mean an engine could omit it and have the omission read as a real
+    #: answer — and the answer it would be read as is "this voice does not speak
+    #: the language you asked for", which is a claim no engine intended to make.
+    language: str = field(kw_only=True)
 
 
 @dataclass(frozen=True)

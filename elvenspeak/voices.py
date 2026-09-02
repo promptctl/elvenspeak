@@ -101,6 +101,21 @@ class Resolution:
     substituted: bool
 
 
+def spoken_language(tag: str | None) -> str | None:
+    """A caller's language tag reduced to the ISO 639-1 family a voice declares.
+
+    [LAW:parse-dont-validate] The one place a request's `language_code` becomes
+    comparable to [`engine.Voice.language`]. ElevenLabs' own field is ISO 639-1,
+    but a client holding `es-MX`, `es_MX` or `ES` is asking the same question, and
+    a match that fails on the punctuation would report the language ignored while
+    a voice that speaks it sat in the catalog.
+
+    `None` in, `None` out: a request that named no language is not a request for
+    an unnamed one, and [`Catalog.speaking`] reads that as "every voice".
+    """
+    return None if tag is None else tag.strip().lower().replace("_", "-").split("-")[0]
+
+
 class VoiceNotInstalled(LookupError):
     """A voice id that is neither offered nor aliased, with no fallback set.
 
@@ -242,32 +257,71 @@ class Catalog:
         """The available voice with this exact id, if there is one."""
         return self._voices.get(key)
 
-    def resolve(self, requested: str) -> Resolution:
+    def speaking(self, language: str | None) -> dict[str, engine.Voice]:
+        """The voices eligible to answer, narrowed to a language when one is asked.
+
+        [LAW:dataflow-not-control-flow] The narrowing is a value, so `resolve`
+        runs its same three steps over a smaller table rather than growing a
+        language branch through each of them. `None` — no language asked for —
+        admits every voice, which is why this is a filter and not a special case.
+
+        Falling back to the whole table when nothing speaks the language is the
+        rule `model_id` already set: an id this deployment does not map steers
+        nothing and is reported in `x-elvenspeak-ignored` rather than refused. A
+        language no baked voice speaks is the same kind of unanswerable ask, and
+        the alternative is worse than it looks — an empty table would send every
+        such request to a 404 for a voice that is installed and was never the
+        problem.
+        """
+        wanted = {
+            key: voice
+            for key, voice in self._voices.items()
+            if language in (None, voice.language)
+        }
+        return wanted or self._voices
+
+    def resolve(self, requested: str, language: str | None = None) -> Resolution:
         """Decides which available voice answers for `requested`.
 
         Three steps, most specific first: the id names a voice this server has,
         the id is aliased onto one, or the fallback speaks. Only the third can be
         switched off.
+
+        `language` narrows which voices those steps may choose from. It outranks
+        the id because our voices are monolingual, so the two cannot both be
+        honoured and one of them has to give: a voice is a preference a substitute
+        can satisfy — that is what this whole method is for — while reading
+        Spanish text with English phonemes is not a lesser rendering of the
+        request, it is a different and wrong one, and it is inaudible as a
+        failure. The substitution is reported like every other, so a caller is
+        never left guessing which voice spoke.
         """
-        exact = self._voices.get(requested)
+        speaking = self.speaking(language)
+
+        exact = speaking.get(requested)
         if exact is not None:
             return Resolution(voice=exact, requested=requested, substituted=False)
 
         aliased = self._aliases.get(requested)
-        if aliased is not None:
+        if aliased in speaking:
             # An alias is a deliberate mapping, not a guess, so the caller did
             # reach the voice this server promised for that id — reported as a
             # substitution anyway, because the voice that speaks is not the one
             # whose id was sent, and a caption or a voice picker needs to know.
             return Resolution(
-                voice=self._voices[aliased], requested=requested, substituted=True
+                voice=speaking[aliased], requested=requested, substituted=True
             )
 
         if self._fallback is None:
             raise VoiceNotInstalled(requested, tuple(sorted(self._voices)))
 
+        # The configured fallback where it speaks the language, and otherwise the
+        # first voice that does. Offer order is already what a deployment naming
+        # no fallback answers unknown ids with, so leaning on it here says the
+        # same thing in the same voice rather than inventing a second rule.
+        chosen = self._fallback if self._fallback in speaking else next(iter(speaking))
         return Resolution(
-            voice=self._voices[self._fallback], requested=requested, substituted=True
+            voice=speaking[chosen], requested=requested, substituted=True
         )
 
 

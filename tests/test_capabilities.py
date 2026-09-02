@@ -416,10 +416,13 @@ def test_one_engine_whose_voices_differ_is_answered_per_voice():
         description="carries timings",
         capabilities=frozenset(Capability),
         models=DECLARED_MODELS,
+        language="en",
     )
     # Declares nothing, and means it.
     plain = Voice(
         id="plain", name="Plain", description="does not", models=DECLARED_MODELS
+    ,
+        language="en",
     )
 
     engine = DeclaredEngine((*declaring(frozenset(Capability), (timed,)), plain))

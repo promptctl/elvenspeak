@@ -472,9 +472,16 @@ def _describe(
     # already promise. Read into locals so each section is spelled once; the two
     # spellings of `audio` were how they came to disagree.
     audio = config.get("audio") or {}
-    language = (config.get("language") or {}).get("code") or (
+    declared = config.get("language") or {}
+    language = declared.get("code") or (
         parts[0] if len(parts) == _KEY_PARTS else key
     )
+    # The sidecar's own `family` where it has one — every voice in the published
+    # index does — and otherwise the code's first part, since `code` is
+    # `<family>_<REGION>` throughout. The split is the sidecar's structure rather
+    # than a guess about it, which is what makes it a safe fallback for a
+    # hand-written sidecar that states only the code.
+    family = declared.get("family") or language.split("_")[0]
     name = config.get("dataset") or (parts[1] if len(parts) == _KEY_PARTS else key)
     quality = audio.get("quality") or (
         parts[2] if len(parts) == _KEY_PARTS else "medium"
@@ -511,12 +518,12 @@ def _describe(
             # discover — there is no ElevenLabs field to select a speaker with, so
             # a multi-speaker model always speaks as its default.
             labels=(
-                ("language", language),
                 ("quality", quality),
                 ("engine", "piper"),
                 ("speakers", str(int(config.get("num_speakers") or 1))),
             ),
             models=serves,
+            language=family,
         ),
         int(rate),
     )

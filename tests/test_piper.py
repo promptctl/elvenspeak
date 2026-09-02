@@ -146,7 +146,13 @@ def test_a_minimal_config_derives_its_metadata_from_the_key(tmp_path):
     voice = load(tmp_path).voices()[0]
     labels = dict(voice.labels)
     assert voice.name == "lessac"
-    assert labels["language"] == "en_US"
+    # Both halves of the key-derived language: the display code the description
+    # carries, and the ISO family a caller's `language_code` is matched on. A
+    # sidecar this bare exercises the fallback for both, and they are derived one
+    # from the other — asserting only the family would pass on a key split that
+    # dropped the region entirely.
+    assert "en_US" in voice.description
+    assert voice.language == "en"
     assert labels["quality"] == "medium"
 
 
@@ -164,7 +170,8 @@ def test_an_explicitly_null_section_reads_as_an_absent_one(tmp_path):
         encoding="utf-8",
     )
     voice = load(tmp_path).voices()[0]
-    assert dict(voice.labels)["language"] == "en_US"
+    assert "en_US" in voice.description
+    assert voice.language == "en"
     assert voice.name == "lessac"
 
 

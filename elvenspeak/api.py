@@ -280,15 +280,23 @@ class SpeechRequest(BaseModel):
 
 
 def _honoured(
-    capabilities: frozenset[Capability], reach: models.Reach
+    capabilities: frozenset[Capability], reach: models.Reach, spoke: bool
 ) -> frozenset[str]:
     """Which request parameters this service will act on, this time.
 
     [LAW:one-source-of-truth] The one derivation of "honoured", read by
-    [`SpeechRequest.ignored`] and by nothing else. Both halves are read off the
-    facts rather than listed: the capability half from the declaration of the
+    [`SpeechRequest.ignored`] and by nothing else. All three halves are read off
+    the facts rather than listed: the capability half from the declaration of the
     voice that is about to speak, through [`_NEEDS_CAPABILITY`], the model half
-    from where the request's `model_id` actually reaches.
+    from where the request's `model_id` actually reaches, and the language half
+    from whether the voice that resolved actually speaks what was asked for.
+
+    `spoke` arrives already decided, for the reason `honoured` arrives as names:
+    the caller holds both the request and the resolved voice, and threading each
+    new fact in as its own parameter is how this function grows a signature per
+    axis. Comparing one already-normalised language to another is the whole of
+    that half, and [`elvenspeak.voices.spoken_language`] is where the
+    normalisation lives.
 
     Per request, because both halves are. The model half is a fact about the
     request; the capability half is fixed for a given voice but not for the
@@ -304,6 +312,7 @@ def _honoured(
             if capability in capabilities
         )
         | _HONOURED_BY_REACH[reach]
+        | (frozenset({"language_code"}) if spoke else frozenset())
     )
 
 
@@ -571,7 +580,9 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         what that status is for here and what `output_format` already answers.
         """
         try:
-            resolution = cat.resolve(voice_id)
+            resolution = cat.resolve(
+                voice_id, voices.spoken_language(body.language_code)
+            )
         except voices.VoiceNotInstalled as error:
             raise HTTPException(status_code=404, detail=str(error)) from None
 
@@ -616,6 +627,15 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
             _honoured(
                 honoured(resolution.voice),
                 directory.reach(body.model_id, resolution.voice.models),
+                # The voice that resolved really speaks what was asked for.
+                # `resolve` narrowed the catalog by this same language, so this is
+                # false only when no installed voice could speak it — the case
+                # `Catalog.speaking` deliberately lets through rather than
+                # refusing, and the case this header exists to name.
+                spoke=(
+                    resolution.voice.language
+                    == voices.spoken_language(body.language_code)
+                ),
             )
         )
         if ignored:
@@ -847,8 +867,13 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         # Derived once per request rather than once per entry: it is a union over
         # every installed voice, and every model id here gets the same answer.
         deployment_wide = offered()
+        # Derived once per request for the reason `deployment_wide` is: it is a
+        # union over every installed voice, and every model id here gets the same
+        # answer. Sorted so the listing is stable across restarts — a client
+        # diffing this response should see a change only when one happened.
+        spoken = tuple(sorted({voice.language for voice in cat.installed}))
         return [
-            _model_json(model_id, deployment_wide)
+            _model_json(model_id, deployment_wide, spoken)
             for model_id in directory.listed()
         ]
 
@@ -1001,10 +1026,20 @@ def _voice_json(
         # question there would tell a stock client something this service never
         # measured.
         "models": sorted(voice.models),
+        # Not an ElevenLabs field either. It was published inside `labels` while
+        # nothing read it, which is where a fact with no reader belongs; a reader
+        # makes it a field. `elvenspeak.remote` parses it so a router can match a
+        # caller's `language_code` against the voice that will actually speak,
+        # and a stock client reads it to pick a voice that speaks its language
+        # rather than discovering the mismatch by listening to the result — which
+        # is the one way this failure does not announce itself.
+        "language": voice.language,
     }
 
 
-def _model_json(model_id: str, capabilities: frozenset[Capability]) -> dict:
+def _model_json(
+    model_id: str, capabilities: frozenset[Capability], languages: tuple[str, ...]
+) -> dict:
     """One synthesis engine in the shape `GET /v1/models` returns.
 
     Field names are ElevenLabs', for the same reason [`_voice_json`]'s are: an
@@ -1047,11 +1082,18 @@ def _model_json(model_id: str, capabilities: frozenset[Capability]) -> dict:
         "max_characters_request_free_user": None,
         "max_characters_request_subscribed_user": None,
         "maximum_text_length_per_request": None,
-        # Left empty rather than guessed. A voice's language is a fact its engine
-        # publishes in `Voice.labels`, and inventing a model-level answer here
-        # would be a second, coarser copy of it — wrong the moment an engine
-        # bakes voices in two languages, which both of ours already could.
-        "languages": [],
+        # [LAW:one-source-of-truth] Derived from the voices on offer, like
+        # `capabilities` beside it, never held. This was empty while a voice's
+        # language lived in `Voice.labels` as a string nothing read — the comment
+        # here said filling it would mean inventing a second, coarser copy, and it
+        # was right: the fix was to give the voices a real language field first,
+        # not to guess a deployment-wide answer on top of a free-form label.
+        #
+        # ElevenLabs publishes objects with a `language_id` and a display `name`.
+        # The id is the half that is checkable, and a display name for a language
+        # is not a fact any engine here holds — so the id is repeated rather than
+        # a prettier name being invented for it.
+        "languages": [{"language_id": code, "name": code} for code in languages],
         # Not an ElevenLabs field, and the union across this deployment's voices —
         # what it can do at all. The answer a request gets is on the voice; see
         # above.
