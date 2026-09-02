@@ -162,6 +162,33 @@ _SUITE_COMMAND = re.compile(r"^\s*run:\s*(.*\bpytest\b.*)$", re.MULTILINE)
 _NEEDS = re.compile(r"^\s*needs:\s*(.+)$", re.MULTILINE)
 
 
+def required_jobs(workflow: Path) -> frozenset[str]:
+    """The job names `workflow`'s one `needs:` names, as names.
+
+    [LAW:parse-dont-validate] The list is parsed into its members rather than
+    left as the text `"[reachability, tests]"` for callers to search. Asking
+    `"tests" in text` is a weaker theorem than it looks: it is also true of
+    `[reachability, integration-tests]`, so the assertion this whole test exists
+    to make trustworthy -- that `publish` depends on the `tests` job -- could pass
+    on a workflow where that job had been dropped from `needs:` entirely. A gate
+    check that can go green for the wrong reason is the failure it was written
+    against, one level up.
+
+    A `needs:` written as a block sequence puts nothing on the line and matches
+    nothing, which fails the count below by name instead of silently reading an
+    empty dependency list as a satisfied one.
+    """
+    listed = _NEEDS.findall(yaml_without_prose(workflow))
+    assert len(listed) == 1, (
+        f"{workflow.name} has {len(listed)} inline `needs:` lines ({listed}) — "
+        "this check reads the publish job's dependencies and can no longer tell "
+        "which of them it is looking at"
+    )
+    return frozenset(
+        name.strip() for name in listed[0].strip().strip("[]").split(",") if name.strip()
+    )
+
+
 def suite_command(workflow: Path) -> str:
     found = {command.strip() for command in _SUITE_COMMAND.findall(yaml_without_prose(workflow))}
     assert len(found) == 1, (
@@ -204,15 +231,25 @@ def test_the_publish_gate_is_actually_wired_to_the_publish():
     `tests` is the plausible edit: `needs:` goes from a string to a list, and a
     list with one entry in it is a silent loss of the older gate.
     """
-    listed = _NEEDS.findall(yaml_without_prose(PUBLISH_GATE))
-    assert len(listed) == 1, (
-        f"{PUBLISH_GATE.name} has {len(listed)} `needs:` lines ({listed}) — this "
-        "check reads the publish job's dependencies and can no longer tell which "
-        "of them it is looking at"
-    )
-    required = listed[0]
+    required = required_jobs(PUBLISH_GATE)
     for job in ("reachability", "tests"):
         assert job in required, (
-            f"the publish job does not need {job!r} ({required!r}) — a gate the "
-            "publish does not depend on gates nothing, however red it goes"
+            f"the publish job does not need {job!r} ({sorted(required)}) — a gate "
+            "the publish does not depend on gates nothing, however red it goes"
         )
+
+
+def test_a_job_whose_name_merely_contains_tests_does_not_satisfy_the_gate(tmp_path):
+    """The way the check above could have gone green over a dropped gate.
+
+    [LAW:behavior-not-structure] Pinned as a property of `required_jobs` and not
+    of the shipped workflow, because the workflow is correct today and the whole
+    risk is a future edit -- so the case has to be constructible rather than
+    waited for. `[reachability, integration-tests]` names no job called `tests`,
+    and a substring reading of that line says it does.
+    """
+    renamed = tmp_path / "publish-image.yaml"
+    renamed.write_text("  publish:\n    needs: [reachability, integration-tests]\n")
+
+    assert required_jobs(renamed) == frozenset({"reachability", "integration-tests"})
+    assert "tests" not in required_jobs(renamed)
