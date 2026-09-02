@@ -903,9 +903,9 @@ def _model_json(model_id: str, capabilities: frozenset[Capability]) -> dict:
         # would be a second, coarser copy of it — wrong the moment an engine
         # bakes voices in two languages, which both of ours already could.
         "languages": [],
-        # Not an ElevenLabs field. The capabilities this deployment will actually
-        # honour, so they can be read before a call rather than inferred from
-        # what came back refused.
+        # Not an ElevenLabs field, and the union across this deployment's voices —
+        # what it can do at all. The answer a request gets is on the voice; see
+        # above.
         "capabilities": sorted(item.name.lower() for item in capabilities),
     }
 
