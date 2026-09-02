@@ -19,7 +19,8 @@ because the previous version of this service broke it:
 
 1. A parameter that *can* be honoured is honoured. `output_format` selects from
    all 28 published formats; `voice_id` selects a real voice; `speed`
-   changes the speech rate.
+   changes the speech rate; `model_id` selects the engine, when it names the one
+   this deployment runs.
 2. A parameter that *cannot* be honoured is named in the `x-elvenspeak-ignored`
    response header. Nothing crosses the engine seam for `stability` or `seed`,
    so those are dropped — but a caller is told which of the things it asked for
@@ -53,7 +54,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import alignment as align_mod
-from . import encoding, text, voices
+from . import encoding, models, text, voices
 from .engine import Capability, Engine, Prosody, Voice
 from .formats import (
     DEFAULT_OUTPUT_FORMAT,
@@ -77,6 +78,21 @@ _LOGGER = logging.getLogger("elvenspeak.api")
 #: and is visible in the header, where an over-claim would be a silent lie.
 _NEEDS_CAPABILITY: dict[str, Capability] = {
     "voice_settings.speed": Capability.SPEED,
+}
+
+#: What a `model_id` honours, by how far it reaches ([`elvenspeak.models`]). A
+#: served id chose the engine that is about to speak, so reporting it ignored
+#: would be the header lying in the one direction rule 2 cannot afford; an id
+#: that reaches nothing steered nothing and is named back.
+#:
+#: Total over [`models.Reach`] rather than a lookup with a default, so a member
+#: added later fails here instead of quietly inheriting "not honoured" —
+#: `tests/test_capabilities.py` asserts the coverage.
+_HONOURED_BY_REACH: dict[models.Reach, frozenset[str]] = {
+    models.Reach.SERVED: frozenset({"model_id"}),
+    # Refused before any header is built. Present because the table is total.
+    models.Reach.ELSEWHERE: frozenset(),
+    models.Reach.UNKNOWN: frozenset(),
 }
 
 #: Fields of [`SpeechRequest`] that are not parameters a caller asks to have
@@ -238,7 +254,7 @@ class SpeechRequest(BaseModel):
             + sorted(self.model_extra or {})
         )
 
-    def ignored(self, capabilities: frozenset[Capability]) -> tuple[str, ...]:
+    def ignored(self, honoured: frozenset[str]) -> tuple[str, ...]:
         """Which of the caller's parameters this server could not honour.
 
         [LAW:one-source-of-truth] Derived on both sides. This used to subtract
@@ -249,15 +265,42 @@ class SpeechRequest(BaseModel):
         engine that reproduces a `seed` would have had it reported as dropped —
         both of them rule 2 broken by a list nobody had reason to revisit.
 
+        `honoured` arrives as names rather than as the facts they were derived
+        from ([`_honoured`]). Two things decide it now — what the engine declares
+        and how far the request's `model_id` reaches — and taking both here would
+        make this method grow a parameter for every future one, each with its own
+        way of naming a field. Subtracting names is the whole of the job.
+
         Only parameters actually asked for are reported, so the header's presence
         means something happened rather than being constant noise.
         """
-        honoured = {
+        return tuple(name for name in self.requested() if name not in honoured)
+
+
+def _honoured(
+    capabilities: frozenset[Capability], reach: models.Reach
+) -> frozenset[str]:
+    """Which request parameters this service will act on, this time.
+
+    [LAW:one-source-of-truth] The one derivation of "honoured", read by
+    [`SpeechRequest.ignored`] and by nothing else. Both halves are read off the
+    facts rather than listed: the capability half from the engine's declaration
+    through [`_NEEDS_CAPABILITY`], the model half from where the request's
+    `model_id` actually reaches.
+
+    Per request rather than once at startup, because the model half is a fact
+    about the request. The capability half genuinely is fixed, and recomputing it
+    costs a set comprehension over one entry — cheaper than the second, stale
+    copy that caching it beside the fixed one would create.
+    """
+    return (
+        frozenset(
             name
             for name, capability in _NEEDS_CAPABILITY.items()
             if capability in capabilities
-        }
-        return tuple(name for name in self.requested() if name not in honoured)
+        )
+        | _HONOURED_BY_REACH[reach]
+    )
 
 
 def create_app(settings: Settings, engine: Engine) -> FastAPI:
@@ -282,6 +325,18 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     # cannot name a concrete one — it passes a string through to the module that
     # owns the alias table.
     cat = voices.Catalog.for_engine(settings.engine_name, engine, settings.fallback)
+
+    # Which `model_id` values reach this deployment, built once for the same
+    # reason the catalog is: it reads the engine's declaration off disk, and a
+    # malformed one should stop the process rather than surface on whichever
+    # call first named a model.
+    #
+    # Both arguments come from the settings, so this module still names no
+    # concrete engine — it passes two strings-worth of fact to the module that
+    # owns the question ([LAW:one-way-deps]).
+    directory = models.Directory.for_engine(
+        settings.engine_name, settings.known_engines
+    )
 
     # The negotiation, and the only one. Asked once here rather than per request
     # because the interface promises the answer is fixed for the engine's life,
@@ -381,6 +436,37 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
                 },
             ) from None
 
+    def require_served(body: SpeechRequest) -> None:
+        """Refuses a request for an engine this deployment is not running.
+
+        [LAW:no-silent-failure] The alternative is the answer this ticket exists
+        to forbid: a caller asks for kokoro, hears fluent piper, and nothing in
+        the response says the engine it named was not the engine that spoke. A
+        voice can substitute because a substitute voice is still an answer to
+        "say this"; an engine cannot, because the engine *is* the answer.
+
+        Only an id naming another engine is refused. An ElevenLabs model id this
+        deployment maps to nothing names no engine here, so there is no
+        contradiction to detect and no 422 to justify — every stock ElevenLabs
+        client sends a `model_id`, and refusing the unrecognised ones would
+        reject most real callers on their first request. Those come back named in
+        `x-elvenspeak-ignored` instead, which is rule 2 doing its job.
+
+        422 rather than 404: the offending value is in the request body, which is
+        what that status is for here and what `output_format` already answers.
+        """
+        if directory.reach(body.model_id) is models.Reach.ELSEWHERE:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": (
+                        f"model_id {body.model_id!r} names an engine this "
+                        f"deployment is not running"
+                    ),
+                    "served": list(directory.listed()),
+                },
+            )
+
     def resolve(voice_id: str) -> voices.Resolution:
         try:
             return cat.resolve(voice_id)
@@ -403,7 +489,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         }
         if resolution.substituted:
             out["x-elvenspeak-voice-requested"] = (resolution.requested,)
-        ignored = body.ignored(capabilities)
+        ignored = body.ignored(_honoured(capabilities, directory.reach(body.model_id)))
         if ignored:
             out["x-elvenspeak-ignored"] = ignored
         # An endpoint with a header of its own passes it here rather than
@@ -437,6 +523,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         output_format: str = Query(default=DEFAULT_OUTPUT_FORMAT),
     ) -> Response:
         fmt = parse_format(output_format)
+        require_served(body)
         resolution = resolve(voice_id)
 
         def synthesize() -> tuple[int, bytes]:
@@ -466,6 +553,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         output_format: str = Query(default=DEFAULT_OUTPUT_FORMAT),
     ) -> StreamingResponse:
         fmt = parse_format(output_format)
+        require_served(body)
         resolution = resolve(voice_id)
 
         # On a thread even though the interface promises the audio arrives lazily
@@ -489,6 +577,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         output_format: str = Query(default=DEFAULT_OUTPUT_FORMAT),
     ) -> JSONResponse:
         fmt = parse_format(output_format)
+        require_served(body)
         resolution = resolve(voice_id)
         require(Capability.TIMESTAMPS)
 
@@ -515,6 +604,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         output_format: str = Query(default=DEFAULT_OUTPUT_FORMAT),
     ) -> StreamingResponse:
         fmt = parse_format(output_format)
+        require_served(body)
         resolution = resolve(voice_id)
         require(Capability.TIMESTAMPS)
         prosody = body.prosody(capabilities)
@@ -572,17 +662,26 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         inferring it from the shape of a voice name.
 
         [LAW:one-source-of-truth] Derived from what this process actually has —
-        the engine the environment chose and the capabilities that survived the
-        deployment's withholding — never from a list written beside it. A roster
-        here would be a second answer to "what can this server do", free to
-        advertise an engine the image does not carry.
+        the engine the environment chose, the foreign ids that engine declares,
+        and the capabilities that survived the deployment's withholding — never
+        from a list written beside it. A roster here would be a second answer to
+        "what can this server do", free to advertise an engine the image does not
+        carry.
+
+        Every id listed is one [`require_served`] will accept, because both read
+        the same [`models.Directory`]. Listing only the engine while an
+        `eleven_*` id also reached it would leave a caller discovering the rest
+        by trying them, which is the discovery-by-500 this endpoint exists to
+        replace.
 
         A bare array rather than an object with a `models` key, because that is
         what ElevenLabs returns and a stock client indexes it directly. `GET
         /v1/voices` wraps its list because ElevenLabs wraps that one; the
         difference is theirs, and mirroring it is the whole job.
         """
-        return [_model_json(settings.engine_name, capabilities)]
+        return [
+            _model_json(model_id, capabilities) for model_id in directory.listed()
+        ]
 
     # ------------------------------------------------------------------ voices
 

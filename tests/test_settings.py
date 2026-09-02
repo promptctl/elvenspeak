@@ -83,6 +83,30 @@ def test_the_engine_and_its_name_come_back_from_the_same_lookup():
     assert settings.engine_name == "second"
 
 
+def test_the_roster_is_the_registry_that_was_handed_in():
+    """[LAW:one-source-of-truth] Which engines exist is asked of the registry.
+
+    `known_engines` is what lets a deployment refuse a `model_id` naming an
+    engine it is not running instead of answering in the one it is
+    ([`elvenspeak.models.Reach.ELSEWHERE`]). Read off the registry the caller
+    supplied, because a list spelled anywhere else is a second answer to "which
+    engines exist" — and the direction it fails in is the bad one: an engine
+    missing from it goes back to being served by the wrong engine, silently.
+
+    Against a synthetic registry for the same reason the test above uses one: the
+    property is that the roster is whatever was handed in, not that this
+    repository happens to ship two engines today.
+    """
+    registry: Registry = {
+        "first": lambda _env, _withheld: DeclaredPrepared(),
+        "second": lambda *_: pytest.fail("the unnamed engine is the first entry"),
+    }
+    settings = Settings.from_env(registry, {})
+
+    assert settings.known_engines == {"first", "second"}
+    assert settings.engine_name in settings.known_engines
+
+
 def test_a_blank_engine_name_is_refused_rather_than_taken_as_no_preference():
     """`ELVENSPEAK_ENGINE=` is a present key, not an absent one.
 

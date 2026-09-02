@@ -31,21 +31,14 @@ fact it happened is not hidden.
 from __future__ import annotations
 
 import logging
-import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
 
-from . import engine
+from . import declarations, engine
 from .provisioning import ConfigError
 
 _LOGGER = logging.getLogger("elvenspeak.voices")
-
-#: One file per engine, each named after that engine's key in
-#: [`elvenspeak.engines.ENGINES`]. See [`load_aliases`] for why the table is
-#: scoped to an engine rather than shared.
-_DECLARATIONS = Path(__file__).parent / "aliases"
 
 
 class Substitution(Enum):
@@ -277,10 +270,10 @@ class Catalog:
 def load_aliases(name: str, voices: dict[str, engine.Voice]) -> dict[str, str]:
     """Foreign voice ids mapped onto the local ids they reach, for one engine.
 
-    [LAW:effects-at-boundaries] The one place a declaration file is read.
-    Resolution itself takes the finished table, so it stays a pure function of
-    its inputs and a test can hand it a fixture instead of depending on the
-    shipped file.
+    Where the engine's declaration ([`elvenspeak.declarations`]) meets the voices
+    it actually has. Resolution itself takes the finished table, so it stays a
+    pure function of its inputs and a test can hand it a fixture instead of
+    depending on the shipped file.
 
     [LAW:one-source-of-truth] The table is scoped to the engine because its
     values are that engine's voice ids and mean nothing anywhere else. One
@@ -301,12 +294,7 @@ def load_aliases(name: str, voices: dict[str, engine.Voice]) -> dict[str, str]:
     failed later: the table's job is to answer "which voice is this", and an
     answer that cannot be spoken is not an answer.
     """
-    declared = _DECLARATIONS / f"{name}.toml"
-    if not declared.exists():
-        return {}
-    with declared.open("rb") as handle:
-        table = tomllib.load(handle)
-    published = table.get("elevenlabs", {})
+    published = declarations.voice_aliases(name)
     mapped = {
         foreign: local for foreign, local in published.items() if local in voices
     }

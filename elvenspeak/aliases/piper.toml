@@ -30,6 +30,14 @@
 # An ID absent from this table is not an error: see `fallback` in settings and
 # the `x-elvenspeak-voice` response header, which names whatever actually spoke.
 
+# Which ElevenLabs `model_id` values reach this engine. Read by
+# `elvenspeak.models`; the engine is also always reachable by its own name, so
+# `piper` is not repeated here. ElevenLabs' flash and turbo models are the fast
+# half of their range, which is what Piper is here (RTF ~0.03 against Kokoro's
+# ~0.77). An id absent from every engine's list steers nothing and is reported
+# in `x-elvenspeak-ignored`.
+elevenlabs_models = ["eleven_flash_v2_5", "eleven_turbo_v2_5"]
+
 [elevenlabs]
 # The nine voices from ElevenLabs' original default set, the ones most likely
 # to be hardcoded in a client written before voice pickers existed.
