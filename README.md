@@ -23,10 +23,12 @@ checked by a test:
    has an equivalent of `stability` or `seed`, so those are dropped — and the
    response carries `x-elvenspeak-ignored: seed, voice_settings.stability`
    so you learn it from the response instead of from the audio. The list is
-   worked out per request from the engine behind the server, not written down
-   anywhere: an engine that cannot vary its speaking rate adds
+   worked out per request from **the voice that will speak**, not written down
+   anywhere: a voice that cannot vary its speaking rate adds
    `voice_settings.speed` to it, and one that could reproduce a `seed` would
-   drop it, with no edit here.
+   drop it, with no edit here. Per voice rather than per server, because a
+   deployment can serve voices from more than one engine — so the same parameter
+   is honoured for one voice and named back for another, in one process.
 3. **A request that cannot be served is refused.** An unknown `output_format` is
    a `422` quoting the value you sent, not a quiet substitution. So is `text`
    that is empty, whitespace-only, or longer than **5000 characters** — the cap
@@ -41,8 +43,8 @@ checked by a test:
 | `POST /v1/text-to-speech/{voice_id}/stream` | Audio arrives as it is synthesized. |
 | `POST /v1/text-to-speech/{voice_id}/with-timestamps` | Audio plus character timings. |
 | `POST /v1/text-to-speech/{voice_id}/stream/with-timestamps` | One JSON object per sentence. |
-| `GET /v1/models` | Every `model_id` this deployment accepts — the engine's own name, then the ElevenLabs ids that reach it — and what it will honour. A bare array, as ElevenLabs returns. |
-| `GET /v1/voices` | The voices installed here, in ElevenLabs' shape. |
+| `GET /v1/models` | Every `model_id` this deployment accepts — the engine's own name, then the ElevenLabs ids that reach it — and what it can honour *at all*: the union across its voices. The per-voice answer is on `GET /v1/voices`. A bare array, as ElevenLabs returns. |
+| `GET /v1/voices` | The voices installed here, in ElevenLabs' shape, each with the `capabilities` it really has. |
 | `GET /v1/voices/{voice_id}` | One voice. 404 if it is not installed. |
 | `GET /v1/voices/settings/default` | ElevenLabs' documented defaults. |
 | `GET /v1/voices/{voice_id}/settings` | Same, per voice. |
@@ -92,6 +94,23 @@ voice their table names, so all nine ids resolve to real speech out of the box.
 
 `GET /v1/voices` reports each voice's live aliases, so what actually resolves is
 readable from the server rather than inferred from a file.
+
+### What each voice can actually do
+
+That same response carries a `capabilities` list per voice — `speed`,
+`timestamps` — naming what speaking in *that* voice really does. It is per voice
+and not per server because a deployment can serve voices from more than one
+engine: behind the router, one voice measures character timings and the next
+cannot, in the same process.
+
+Read it and you know before you call. `POST /with-timestamps` answers `501` for a
+voice whose list omits `timestamps`, and `voice_settings.speed` comes back in
+`x-elvenspeak-ignored` for one that omits `speed` — so the alternative to reading
+it is discovering it from a refusal partway through a conversation.
+
+`GET /v1/models` also reports a `capabilities` list, and it answers a different
+question: what this deployment can do *at all*, the union across its voices. Use
+it to choose a deployment; use `GET /v1/voices` to decide a request.
 
 Substitution is never invisible: every synthesis response carries
 `x-elvenspeak-voice` naming what actually spoke, and `x-elvenspeak-voice-requested` when

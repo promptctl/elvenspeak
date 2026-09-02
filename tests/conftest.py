@@ -294,10 +294,11 @@ class DeclaredEngine:
     for: something written elsewhere, never anticipated here, and described
     accurately anyway.
 
-    [LAW:one-type-per-behavior] One type taking a capability set, rather than a
-    `SpeedlessEngine` and a `TimelessEngine` beside it. What differs between the
-    engines these tests need is a value, so it is passed as one — which is the
-    same argument the interface itself makes, tested here by being relied upon.
+    [LAW:one-type-per-behavior] One type, rather than a `SpeedlessEngine` and a
+    `TimelessEngine` beside it. What differs between the engines these tests need
+    is a value — carried on each [`Voice`] it offers — so it is passed as one,
+    which is the same argument the interface itself makes and is tested here by
+    being relied upon.
 
     The voice list is a value for the same reason, and the router is what needed
     it: a fleet whose members all offer identical ids can only ever demonstrate

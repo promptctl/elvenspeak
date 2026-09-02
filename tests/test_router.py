@@ -541,3 +541,38 @@ def test_one_deployment_tells_the_truth_about_each_of_its_voices():
     # it from a 501 partway through a conversation.
     assert listed["alpha-one"] == ["speed", "timestamps"]
     assert listed["beta-one"] == []
+
+
+def test_a_backend_whose_voices_declare_no_capabilities_fails_the_boot():
+    """The path a rolling deploy actually takes past an older image.
+
+    A backend from before per-voice capabilities publishes voices with no
+    `capabilities` field, and a router cannot tell what it will honour — reading
+    the absence as "declares nothing" would refuse every timestamp request for a
+    backend that can in fact measure, and reading it as "declares everything"
+    would promise captions that never arrive. Neither is knowable from here, so
+    the boot stops and names the backend.
+
+    Its own test rather than a case of the stale-backend one, which publishes
+    capabilities precisely so it reaches the `/v1/models` check instead.
+    """
+    ancient = FastAPI()
+
+    @ancient.get("/v1/models")
+    def models():
+        return [{"model_id": "ancient", "capabilities": ["speed"]}]
+
+    @ancient.get("/v1/voices")
+    def voices() -> dict:
+        return {"voices": [{"voice_id": "old-one", "name": "Old One"}]}
+
+    with serving(ancient) as backend, serving(
+        registered_consul([Registered(service="elvenspeak-ancient", base_url=backend)])
+    ) as consul:
+        with pytest.raises(ConfigError) as raised:
+            opened(consul)
+
+    message = str(raised.value)
+    assert "elvenspeak-ancient" in message
+    assert "old-one" in message
+    assert "named no capabilities" in message
