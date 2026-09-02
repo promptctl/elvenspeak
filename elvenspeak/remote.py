@@ -185,6 +185,15 @@ def _voice(published: Any, service: str) -> engine.Voice:
         capabilities=frozenset(
             item for item in engine.Capability if item.name.lower() in declared
         ),
+        # The backend's own compatibility mapping, carried rather than re-derived.
+        # It is the only party that knows which foreign ids it answers for, and a
+        # router that dropped them would answer for none — see
+        # [`elvenspeak.engine.Voice.aliases`]. Absent is empty rather than a
+        # refusal: an engine is entitled to declare none, and older images that
+        # published no `aliases` field simply resolve nothing extra.
+        aliases=tuple(
+            str(alias) for alias in published.get("aliases") or () if str(alias)
+        ),
     )
 
 

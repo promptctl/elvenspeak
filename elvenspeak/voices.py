@@ -218,11 +218,12 @@ class Catalog:
         keeps its single enforcer ([LAW:single-enforcer]) and gains no second
         spelling for the resolved case.
         """
-        voices = {voice.id: voice for voice in source.voices()}
+        offered = source.voices()
+        voices = {voice.id: voice for voice in offered}
         return Catalog(
             voices=voices,
             fallback=_chosen(fallback, voices),
-            aliases=load_aliases(name, voices),
+            aliases=_aliases_of(name, offered, voices),
         )
 
     @property
@@ -265,6 +266,40 @@ class Catalog:
         return Resolution(
             voice=self._voices[self._fallback], requested=requested, substituted=True
         )
+
+
+def _aliases_of(
+    name: str,
+    offered: tuple[engine.Voice, ...],
+    voices: dict[str, engine.Voice],
+) -> dict[str, str]:
+    """Every foreign id this deployment answers for, from both places one can come.
+
+    An engine that *ships* its voices declares their foreign ids in a file named
+    after its registry key, which only the server knows — an engine has never been
+    told what it is called. An engine that *discovers* its voices receives their
+    mappings with them, on each [`engine.Voice`], because they belong to whoever
+    published the voice. [`elvenspeak.router`] is the second kind and was the
+    reason this stopped being one lookup.
+
+    [LAW:one-source-of-truth] Two places, never two answers about one engine: an
+    engine that ships a table carries nothing on its voices, and one that
+    discovers them has no file. The union is stated rather than a precedence
+    fought over, and where they could overlap the file wins — it is the
+    deployment's own word about its own engine, and the discovered half is a
+    report of somebody else's.
+
+    First voice wins a contested foreign id, in the order the engine offers them.
+    Two backends each mapping one globally-unique ElevenLabs id onto their own
+    substitute is two compatibility mappings rather than two answers, so there is
+    nothing to refuse — but there is one caller and one id, so the choice has to be
+    the same on every boot. Discovery order is stable, so this is.
+    """
+    carried: dict[str, str] = {}
+    for voice in offered:
+        for foreign in voice.aliases:
+            carried.setdefault(foreign, voice.id)
+    return carried | load_aliases(name, voices)
 
 
 def load_aliases(name: str, voices: dict[str, engine.Voice]) -> dict[str, str]:

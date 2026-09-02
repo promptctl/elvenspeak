@@ -72,14 +72,18 @@ of them replaces nothing.
 and an engine reads only the file named after itself. An engine with nothing to
 declare has no file.
 
-**The router has none, and aliases do not resolve through it.** A voice id from
-the list above reaches a substitute on a piper or kokoro deployment; sent to a
-router in front of those same engines it lands on the fallback voice instead,
-exactly as a completely unknown id would. The router's own table is empty, and a
-backend is only ever asked for an already-resolved local voice id, so its table
-is never consulted either. Tracked as `piper-routing-7e2.15`; until it is done, a
-routed deployment is not a drop-in for a direct one where saved ElevenLabs voice
-ids are concerned. Every table maps the nine original ElevenLabs voices
+**The router ships no table and does not need one.** It answers for other
+servers' voices, and their mappings arrive with them: each voice a backend
+publishes carries the foreign ids that reach it, so a router resolves exactly
+what the engine behind it would have resolved. An ElevenLabs id sent to a router
+reaches the same substitute it would have reached sent to that engine directly.
+
+Where two backends claim one foreign id — which every engine's table does by
+design, since the nine ElevenLabs ids are the same nine everywhere — the first in
+discovery order takes it. That is not a collision to refuse: the ids are foreign
+to every engine here, so two substitutes are two compatibility mappings and
+either is a correct answer. What matters is that it is the same answer on every
+boot, and discovery order is stable. Every table maps the nine original ElevenLabs voices
 onto that engine's own voices, comparable in register, **not** in likeness. The
 scoping is what keeps them honest: one shared table can only name one engine's
 voices, and a Piper voice name is meaningless inside the Kokoro image. An engine
