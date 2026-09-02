@@ -40,6 +40,7 @@ checked by a test:
 | `POST /v1/text-to-speech/{voice_id}/stream` | Audio arrives as it is synthesized. |
 | `POST /v1/text-to-speech/{voice_id}/with-timestamps` | Audio plus character timings. |
 | `POST /v1/text-to-speech/{voice_id}/stream/with-timestamps` | One JSON object per sentence. |
+| `GET /v1/models` | The engine this image was built with, and what it will honour. A bare array, as ElevenLabs returns. |
 | `GET /v1/voices` | The voices installed here, in ElevenLabs' shape. |
 | `GET /v1/voices/{voice_id}` | One voice. 404 if it is not installed. |
 | `GET /v1/voices/settings/default` | ElevenLabs' documented defaults. |
