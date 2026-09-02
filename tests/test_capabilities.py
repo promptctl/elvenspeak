@@ -20,6 +20,7 @@ from dataclasses import replace
 
 import pytest
 from conftest import (
+    DECLARED_MODELS,
     DECLARED_VOICES,
     DeclaredEngine,
     DeclaredPrepared,
@@ -414,9 +415,12 @@ def test_one_engine_whose_voices_differ_is_answered_per_voice():
         name="Measured",
         description="carries timings",
         capabilities=frozenset(Capability),
+        models=DECLARED_MODELS,
     )
     # Declares nothing, and means it.
-    plain = Voice(id="plain", name="Plain", description="does not")
+    plain = Voice(
+        id="plain", name="Plain", description="does not", models=DECLARED_MODELS
+    )
 
     engine = DeclaredEngine((*declaring(frozenset(Capability), (timed,)), plain))
     # First-offered rather than this file's usual named fallback, which names a

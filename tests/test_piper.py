@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import SERVES, declared, make_voice, piper_prepared
+from conftest import SERVES, declared, make_voice, piper_prepared, serves
 
 from elvenspeak import piper
 from elvenspeak.engine import Capability, Prosody
@@ -460,3 +460,13 @@ def test_the_voices_a_build_reports_declare_what_the_ones_it_boots_will(tmp_path
 
     assert baked == booted
     assert Capability.TIMESTAMPS in baked["en_US-lessac-medium"]
+
+    # Same claim over the other thing a `Voice` states about its speaker. Asserted
+    # against the real declaration rather than only across the two paths, so a
+    # stamp that is consistently wrong fails here too — matching on both sides is
+    # what a dropped `serves` argument would also do.
+    baked_models = {voice.id: voice.models for voice in prepared.acquire()}
+    booted_models = {voice.id: voice.models for voice in prepared.open().voices()}
+
+    assert baked_models == booted_models
+    assert baked_models["en_US-lessac-medium"] == serves("piper")

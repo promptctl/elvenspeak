@@ -261,8 +261,10 @@ def _voice(published: Any, service: str) -> engine.Voice:
     # over a JSON `null` yields the model id `"None"`, an id no engine has and
     # every caller could send.
     serves = published.get("models")
-    if not isinstance(serves, list) or not all(
-        isinstance(entry, str) and entry for entry in serves
+    if (
+        not isinstance(serves, list)
+        or not serves
+        or not all(isinstance(entry, str) and entry for entry in serves)
     ):
         raise ConfigError(
             [

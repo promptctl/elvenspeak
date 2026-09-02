@@ -638,6 +638,63 @@ def test_a_backend_whose_voices_declare_no_capabilities_fails_the_boot():
     assert "named no capabilities" in message
 
 
+@pytest.mark.parametrize(
+    "published, why",
+    [
+        ({}, "omits the field"),
+        ({"models": []}, "publishes an empty list"),
+        ({"models": ["piper", None]}, "publishes a non-string entry"),
+        ({"models": [""]}, "publishes an empty id"),
+    ],
+    ids=["absent", "empty", "null-entry", "empty-id"],
+)
+def test_a_backend_that_names_no_model_ids_fails_the_boot(published, why):
+    """The rolling deploy this change's own hazard is about.
+
+    A backend from before `piper-routing-7e2.17` publishes voices carrying
+    `capabilities` and no `models` — new enough to survive the check above, old
+    enough to say nothing about which engine answers for it. The router cannot
+    derive that: the ids belong to the backend, which is the whole reason the
+    field is on the voice, so the boot stops rather than serving a fleet whose
+    engine axis silently covers fewer backends than it appears to.
+
+    The empty list is here because it is the case that reads as an answer. It
+    survives an `isinstance` check and an `all()` over nothing, and the voice it
+    produced answered to no model id at all — so `Directory.over` still found that
+    engine's name in the union via the backend's *other* voices, and a caller who
+    named the engine actually about to speak was told it was not.
+    """
+    stale = FastAPI()
+
+    @stale.get("/v1/models")
+    def models():
+        return [{"model_id": "stale", "capabilities": ["speed"]}]
+
+    @stale.get("/v1/voices")
+    def voices() -> dict:
+        return {
+            "voices": [
+                {
+                    "voice_id": "stale-one",
+                    "name": "Stale One",
+                    "capabilities": ["speed"],
+                }
+                | published
+            ]
+        }
+
+    with serving(stale) as backend, serving(
+        registered_consul([Registered(service="elvenspeak-stale", base_url=backend)])
+    ) as consul:
+        with pytest.raises(ConfigError) as raised:
+            opened(consul)
+
+    message = str(raised.value)
+    assert "elvenspeak-stale" in message, why
+    assert "stale-one" in message, why
+    assert "named no models" in message, why
+
+
 # ------------------------------------------------- the engine axis, end to end
 #
 # `piper-routing-7e2.17`, whose symptoms were all measured against the running

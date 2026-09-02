@@ -236,9 +236,9 @@ class _Prepared:
         The lifecycle moment is carried by which method the caller reached for.
         """
         return tuple(
-            replace(ready.voice, capabilities=self.capabilities(), models=self.serves)
+            replace(ready.voice, capabilities=self.capabilities())
             for ready in _install(
-                self.keys, self.models_dir, allow_download=True
+                self.keys, self.models_dir, True, self.serves
             ).values()
         )
 
@@ -267,13 +267,11 @@ class _Prepared:
 
         installed: dict[str, _Installed] = {}
         for key, ready in _install(
-            self.keys, self.models_dir, self.allow_download
+            self.keys, self.models_dir, self.allow_download, self.serves
         ).items():
             _LOGGER.info("loading voice %s", key)
             installed[key] = _Installed(
-                voice=replace(
-                    ready.voice, capabilities=capabilities, models=self.serves
-                ),
+                voice=replace(ready.voice, capabilities=capabilities),
                 sample_rate=ready.sample_rate,
                 model=PiperVoice.load(
                     str(ready.model_path), include_alignments=self.timings
@@ -348,7 +346,10 @@ def configure(
 
 
 def _install(
-    keys: tuple[str, ...], models_dir: Path, allow_download: bool
+    keys: tuple[str, ...],
+    models_dir: Path,
+    allow_download: bool,
+    serves: frozenset[str],
 ) -> dict[str, _Ready]:
     """Makes every named voice present and readable, and says what they are.
 
@@ -401,7 +402,7 @@ def _install(
                     f"downloading voice {key!r} into {models_dir} did not produce "
                     f"both {model_path.name} and {config_path.name}"
                 )
-        voice, sample_rate = _describe(key, model_path)
+        voice, sample_rate = _describe(key, model_path, serves)
         ready[key] = _Ready(
             voice=voice, sample_rate=sample_rate, model_path=model_path
         )
@@ -447,7 +448,9 @@ def _separates_words(phoneme: str) -> bool:
     return phoneme.isspace() or phoneme in _BOUNDARY_PHONEMES
 
 
-def _describe(key: str, model_path: Path) -> tuple[engine.Voice, int]:
+def _describe(
+    key: str, model_path: Path, serves: frozenset[str]
+) -> tuple[engine.Voice, int]:
     """Reads a voice's metadata, and the rate its samples will really have.
 
     From the `.onnx.json` beside the weights rather than from the remote catalog,
@@ -513,6 +516,7 @@ def _describe(key: str, model_path: Path) -> tuple[engine.Voice, int]:
                 ("engine", "piper"),
                 ("speakers", str(int(config.get("num_speakers") or 1))),
             ),
+            models=serves,
         ),
         int(rate),
     )

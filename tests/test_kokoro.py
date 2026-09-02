@@ -21,6 +21,7 @@ import pytest
 from conftest import (
     SERVES,
     declared,
+    serves,
     KOKORO_MODEL,
     KOKORO_TIMELESS_MODEL,
     KOKORO_VOICES,
@@ -232,7 +233,7 @@ def test_a_voice_is_described_from_its_id(key, name, language, gender):
     engine reading Spanish with English phonemes. One English example would have
     agreed with that mutation perfectly.
     """
-    voice = kokoro._describe(key)
+    voice = kokoro._describe(key, SERVES)
 
     assert voice.id == key
     assert voice.name == name
@@ -535,6 +536,16 @@ def test_acquire_describes_what_it_installed(kokoro_installed):
         voice.id: voice.capabilities for voice in prepared.open().voices()
     }
     assert all(Capability.TIMESTAMPS in voice.capabilities for voice in voices)
+
+    # The other thing a `Voice` states about its speaker, held to the same
+    # standard: `_declaring` runs on both paths, so a `serves` dropped at one of
+    # them describes a voice the build can reach by engine name and the boot
+    # cannot. Compared against the real declaration too, since agreeing on the
+    # wrong set is what a dropped argument would also look like.
+    assert {voice.id: voice.models for voice in voices} == {
+        voice.id: voice.models for voice in prepared.open().voices()
+    }
+    assert all(voice.models == serves("kokoro") for voice in voices)
 
 
 def test_a_voice_that_is_not_in_the_pack_is_caught_at_install(kokoro_installed):

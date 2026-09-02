@@ -397,6 +397,67 @@ def test_the_listing_is_the_supplied_engines_voices(client):
     assert all(voice["labels"]["engine"] == "tone" for voice in listed)
 
 
+def test_the_engine_axis_reaches_a_supplied_engine_too(client):
+    """`model_id` decided against an engine this package has never seen.
+
+    The three answers, through the public API alone. `tone` is the name this
+    example registers its engine under and the only name it was ever told —
+    `Settings.from_env` hands it down, because an engine cannot know the key a
+    registry filed it under — so a deployment that failed to pass it through
+    would advertise nothing and refuse the caller who named it.
+
+    The 422 is the half worth stating twice: an outside engine that stamped the
+    wrong set would still serve every request, in its own voice, with nothing in
+    the response saying the engine named was not the engine that spoke.
+    """
+    listed = client.get("/v1/models").json()
+    assert [entry["model_id"] for entry in listed] == ["tone"]
+
+    named = client.post(
+        "/v1/text-to-speech/tone-low", json={"text": TEXT, "model_id": "tone"}
+    )
+    assert named.status_code == 200
+    assert "model_id" not in named.headers.get("x-elvenspeak-ignored", "")
+
+    # An id no engine in this registry has steers nothing and is reported, rather
+    # than refused: a stock ElevenLabs client sends one on every request.
+    foreign = client.post(
+        "/v1/text-to-speech/tone-low",
+        json={"text": TEXT, "model_id": "eleven_turbo_v2"},
+    )
+    assert foreign.status_code == 200
+    assert "model_id" in foreign.headers["x-elvenspeak-ignored"]
+
+
+def test_naming_an_engine_this_deployment_is_not_running_is_refused(environ):
+    """The refusal, which needs a registry holding more than the engine that runs.
+
+    A one-engine registry cannot produce it: every id is either `tone` or nothing
+    this build has, and the second is reported rather than refused. So this
+    registers the same engine twice under two names — which is what a project
+    shipping two engines in one build really looks like from `models.Directory`,
+    since what it reads is the registry's *keys*.
+
+    Without this the caller who asks for `chime` and is answered by `tone` hears
+    fluent audio from an engine they did not name, and nothing in the response
+    says so.
+    """
+    both: Registry = {"tone": configure, "chime": configure}
+    settings = Settings.from_env(both, environ)
+    settings.engine.acquire()
+    client = TestClient(create_app(settings, settings.engine.open()))
+
+    refused = client.post(
+        "/v1/text-to-speech/tone-low", json={"text": TEXT, "model_id": "chime"}
+    )
+
+    assert refused.status_code == 422
+    detail = refused.json()["detail"]
+    assert "'chime'" in detail["message"]
+    assert "tone-low" in detail["message"]
+    assert detail["served"] == ["tone"]
+
+
 def test_the_supplied_engines_own_order_chooses_the_fallback_voice(client):
     """`voices()` promises "best first", and this deployment named no fallback.
 

@@ -23,7 +23,13 @@ from contextlib import ExitStack
 
 import fleet
 import pytest
-from conftest import DECLARED_VOICES, DeclaredEngine, DeclaredPrepared, declaring
+from conftest import (
+    DECLARED_VOICES,
+    SERVES,
+    DeclaredEngine,
+    DeclaredPrepared,
+    declaring,
+)
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -45,7 +51,7 @@ EVERYTHING = frozenset(Capability)
 #: by beginning with an `f` that happens to mean French. Renaming a conftest
 #: voice would then break this file for a reason with no visible connection to
 #: it, so the kokoro tests bring an id kokoro can actually read.
-KOKORO_VOICE = Voice(id="af_test", name="test", description="test")
+KOKORO_VOICE = Voice(id="af_test", name="test", description="test", models=SERVES)
 
 
 def _settings() -> Settings:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from conftest import SERVES
 from elvenspeak.engine import Voice
 
 
@@ -20,6 +21,7 @@ def voice() -> Voice:
         name="Test",
         description="a voice",
         labels=(("engine", "test"), ("quality", "medium")),
+        models=SERVES,
     )
 
 

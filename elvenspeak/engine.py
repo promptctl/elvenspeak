@@ -47,7 +47,7 @@ speak in one of them; it never has to decide what an id means.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
 
@@ -158,12 +158,17 @@ class Voice:
     #: would be a second source free to disagree with the voices it summarises —
     #: which is exactly how it came to disagree.
     #:
-    #: Empty by default, because absence is the safe answer: a voice whose server
-    #: names no model id makes every `model_id` unrecognised rather than refused,
-    #: and an unrecognised id is reported in `x-elvenspeak-ignored` and steers
-    #: nothing. A voice that undersells itself is merely unselectable by engine,
-    #: while one that oversells answers in an engine the caller did not ask for.
-    models: frozenset[str] = frozenset()
+    #: [LAW:types-are-the-program] Required, and the one field here with no
+    #: default, because there is no such thing as a voice no engine speaks: the
+    #: engine that speaks it has a name, and that name alone is already a model id
+    #: it answers to. An empty set is not the cautious answer it looks like — it
+    #: refuses the caller who names the very engine about to speak, since
+    #: [`elvenspeak.models.Directory.reach`] finds that name among the build's
+    #: engines and reads the disagreement as a request for a different one.
+    #:
+    #: `kw_only` so this stays beside the field it belongs with rather than moving
+    #: ahead of the defaulted ones to satisfy the constructor.
+    models: frozenset[str] = field(kw_only=True)
 
 
 @dataclass(frozen=True)
