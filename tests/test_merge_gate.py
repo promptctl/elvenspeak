@@ -27,8 +27,9 @@ end with a required check that never reports and a pull request that blocks
 forever, which needs no test to notice.
 
 Read off the workflow files for the same reason `tests/test_workflow.py` reads off
-`.gitea/workflows/publish-image.yaml`: the file is what the forge executes, and a
-run is a copy of the answer that goes stale in the direction that hides the bug.
+`.gitea/workflows/publish-image.yaml`: each file is the instruction its own runner
+obeys -- and they are two different runners, per the distinction above -- while a
+run is a copy of that answer that goes stale in the direction that hides the bug.
 """
 
 from __future__ import annotations
