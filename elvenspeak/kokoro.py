@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import logging
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -139,12 +139,10 @@ class KokoroEngine:
         self,
         model: "Kokoro",
         installed: dict[str, engine.Voice],
-        capabilities: frozenset[engine.Capability],
         sample_rate: int,
     ) -> None:
         self._model = model
         self._installed = installed
-        self._capabilities = capabilities
         self._sample_rate = sample_rate
 
     def voices(self) -> tuple[engine.Voice, ...]:
@@ -157,13 +155,6 @@ class KokoroEngine:
         voice its operator listed first.
         """
         return tuple(self._installed.values())
-
-    def capabilities(self) -> frozenset[engine.Capability]:
-        # Settled by `_Prepared.open` from the session that was really opened,
-        # not recomputed from the filename that produced it: whether durations
-        # can be reported is a property of the export's graph outputs, so the
-        # opened session is the only thing that knows.
-        return self._capabilities
 
     def speak(
         self, voice: engine.Voice, text: str, prosody: engine.Prosody
@@ -236,30 +227,51 @@ class _Prepared:
         passes every file check there is, and the build is the last moment that
         failure is cheap.
 
-        The session is discarded. What is wanted from it is that building it
-        succeeded.
+        The session is discarded once it has answered. What is wanted from it is
+        that building it succeeded — and, since a `Voice` states what speaking in
+        it really does, what the export turned out to be capable of: the voices
+        this reports have to say the same thing as the ones [`open`] serves.
         """
-        _, installed, _ = _open(
+        model, installed, _ = _open(
             self.keys, self.models_dir, self.model, allow_download=True
         )
-        return tuple(installed.values())
+        return tuple(_declaring(model, installed).values())
 
     def open(self) -> KokoroEngine:
         """Opens the export and returns the engine that speaks every named voice."""
         model, installed, sample_rate = _open(
             self.keys, self.models_dir, self.model, self.allow_download
         )
-        # Decided here, beside the session that was opened, rather than stored
-        # as a setting the engine re-reads later: this is the only line that can
-        # see what the export really offers, and an engine holding the filename
-        # instead would keep answering for the filename.
+        # Settled here, beside the session that was opened, rather than stored as
+        # a setting the engine re-reads later: whether durations can be reported is
+        # a property of the export's graph outputs, so the opened session is the
+        # only thing that knows, and an engine holding the filename instead would
+        # keep answering for the filename. Every voice this export speaks is spoken
+        # by that one session, so they all carry the same set.
         return KokoroEngine(
             model,
-            installed,
-            capabilities=_INHERENT
-            | ({engine.Capability.TIMESTAMPS} if model.has_timings else set()),
+            _declaring(model, installed),
             sample_rate=sample_rate,
         )
+
+
+def _declaring(model: "Kokoro", installed: dict[str, engine.Voice]) -> dict[str, engine.Voice]:
+    """`installed`, every voice declaring what this export can actually do.
+
+    [LAW:one-source-of-truth] Read by both lifecycle methods rather than computed
+    in each: whether durations can be reported is a property of the export's graph
+    outputs, so the opened session is the only thing that knows, and a build that
+    derived it separately could describe a voice that boots differently.
+
+    Every voice is spoken by that one session, so they all carry the same set.
+    """
+    capabilities = _INHERENT | (
+        frozenset({engine.Capability.TIMESTAMPS}) if model.has_timings else frozenset()
+    )
+    return {
+        key: replace(voice, capabilities=capabilities)
+        for key, voice in installed.items()
+    }
 
 
 def configure(

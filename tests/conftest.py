@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -76,6 +76,20 @@ _ENVIRONMENT = (
 #: added to one list and forgotten in the other, and the file that forgot goes
 #: quietly vacuous rather than red.
 ENGINE_LIBRARIES = frozenset({"piper", "kokoro_onnx"})
+
+
+def declared(engine) -> frozenset[Capability]:
+    """Everything any voice this engine offers can do — the union.
+
+    The coarse answer, computed where it is wanted rather than stored, which is
+    the whole shape of `piper-routing-7e2.4`: capability lives on the voice, and
+    an engine-wide summary kept as its own value would be a second source free to
+    disagree with the voices it summarises.
+
+    Right for a test asking "does this engine do X at all". A test about what a
+    *request* gets reads the voice, because behind a router those differ.
+    """
+    return frozenset().union(*(voice.capabilities for voice in engine.voices()))
 
 
 def _use_a_working_espeak() -> None:
@@ -260,6 +274,18 @@ _SAMPLES_PER_CHARACTER = 100
 _DECLARED_RATE = 22050
 
 
+def declaring(
+    capabilities: frozenset[Capability], voices: tuple[Voice, ...] = DECLARED_VOICES
+) -> tuple[Voice, ...]:
+    """`voices`, every one of them declaring `capabilities`.
+
+    The ordinary case, and what the real single-engine implementations do: every
+    voice piper opens was opened the same way, so they all say the same thing. An
+    engine whose voices genuinely differ builds them separately instead.
+    """
+    return tuple(replace(voice, capabilities=capabilities) for voice in voices)
+
+
 class DeclaredEngine:
     """An engine that does exactly what it was told to declare, and nothing more.
 
@@ -268,38 +294,39 @@ class DeclaredEngine:
     for: something written elsewhere, never anticipated here, and described
     accurately anyway.
 
-    [LAW:one-type-per-behavior] One type taking a capability set, rather than a
-    `SpeedlessEngine` and a `TimelessEngine` beside it. What differs between the
-    engines these tests need is a value, so it is passed as one — which is the
-    same argument the interface itself makes, tested here by being relied upon.
+    [LAW:one-type-per-behavior] One type, rather than a `SpeedlessEngine` and a
+    `TimelessEngine` beside it. What differs between the engines these tests need
+    is a value — carried on each [`Voice`] it offers — so it is passed as one,
+    which is the same argument the interface itself makes and is tested here by
+    being relied upon.
 
     The voice list is a value for the same reason, and the router is what needed
     it: a fleet whose members all offer identical ids can only ever demonstrate
     the collision, never the routing, so proving a voice reached *its own* engine
     means two stand-ins that differ in what they offer.
 
+    It takes finished voices rather than a capability set to spread over them,
+    because a set cannot say "this voice declares nothing" and "this voice was not
+    given an answer" apart — both are `frozenset()`. Reading emptiness as "inherit
+    the engine's set" made an engine whose default is generous and whose one odd
+    voice is capability-less inexpressible, and silently promoted that voice
+    instead ([LAW:types-are-the-program]). [`declaring`] is the common case; a
+    voice that differs is simply built differently.
+
     Honest in both directions, which is what lets it stand as a subject of the
     conformance suite rather than only as a foil for the API's headers: what it
     declares, it really does, and what it does not declare, it really refuses.
     """
 
-    def __init__(
-        self,
-        capabilities: frozenset[Capability],
-        voices: tuple[Voice, ...] = DECLARED_VOICES,
-    ) -> None:
-        self._capabilities = capabilities
+    def __init__(self, voices: tuple[Voice, ...]) -> None:
         self._voices = voices
 
     def voices(self) -> tuple[Voice, ...]:
         return self._voices
 
-    def capabilities(self) -> frozenset[Capability]:
-        return self._capabilities
-
     def speak(self, voice: Voice, text: str, prosody: Prosody) -> Speech:
         return Speech(
-            sample_rate=_DECLARED_RATE, audio=_silence(self._length(text, prosody))
+            sample_rate=_DECLARED_RATE, audio=_silence(self._length(voice, text, prosody))
         )
 
     def speak_timed(self, voice: Voice, text: str, prosody: Prosody) -> TimedSpeech:
@@ -311,28 +338,33 @@ class DeclaredEngine:
         obliged anyway would leave that promise resting on a gate no test failure
         would ever be traced back to.
         """
-        if Capability.TIMESTAMPS not in self._capabilities:
+        if Capability.TIMESTAMPS not in voice.capabilities:
             raise AssertionError(
-                "speak_timed was called on an engine that did not declare "
-                f"{Capability.TIMESTAMPS.name}"
+                f"speak_timed was called for voice {voice.id!r}, which did not "
+                f"declare {Capability.TIMESTAMPS.name}"
             )
-        samples = self._length(text, prosody)
+        samples = self._length(voice, text, prosody)
         return TimedSpeech(
             pcm=b"".join(_silence(samples)),
             sample_rate=_DECLARED_RATE,
             timings=(Timing(samples=samples, separates_words=False),),
         )
 
-    def _length(self, text: str, prosody: Prosody) -> int:
+    def _length(self, voice: Voice, text: str, prosody: Prosody) -> int:
         """How many samples this utterance runs to.
 
-        `prosody.speed` is read only when [`Capability.SPEED`] was declared. An
-        engine that applied a speed it never claimed would be the dishonest one
-        the ignored header cannot describe — and reading it unconditionally here
-        would make this stand-in that engine, silently, for every test that
-        constructs it declaring nothing.
+        `prosody.speed` is read only when the *speaking voice* declared
+        [`Capability.SPEED`]. A voice that applied a speed it never claimed would
+        be the dishonest one the ignored header cannot describe — and reading it
+        unconditionally would make this stand-in that engine, silently, for every
+        test that constructs it declaring nothing.
+
+        Per voice rather than per engine for the same reason the server asks per
+        voice: this stand-in is honest in both directions or it is not a subject
+        the conformance suite can trust, and an engine offering a measured voice
+        beside an unmeasured one is now expressible.
         """
-        speed = prosody.speed if Capability.SPEED in self._capabilities else 1.0
+        speed = prosody.speed if Capability.SPEED in voice.capabilities else 1.0
         return int(len(text) * _SAMPLES_PER_CHARACTER / speed)
 
 
@@ -361,7 +393,7 @@ class DeclaredPrepared:
         return ()
 
     def open(self) -> DeclaredEngine:
-        return DeclaredEngine(self.capabilities)
+        return DeclaredEngine(declaring(self.capabilities))
 
 
 def _silence(samples: int) -> Iterator[bytes]:

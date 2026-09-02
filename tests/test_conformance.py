@@ -52,6 +52,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 
 import pytest
 from conftest import (
+    declaring,
     DECLARED_VOICES,
     INSTALLED_VOICE,
     MODELS_DIR,
@@ -139,11 +140,27 @@ def router_engine() -> Iterator[Engine]:
 #: of them one way ([LAW:dataflow-not-control-flow]).
 ENGINES = [
     pytest.param(
-        lambda: nullcontext(DeclaredEngine(frozenset(Capability))),
+        lambda: nullcontext(DeclaredEngine(declaring(frozenset(Capability)))),
         id="declares-everything",
     ),
     pytest.param(
-        lambda: nullcontext(DeclaredEngine(frozenset())), id="declares-nothing"
+        lambda: nullcontext(DeclaredEngine(declaring(frozenset()))), id="declares-nothing"
+    ),
+    # An engine offering a measured voice beside an unmeasured one, which is the
+    # only subject on which "reads the claim it was handed" can fail. Every other
+    # entry stamps one set over all its voices, so an implementation consulting
+    # its own state instead of the voice passes them all — which is exactly the
+    # bug this branch introduced into `DeclaredEngine` and had to fix.
+    pytest.param(
+        lambda: nullcontext(
+            DeclaredEngine(
+                (
+                    *declaring(frozenset(Capability), DECLARED_VOICES[:1]),
+                    *DECLARED_VOICES[1:],
+                )
+            )
+        ),
+        id="voices-differ",
     ),
     pytest.param(piper_engine, id="piper"),
     pytest.param(kokoro_engine, id="kokoro"),
@@ -169,23 +186,53 @@ def subject(request) -> Iterator[Engine]:
 
 
 @pytest.fixture
-def measuring(subject: Engine) -> Engine:
-    """`subject`, but only for the engines that claim to measure utterances.
+def measuring(subject: Engine) -> tuple[Engine, tuple[Voice, ...]]:
+    """`subject` and every distinct claim of its that measures utterances.
 
     The capability check lives in a fixture rather than at the top of each test
     so that the tests themselves are unconditional: what a test asserts should
     not be entangled with whether it applies. It is also the property from the
-    other side — an engine that did not declare this is one the server never
-    asks, so a suite that asked anyway would be testing a call that cannot
+    other side — a voice that did not declare this is one the server never asks
+    about, so a suite that asked anyway would be testing a call that cannot
     happen.
     """
-    return _declaring(subject, Capability.TIMESTAMPS)
+    return subject, speaking_with(subject, Capability.TIMESTAMPS)
 
 
-def _declaring(subject: Engine, capability: Capability) -> Engine:
-    if capability not in subject.capabilities():
-        pytest.skip(f"engine does not declare {capability.name}")
-    return subject
+def one_per_claim(subject: Engine) -> tuple[Voice, ...]:
+    """One voice for each distinct capability set this engine offers.
+
+    The properties below are about what an engine does with the claim it was
+    handed, so two voices making the same claim exercise one path twice. An
+    engine whose voices are alike therefore costs exactly what a single voice
+    cost before — kokoro's pace check alone is fifteen seconds of real synthesis —
+    while one whose voices differ is measured on every claim it makes, which is
+    the only place the property is falsifiable at all.
+
+    [LAW:dataflow-not-control-flow] The data decides how many syntheses happen,
+    not a branch on which engine this is.
+    """
+    seen: dict[frozenset[Capability], Voice] = {}
+    for voice in subject.voices():
+        seen.setdefault(voice.capabilities, voice)
+    return tuple(seen.values())
+
+
+def speaking_with(subject: Engine, capability: Capability) -> tuple[Voice, ...]:
+    """Every distinct claim this engine makes that includes `capability`.
+
+    Skips rather than passing vacuously when it makes none: an engine that did
+    not declare this is one the server never asks, so a suite that asked anyway
+    would be testing a call that cannot happen. Asked across all its claims and
+    not only the first voice's, because an engine offering a measured voice
+    beside an unmeasured one has to be held to it for the one that measures.
+    """
+    voices = tuple(
+        voice for voice in one_per_claim(subject) if capability in voice.capabilities
+    )
+    if not voices:
+        pytest.skip(f"no voice declares {capability.name}")
+    return voices
 
 
 def samples_of(subject: Engine, voice: Voice, text: str, speed: float = 1.0) -> int:
@@ -233,18 +280,23 @@ def test_no_two_voices_share_an_id(subject: Engine):
     assert len(set(ids)) == len(ids)
 
 
-def test_what_the_engine_says_it_can_do_does_not_change_between_calls(
+def test_what_a_voice_says_it_can_do_does_not_change_between_calls(
     subject: Engine,
 ):
     """The negotiation happens once, at startup, and is held for the process.
 
-    `create_app` asks exactly once, which is what makes the 501 gate and the
-    ignored header two readings of one fact. An engine whose answer varied per
-    call would have that fact captured at an arbitrary moment, and every later
-    answer the server gave about it would be stale rather than wrong — the kind
+    The server reads a voice's claim on the request that names it, so a claim
+    that varied between calls would make the 501 gate and the ignored header two
+    readings of two different facts — stale rather than wrong, which is the kind
     that never surfaces as a failure.
+
+    Since the claim travels on a frozen `Voice`, this is now asking the same
+    question as "the voice list does not change", from the one angle that matters
+    for what the server promises about it.
     """
-    assert subject.capabilities() == subject.capabilities()
+    assert {voice.id: voice.capabilities for voice in subject.voices()} == {
+        voice.id: voice.capabilities for voice in subject.voices()
+    }
 
 
 # --------------------------------------------------------- what it then does
@@ -309,14 +361,14 @@ def test_the_pace_varies_exactly_when_speed_is_declared(subject: Engine):
     audio that was already varying. Unconditional for the same reason: a skip
     for the engines that declare nothing would leave exactly that case untested.
     """
-    voice = first_voice(subject)
-    varies = samples_of(subject, voice, LONG, speed=2.0) < samples_of(
-        subject, voice, LONG, speed=0.5
-    )
-    assert varies == (Capability.SPEED in subject.capabilities())
+    for voice in one_per_claim(subject):
+        varies = samples_of(subject, voice, LONG, speed=2.0) < samples_of(
+            subject, voice, LONG, speed=0.5
+        )
+        assert varies == (Capability.SPEED in voice.capabilities), voice.id
 
 
-def test_a_declared_measurement_accounts_for_every_sample(measuring: Engine):
+def test_a_declared_measurement_accounts_for_every_sample(measuring):
     """[`TimedSpeech`]'s stated invariant, enforced nowhere until here.
 
     Every alignment downstream is derived under it: `align` spreads characters
@@ -329,9 +381,10 @@ def test_a_declared_measurement_accounts_for_every_sample(measuring: Engine):
     sums to zero and would pass an invariant check alone, having answered a
     capability it declared with nothing.
     """
-    voice = first_voice(measuring)
-    spoken = measuring.speak_timed(voice, LONG, Prosody())
+    subject, voices = measuring
+    for voice in voices:
+        spoken = subject.speak_timed(voice, LONG, Prosody())
 
-    assert spoken.sample_rate > 0
-    assert spoken.timings
-    assert sum(timing.samples for timing in spoken.timings) * 2 == len(spoken.pcm)
+        assert spoken.sample_rate > 0, voice.id
+        assert spoken.timings, voice.id
+        assert sum(t.samples for t in spoken.timings) * 2 == len(spoken.pcm), voice.id

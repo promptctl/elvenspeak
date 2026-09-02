@@ -14,8 +14,8 @@ Every member below exists because an endpoint stated a requirement:
     POST .../{voice}                  -> [`Engine.speak`], drained whole
     POST .../{voice}/stream           -> [`Engine.speak`], drained incrementally
     POST .../{voice}/with-timestamps  -> [`Engine.speak_timed`]
-    every response's ignored header   -> [`Engine.capabilities`]
-    every endpoint's 501              -> [`Engine.capabilities`]
+    every response's ignored header   -> [`Voice.capabilities`]
+    every endpoint's 501              -> [`Voice.capabilities`]
 
 Nothing here exists because an engine happened to offer it, which is the way this
 seam fails: an interface read off one engine's methods — a model file on disk, a
@@ -115,6 +115,31 @@ class Voice:
     name: str
     description: str
     labels: tuple[tuple[str, str], ...] = ()
+    #: Everything in [`Capability`] that speaking in this voice really does.
+    #:
+    #: [LAW:one-source-of-truth] On the voice rather than on the engine, because a
+    #: capability is a fact about *what will speak* and the voice is what names
+    #: that. It was an `Engine.capabilities()` method, which was the same thing
+    #: only while one process meant one engine — behind
+    #: [`elvenspeak.router`] a deployment holds voices from several, and a single
+    #: process-wide answer has to choose between refusing calls that would have
+    #: worked and promising ones that will not. Neither is true; per-voice is.
+    #:
+    #: An engine-wide set is still available and is *derived*: the union over the
+    #: voices on offer, computed where it is wanted. Kept as its own method it
+    #: would be a second source free to disagree with the voices it summarises.
+    #:
+    #: Fixed for as long as the voice is offered, which is what the endpoints
+    #: need: `/stream/with-timestamps` commits its 200 before it calls
+    #: [`speak_timed`], so a capability discoverable only by trying could never be
+    #: refused honestly. That guarantee used to be asked of the engine by fiat and
+    #: is now a property of the value.
+    #:
+    #: Empty by default, because absence is the safe answer: a capability not
+    #: declared is reported to callers as not honoured and is never asked of the
+    #: engine, so a voice that undersells itself is merely pessimistic while one
+    #: that oversells lies in the audio.
+    capabilities: frozenset["Capability"] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -127,9 +152,12 @@ class Prosody:
     the HTTP edge and dropped there, in one documented place, rather than being
     carried across this seam for an engine to ignore.
 
-    A field gated by a [`Capability`] the engine did not declare arrives holding
-    its neutral value, so an engine reads every field here without first checking
-    what it said it could do — see [`Engine.capabilities`].
+    A field gated by a [`Capability`] the speaking voice did not declare arrives
+    holding its neutral value, so an engine reads every field here without first
+    checking what that voice said it could do — see [`Voice.capabilities`]. That
+    is what keeps the report honest: a server that named an option as ignored and
+    passed it anyway would be telling the truth only for as long as every engine
+    ignored what it never claimed.
     """
 
     #: A multiplier on ordinary speaking rate: 2.0 is twice as fast. Expressed
@@ -230,46 +258,6 @@ class Engine(Protocol):
         prefer a voice puts it at the front, and one that does not still must
         not reorder between calls — a sort chosen for tidiness silently picks
         the default voice of every deployment that left the setting alone.
-        """
-        ...
-
-    def capabilities(self) -> frozenset[Capability]:
-        """Everything in [`Capability`] this engine really does.
-
-        [LAW:one-source-of-truth] The single negotiation. What an engine can do
-        was previously answered in three places — a server setting the engine had
-        been built from, a `can_time` method, and a hand-written list of
-        unsupported request fields in the API surface — which agreed only for as
-        long as one engine existed and every caller fed all three the same value.
-        Everything the server says about what it can do is now read off this.
-
-        Two properties the endpoints depend on. It is answerable **without
-        synthesizing**: `/stream/with-timestamps` commits its 200 before it calls
-        [`speak_timed`], so a capability discoverable only by calling and
-        catching could never be refused honestly. And it is **constant for the
-        engine's life**, because the server asks once at startup — an engine
-        whose answer varies per utterance has to declare the capability absent,
-        which is the only claim that stays true for every call.
-
-        Absence is the safe default: a capability not declared is reported to
-        callers as not honoured, so an engine that undersells itself is merely
-        pessimistic, while one that oversells lies in the audio.
-
-        [LAW:one-source-of-truth] What is declared here decides what the engine
-        is *asked*, not only what callers are told. A capability this set omits
-        reaches the engine as neither a method call nor a parameter value:
-        [`speak_timed`] is refused at the endpoint without [`Capability.TIMESTAMPS`],
-        and a [`Prosody`] field gated by a capability arrives holding its neutral
-        value. An engine that undersells itself is therefore not asked to prove
-        it — which is what keeps the report honest, since a server that reported
-        an option as ignored and passed it anyway would be telling the truth only
-        for as long as every engine ignored what it never claimed.
-
-        This is what the engine can do, not what the deployment offers. A
-        deployment may withhold a capability the engine declared, in which case
-        the server subtracts it once and the engine is simply never asked — see
-        [`elvenspeak.provisioning.Configure`]. So an engine states its own truth
-        here and never has to model anybody's configuration to do it.
         """
         ...
 
