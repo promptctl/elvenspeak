@@ -91,9 +91,9 @@ ENV UV_NO_SYNC=1
 # alias table unanswerable: it maps nine foreign ids onto voices of two
 # registers, and an alias whose target is not baked is dropped at startup — so
 # the image that baked a single voice resolved none of the nine. Two female and
-# one male is the smallest set the table can be honest about, at ~278 MB.
+# one male is the smallest set the table can be honest about, at 278 MiB.
 #
-# Then two Spanish voices, ~120 MB more, so that a Spanish reply can be spoken
+# Then two Spanish voices, 120 MiB more, so that a Spanish reply can be spoken
 # with Spanish phonemes instead of read aloud by an English voice. That failure
 # is not audible as a failure — espeak renders the same sentence
 # `ˈola, kˈomo estˈas?` under `es` and `ˈoʊlæ, kəmˈoʊ ɛstˈɑːz?` under `en-us`,
@@ -101,6 +101,13 @@ ENV UV_NO_SYNC=1
 # regions differ because Piper publishes no single-speaker Castilian female
 # above `low`: es_ES-sharvard-medium is the only other Castilian at tier and it
 # carries two speakers.
+#
+# BOTH SIZES ARE SUMMED FROM THE FILES AND STATED IN MiB. Read decimally the
+# same English trio is 291 MB, which is where an unexplained 13 MB drift
+# appears to come from; it is one measurement in two units. The Spanish figure
+# is measured too rather than a tier multiplied out: es_MX-claude-high is
+# 60 MiB, a `-high` the size of a `-medium`, where the English `-high` voices
+# are 109 MiB each.
 #
 # REGISTER WAS MEASURED, NOT READ OFF THE NAME — the upstream index carries
 # quality, language and speaker count but no gender. Same method and the same
