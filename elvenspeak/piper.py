@@ -448,6 +448,24 @@ def _separates_words(phoneme: str) -> bool:
     return phoneme.isspace() or phoneme in _BOUNDARY_PHONEMES
 
 
+def _stated(declared: dict, name: str) -> str | None:
+    """One `language` field of a sidecar, where the sidecar states a real one.
+
+    [LAW:parse-dont-validate] A `.onnx.json` is untrusted the way the wire is —
+    [`_describe`]'s own comments anticipate one hand-written beside an
+    operator-chosen `PIPER_VOICES` id — and a number has no tag to read. Without
+    this, `{"code": 5}` reached `(5 or "").split("_")` and raised an
+    `AttributeError` from inside an expression, in place of the clear refusal
+    this function's callers raise for every other language problem.
+
+    A non-string and a blank fall to the same `None`, so both land on the
+    key-derived fallback the callers already have, and reach that refusal only
+    when the key cannot supply one either.
+    """
+    value = declared.get(name)
+    return value.strip() or None if isinstance(value, str) else None
+
+
 def _describe(
     key: str, model_path: Path, serves: frozenset[str]
 ) -> tuple[engine.Voice, int]:
@@ -473,7 +491,9 @@ def _describe(
     # spellings of `audio` were how they came to disagree.
     audio = config.get("audio") or {}
     declared = config.get("language") or {}
-    code = declared.get("code") or (parts[0] if len(parts) == _KEY_PARTS else None)
+    code = _stated(declared, "code") or (
+        parts[0] if len(parts) == _KEY_PARTS else None
+    )
     # The sidecar's own `family` where it has one — every voice in the published
     # index does; checked against all six sidecars this repo downloads, which
     # carry `code, country_english, family, name_english, name_native, region` —
@@ -481,7 +501,7 @@ def _describe(
     # throughout. The split is the sidecar's structure rather than a guess about
     # it, which is what makes it a safe fallback for a hand-written sidecar that
     # states only the code.
-    family = declared.get("family") or (code or "").split("_")[0]
+    family = _stated(declared, "family") or (code or "").split("_")[0]
     name = config.get("dataset") or (parts[1] if len(parts) == _KEY_PARTS else key)
     quality = audio.get("quality") or (
         parts[2] if len(parts) == _KEY_PARTS else "medium"

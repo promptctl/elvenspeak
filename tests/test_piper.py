@@ -540,3 +540,42 @@ def test_the_voices_a_build_reports_declare_what_the_ones_it_boots_will(tmp_path
 
     assert baked_models == booted_models
     assert baked_models["en_US-lessac-medium"] == serves("piper")
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        {"code": 5},
+        {"family": 5},
+        {"code": 5, "family": 5},
+        {"family": "   "},
+    ],
+)
+def test_a_sidecar_that_states_a_language_that_is_not_one_is_refused(
+    tmp_path, declared
+):
+    """A hand-written `.onnx.json` is untrusted the way the wire is.
+
+    `{"code": 5}` used to reach `(5 or "").split("_")` and raise `AttributeError`
+    from inside an expression — a crash at boot naming nothing, where every other
+    language problem in this file names the voice. `{"family": 5}` was worse: `5`
+    is truthy, so it passed the emptiness check and put an `int` on
+    `Voice.language`, which surfaced later as a `TypeError` sorting the
+    `languages` list on `GET /v1/models`, one endpoint and one deploy away.
+
+    Both land on the same refusal now, because a value of the wrong type and a
+    value that is absent are the same fact — the sidecar states no language —
+    and the key here supplies no fallback either.
+    """
+    key = "customvoice"
+    (tmp_path / f"{key}.onnx").write_bytes(b"not a real model")
+    (tmp_path / f"{key}.onnx.json").write_text(
+        json.dumps({"audio": {"sample_rate": 22050}, "language": declared}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as raised:
+        piper_prepared(tmp_path, voices=(key,)).open().voices()
+
+    assert key in str(raised.value)
+    assert "language" in str(raised.value)
