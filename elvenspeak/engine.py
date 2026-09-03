@@ -86,6 +86,31 @@ class Capability(Enum):
     TIMESTAMPS = "report how long each part of an utterance took"
 
 
+def spoken_language(tag: str | None) -> str | None:
+    """A language tag reduced to the ISO 639-1 family a voice speaks.
+
+    [LAW:single-enforcer] The one place any language tag — a caller's
+    `language_code`, a sidecar's `family`, a backend's published string — becomes
+    the spelling [`Voice.language`] holds and is compared in. Here rather than in
+    [`elvenspeak.voices`], where it began, because it defines the vocabulary of
+    the field beside it and `voices` imports this module: the reverse would be a
+    cycle ([LAW:one-way-deps]), and the alternative — each engine remembering to
+    call it — is the arrangement that just failed. `piper` built its `language`
+    raw while `remote` normalised its own, so `family: "ES"` produced a voice no
+    caller's `es` could ever equal, unreachable by language while still listed as
+    speaking it in `GET /v1/models`.
+
+    Nothing in, `None` out — and blank counts as nothing. A request that named no
+    language is not a request for an unnamed one, and [`Catalog.speaking`] reads
+    `None` as "every voice". `""` is what a form or a JS client sends for "unset",
+    and taken literally it is a language no voice speaks, so the caller was told
+    their `language_code` was ignored when they had expressed none. The trailing
+    `or None` collapses `None`, `""`, `"  "` and `"-"` onto the one answer, in
+    place of the branch that caught only `None`.
+    """
+    return (tag or "").strip().lower().replace("_", "-").split("-")[0] or None
+
+
 @dataclass(frozen=True)
 class Voice:
     """One voice an engine can speak in, as the API surface has to show it.
@@ -185,7 +210,8 @@ class Voice:
     #: vocabulary ElevenLabs' `language_code` speaks and this field exists to be
     #: compared against it. The engines do not agree on a spelling by themselves —
     #: Piper's sidecar says `es_ES` and Kokoro's table holds espeak's `es`, `en-us`
-    #: and `cmn` — so each normalises on the way in. Two vocabularies meeting at a
+    #: and `cmn` — so [`__post_init__`] normalises every one of them on the way
+    #: in, rather than each engine remembering to. Two vocabularies meeting at a
     #: comparison is a match that silently fails for one engine and succeeds for
     #: the other, which is worse than not matching at all.
     #:
@@ -195,6 +221,31 @@ class Voice:
     #: answer — and the answer it would be read as is "this voice does not speak
     #: the language you asked for", which is a claim no engine intended to make.
     language: str = field(kw_only=True)
+
+    def __post_init__(self) -> None:
+        """Stamps `language` in the one spelling everything compares against.
+
+        [LAW:single-enforcer] Every `Voice` is built here, including one from an
+        engine written outside this repo, so this is the only place the rule can
+        be stated once and hold for all of them. Asking each engine to call
+        [`spoken_language`] itself is what this replaces: `remote` did, `piper`
+        did not, and the difference was invisible until a sidecar spelled its
+        family `ES` and produced a voice that answered no caller and no test.
+
+        Refused rather than coerced when there is nothing to stamp. `str()` of a
+        number would mint a language out of a sidecar's typo, and the empty
+        string is the answer-shaped void this field's own `kw_only` requirement
+        exists to refuse: read as a real answer it says "this voice does not
+        speak what you asked for", which is a claim no engine intended to make.
+        """
+        stated = self.language if isinstance(self.language, str) else None
+        family = spoken_language(stated)
+        if family is None:
+            raise ValueError(
+                f"voice {self.id!r} states no language it speaks "
+                f"(found {self.language!r})"
+            )
+        object.__setattr__(self, "language", family)
 
 
 @dataclass(frozen=True)

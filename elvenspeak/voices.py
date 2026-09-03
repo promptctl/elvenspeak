@@ -101,26 +101,6 @@ class Resolution:
     substituted: bool
 
 
-def spoken_language(tag: str | None) -> str | None:
-    """A caller's language tag reduced to the ISO 639-1 family a voice declares.
-
-    [LAW:parse-dont-validate] The one place a request's `language_code` becomes
-    comparable to [`engine.Voice.language`]. ElevenLabs' own field is ISO 639-1,
-    but a client holding `es-MX`, `es_MX` or `ES` is asking the same question, and
-    a match that fails on the punctuation would report the language ignored while
-    a voice that speaks it sat in the catalog.
-
-    Nothing in, `None` out — and blank counts as nothing. A request that named no
-    language is not a request for an unnamed one, and [`Catalog.speaking`] reads
-    `None` as "every voice". `""` is what a form or a JS client sends for "unset",
-    and taken literally it is a language no voice speaks, so the caller was told
-    their `language_code` was ignored when they had expressed none. The trailing
-    `or None` collapses `None`, `""`, `"  "` and `"-"` onto the one answer, in
-    place of the branch that caught only `None`.
-    """
-    return (tag or "").strip().lower().replace("_", "-").split("-")[0] or None
-
-
 class VoiceNotInstalled(LookupError):
     """A voice id that is neither offered nor aliased, with no fallback set.
 

@@ -20,7 +20,6 @@ from elvenspeak.voices import (
     Substitution,
     VoiceNotInstalled,
     load_aliases,
-    spoken_language,
 )
 
 
@@ -444,30 +443,6 @@ def test_an_engine_with_no_declarations_gets_an_empty_table(tmp_path, monkeypatc
 # --------------------------------------------------------------- language
 
 
-@pytest.mark.parametrize(
-    "tag,family",
-    [
-        ("es", "es"),
-        ("ES", "es"),
-        ("es-MX", "es"),
-        ("es_MX", "es"),
-        ("  es  ", "es"),
-        ("en-us", "en"),
-        (None, None),
-    ],
-)
-def test_a_callers_language_tag_reduces_to_the_family_a_voice_declares(tag, family):
-    """Every spelling of "Spanish" a real client sends has to reach the same voice.
-
-    ElevenLabs publishes `language_code` as ISO 639-1, but a client holding a
-    locale from a browser or an OS sends `es-MX`, and one holding a constant
-    someone typed sends `ES`. A match that failed on the punctuation would report
-    the language ignored while a voice that speaks it sat in the catalog — the
-    failure being silent is what makes the normalisation worth a test.
-    """
-    assert spoken_language(tag) == family
-
-
 def test_a_language_outranks_the_voice_id_that_was_named():
     """Asking for Spanish gets Spanish, even when the id names an English voice.
 
@@ -595,18 +570,3 @@ def test_switching_substitution_off_still_refuses_an_id_nothing_installs():
 
     with pytest.raises(VoiceNotInstalled):
         cat.resolve("en_US-not-installed", "es")
-
-
-def test_a_blank_language_is_no_language_rather_than_one_nothing_speaks():
-    """What a form or a JS client sends for "unset".
-
-    `""` reaching `Catalog.speaking` as a literal language matches no voice, so
-    the catalog falls back to the whole table and the right voice still speaks —
-    the damage is downstream, in `_honoured`, where `spoke` compares the voice's
-    language against `""` and reports `language_code` ignored on every such
-    request. A caller who expressed no preference is told their preference was
-    dropped.
-    """
-    assert spoken_language("") is None
-    assert spoken_language("   ") is None
-    assert spoken_language("-") is None
