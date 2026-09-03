@@ -104,7 +104,11 @@ ENV UV_NO_SYNC=1
 #
 # REGISTER WAS MEASURED, NOT READ OFF THE NAME — the upstream index carries
 # quality, language and speaker count but no gender. Same method and the same
-# control as `elvenspeak/aliases/piper.toml` records:
+# control voice as `elvenspeak/aliases/piper.toml` records, re-measured on this
+# table's own line: pitch is a property of what was said as well as of who said
+# it, so the control reads 115 Hz here on the Spanish sentence and 121 Hz there
+# on the English one. Two numbers for one voice is the method working, not a
+# disagreement between the tables.
 #
 #   es_MX-claude-high      200 Hz   female — the name reads male to an English
 #                                   eye, which is the whole reason for measuring

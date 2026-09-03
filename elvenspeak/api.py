@@ -298,12 +298,10 @@ def _honoured(
     that half, and [`elvenspeak.voices.spoken_language`] is where the
     normalisation lives.
 
-    Per request, because both halves are. The model half is a fact about the
-    request; the capability half is fixed for a given voice but not for the
-    deployment — behind [`elvenspeak.router`] the same parameter is honoured for
-    one voice and reported ignored for the next, in the same process. That is why
-    the caller passes what the resolved voice declared rather than one set decided
-    at startup, and why this cannot be computed once and kept.
+    Per request, and not cacheable: behind [`elvenspeak.router`] the same
+    parameter is honoured for one voice and reported ignored for the next, in the
+    same process. That is why the caller passes what the resolved voice declared
+    rather than one set decided at startup.
     """
     return (
         frozenset(

@@ -158,8 +158,8 @@ class Voice:
     #: would be a second source free to disagree with the voices it summarises —
     #: which is exactly how it came to disagree.
     #:
-    #: [LAW:types-are-the-program] Required, and the one field here with no
-    #: default, because there is no such thing as a voice no engine speaks: the
+    #: [LAW:types-are-the-program] Required, with no default, because there is no
+    #: such thing as a voice no engine speaks: the
     #: engine that speaks it has a name, and that name alone is already a model id
     #: it answers to. An empty set is not the cautious answer it looks like — it
     #: refuses the caller who names the very engine about to speak, since

@@ -221,8 +221,8 @@ def test_the_offered_order_is_the_configured_order(engine):
         # espeak calls Mandarin `cmn` and refuses `zh`, so a voice whose id
         # begins `z` is the one that catches a language map transcribed from the
         # id prefixes instead of from what the phonemizer accepts. It is also the
-        # one place the two spellings genuinely differ, which makes it the only
-        # row that can catch `language` being published where `iso` belongs.
+        # one row that exercises `_ISO_SPELLINGS`: a naive `.split("-")[0]`
+        # derives the right ISO code for every other row and `cmn` for this one.
         ("zf_xiaoni", "Xiaoni", "cmn", "zh", "female"),
     ],
 )

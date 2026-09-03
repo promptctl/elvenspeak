@@ -493,8 +493,10 @@ def test_one_engine_whose_voices_differ_is_answered_per_voice():
     )
     # Declares nothing, and means it.
     plain = Voice(
-        id="plain", name="Plain", description="does not", models=DECLARED_MODELS
-    ,
+        id="plain",
+        name="Plain",
+        description="does not",
+        models=DECLARED_MODELS,
         language="en",
     )
 
