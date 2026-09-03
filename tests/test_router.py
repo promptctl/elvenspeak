@@ -975,4 +975,7 @@ def test_a_model_id_the_language_steered_away_from_is_refused_not_reported():
     message = response.json()["detail"]["message"]
     assert "alpha" in message
     assert "alpha-one" in message
-    assert "es" in message
+    # The field and its value together. Bare `"es"` is already in "does" and in
+    # "resolved", so it asserts a property of the sentence rather than of the
+    # value, and would pass with `language_code` dropped from the message.
+    assert "language_code 'es'" in message
