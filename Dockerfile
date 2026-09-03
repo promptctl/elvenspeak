@@ -18,7 +18,7 @@
 # architecture-dependent (`x86_64-linux-gnu`, `aarch64-linux-gnu`) and `ENV`
 # cannot glob, so the build resolves it once to a fixed name.
 
-FROM python:3.12-slim AS base
+FROM python:3.13-slim AS base
 
 RUN apt-get update \
  && apt-get install --no-install-recommends -y ffmpeg espeak-ng \
@@ -153,6 +153,36 @@ ARG KOKORO_MODEL=kokoro-v1.0.int8.onnx
 # spent during the build and is gone from the artifact. The RFC 2606 `.invalid`
 # TLD can never resolve, so the value cannot quietly become somebody's endpoint.
 ARG ROUTER_CONSUL_URL=http://built-without-a-fleet.invalid:8500
+
+# The second setting that exists only to get through the build, and it is spent
+# for the same reason `ROUTER_CONSUL_URL` is. `chatterbox.configure` names no
+# default device on purpose: `cpu` boots anywhere and then serves at 10-33x real
+# time, so a default is a claim that one answer is right when the deployment said
+# nothing, and there is no such answer. The bake still has to open the model —
+# `acquire` loads the checkpoints to prove they are a model rather than 3 GiB of
+# bytes — and the builder has no accelerator, so the build names the one device a
+# builder always has.
+#
+# An ARG and emphatically not an ENV. Surviving into the image, this would hand
+# every chatterbox deployment that forgot to say what hardware it has a service
+# that boots happily and takes thirty seconds to say "Yes." — which is precisely
+# the silent wrong answer the missing default exists to refuse. It is spent
+# during the build and is gone from the artifact.
+ARG CHATTERBOX_DEVICE=cpu
+
+# [LAW:no-ambient-temporal-coupling] `HF_HOME` and `PKUSEG_HOME` are named here
+# because both libraries otherwise cache under `$HOME`, and this image has two
+# homes: the bake below runs as root and everything after `USER elvenspeak` runs
+# as somebody else. Loading the Chatterbox tokenizer fetches spacy-pkuseg's
+# `spacy_ontonotes.zip` unconditionally — the Cangjie converter is built even for
+# a build that will never see Chinese — so left ambient it lands in `/root` at
+# build time and is missing from `/home/elvenspeak` at boot. The container then
+# tries to download 34 MB on its first request, which is the one thing baking
+# exists to prevent, and fails outright on a host that cannot reach the internet.
+#
+# Under `/app/models` rather than either home, so the `chown -R` that already
+# hands `/app` to `elvenspeak` covers them too: one owned location that the build
+# writes and the runtime reads, instead of two that depend on who is running.
 ENV ELVENSPEAK_ENGINE="${ELVENSPEAK_ENGINE}" \
     PIPER_MODELS_DIR=/app/models \
     PIPER_VOICES="${PIPER_VOICES}" \
@@ -161,6 +191,10 @@ ENV ELVENSPEAK_ENGINE="${ELVENSPEAK_ENGINE}" \
     KOKORO_VOICES="${KOKORO_VOICES}" \
     KOKORO_MODEL="${KOKORO_MODEL}" \
     KOKORO_ALLOW_DOWNLOAD=0 \
+    CHATTERBOX_MODELS_DIR=/app/models \
+    CHATTERBOX_ALLOW_DOWNLOAD=0 \
+    HF_HOME=/app/models/huggingface \
+    PKUSEG_HOME=/app/models/pkuseg \
     PORT=5001
 
 # [LAW:one-source-of-truth] The same ARG that installs the extra and bakes the

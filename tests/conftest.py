@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from elvenspeak import router
+from elvenspeak import chatterbox, router
 from elvenspeak.engine import (
     Capability,
     Prosody,
@@ -59,6 +59,11 @@ _ENVIRONMENT = (
     # real variable the day it changed ([LAW:one-source-of-truth]).
     router.CONSUL_URL,
     router.BACKEND_API_KEY,
+    chatterbox.MODELS_DIR,
+    chatterbox.DEVICE,
+    chatterbox.SPEAKERS,
+    chatterbox.LANGUAGES,
+    chatterbox.ALLOW_DOWNLOAD,
     "HOST",
     "PORT",
 )
@@ -148,6 +153,33 @@ _KOKORO_TIMELESS_URL = (
 )
 
 
+#: The accelerator the suite opens Chatterbox on, and the one setting this engine
+#: refuses to guess for itself.
+#:
+#: `cpu` is the floor rather than a preference: it is the only device every
+#: machine that runs this suite has, and a default naming anything else would
+#: fail the run on the machines least able to diagnose it. It is also slow —
+#: measured at 8-33x real time — so a developer with an accelerator says so
+#: through the engine's own variable and gets the same tests several times
+#: faster. Read here rather than in each caller, because a second spelling of
+#: "which device do the tests use" is free to disagree with this one.
+#:
+#: Spelled through `chatterbox.DEVICE` for the reason `_ENVIRONMENT` reads the
+#: same constant: the variable has one name, and it lives in the module that
+#: parses it.
+CHATTERBOX_DEVICE = os.environ.get(chatterbox.DEVICE, "cpu")
+
+#: One language for the shared fixtures, against the engine's own two.
+#:
+#: A Chatterbox voice is `<speaker>-<language>` and one model speaks all of them,
+#: so a second language doubles the voices — and therefore doubles every
+#: synthesis in `test_conformance.py`, which speaks each voice on offer. What
+#: that second voice would exercise is the voice *product*, which is this
+#: engine's own property and is asserted in `test_chatterbox.py` where it costs
+#: one description rather than four minutes of CPU synthesis.
+CHATTERBOX_LANGUAGE = "en"
+
+
 #: [LAW:no-silent-failure] These replaced a `skipif` that removed the tests when
 #: the models were absent. A skip is indistinguishable from a pass in a summary,
 #: so the suite's most expensive claims — that a real engine satisfies the
@@ -176,6 +208,24 @@ def piper_installed() -> Path:
 def kokoro_installed() -> Path:
     """Kokoro's default export and its style pack."""
     kokoro_prepared(allow_download=True).acquire()
+    return MODELS_DIR
+
+
+@pytest.fixture(scope="session")
+def chatterbox_installed() -> Path:
+    """Chatterbox's checkpoint set: ~3.06 GiB, and the reason it is its own fixture.
+
+    Fifteen times Kokoro's export, so a module that exercises Piper must not pay
+    for it — which is the argument every fixture here is already made under, at
+    the scale that makes it obvious. Fetched through `acquire`, the door the
+    image build uses, so a change that broke provisioning breaks this too.
+
+    `acquire` also *opens* the model, unlike Piper's and Kokoro's: this engine
+    has one model behind every voice, and loading it is the only way to learn
+    that 3 GiB of checkpoints are a model rather than 3 GiB of bytes. So this
+    fixture costs a load and a clone as well as a download.
+    """
+    chatterbox_prepared(allow_download=True).acquire()
     return MODELS_DIR
 
 
@@ -253,6 +303,39 @@ def kokoro_prepared(
         },
         frozenset(),
         serves("kokoro"),
+    )
+
+
+def chatterbox_prepared(
+    models_dir: Path = MODELS_DIR,
+    *,
+    speakers: tuple[str, ...] = (chatterbox.BUILTIN_SPEAKER,),
+    languages: tuple[str, ...] = (CHATTERBOX_LANGUAGE,),
+    device: str = CHATTERBOX_DEVICE,
+    allow_download: bool = False,
+):
+    """Chatterbox configured for a test, through the door a deployment uses.
+
+    [LAW:behavior-not-structure] Like the two above it, this goes through
+    `chatterbox.configure` rather than reaching past it — a test that built
+    `_Prepared` directly would keep passing after the parse it skipped stopped
+    being able to produce that value.
+
+    The device is named on every call and has no fallback of its own here,
+    because the engine has none: `configure` refuses an unset one, and a helper
+    that quietly supplied `cpu` would be the default this engine deliberately
+    does not have, reintroduced in the one place nothing would look for it.
+    """
+    return chatterbox.configure(
+        {
+            chatterbox.SPEAKERS: ",".join(speakers),
+            chatterbox.LANGUAGES: ",".join(languages),
+            chatterbox.MODELS_DIR: str(models_dir),
+            chatterbox.DEVICE: device,
+            chatterbox.ALLOW_DOWNLOAD: "1" if allow_download else "0",
+        },
+        frozenset(),
+        serves("chatterbox"),
     )
 
 

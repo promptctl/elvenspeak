@@ -53,6 +53,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 import pytest
 from conftest import (
     declaring,
+    chatterbox_prepared,
     DECLARED_VOICES,
     INSTALLED_VOICE,
     MODELS_DIR,
@@ -106,11 +107,39 @@ def kokoro_engine() -> AbstractContextManager[Engine]:
     return nullcontext(kokoro_prepared(MODELS_DIR, allow_download=True).open())
 
 
+def chatterbox_engine() -> AbstractContextManager[Engine]:
+    """The third real engine, and by a wide margin the most expensive subject here.
+
+    It is registered anyway, and the expense is the argument for it rather than
+    against it: every other subject either makes its noise in memory or opens an
+    ONNX session under 150 MB, so until this one arrived the suite had never held
+    an engine to the contract that could not answer instantly. What it adds is a
+    0.5B autoregressive model whose audio takes longer to make than to play, and
+    the properties below — a stable voice list, whole samples, a longer text
+    making more audio — are exactly the ones a slow engine is tempted to fake.
+
+    What it costs, measured: ~3.06 GiB of checkpoints fetched once, a ~4.8 GiB
+    resident load with a 6.83 GiB transient, and synthesis at 8-33x real time on
+    `cpu` — so the handful of utterances below are minutes rather than seconds.
+    `conftest.CHATTERBOX_DEVICE` is how a machine with an accelerator says so and
+    gets the same tests several times faster.
+
+    One speaker and one language, so this subject offers a single voice. The
+    voice *product* — that `<speaker>-<language>` is the id and that two ids can
+    be the same person — is this engine's own property rather than the seam's,
+    and `test_chatterbox.py` asserts it from descriptions instead of by
+    synthesizing a second voice nothing here would ask a different question of.
+    """
+    return nullcontext(
+        chatterbox_prepared(MODELS_DIR, allow_download=True).open()
+    )
+
+
 @contextmanager
 def router_engine() -> Iterator[Engine]:
     """The router over a real elvenspeak server, opened as `main.build` opens it.
 
-    The third real engine, and the one whose conformance is least obvious: every
+    The fourth real engine, and the one whose conformance is least obvious: every
     property below has to survive a round trip through HTTP, an encode to PCM and
     a decode back, and — for the timed path — an alignment that was built from
     the backend's durations and has to be turned back into durations here.
@@ -164,6 +193,7 @@ ENGINES = [
     ),
     pytest.param(piper_engine, id="piper"),
     pytest.param(kokoro_engine, id="kokoro"),
+    pytest.param(chatterbox_engine, id="chatterbox"),
     pytest.param(router_engine, id="router"),
 ]
 

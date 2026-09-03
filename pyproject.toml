@@ -2,7 +2,7 @@
 name = "elvenspeak"
 version = "1.0.0"
 description = "Serves the ElevenLabs text-to-speech API from a local engine"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 # Everything the ElevenLabs surface itself needs, and nothing an engine needs.
 # [LAW:one-source-of-truth] `tests/test_encoding.py` proves statically that the
 # reusable half of this package cannot reach an engine library; this list is the
