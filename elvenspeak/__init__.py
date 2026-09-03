@@ -36,6 +36,7 @@ from .engine import (
     TimedSpeech,
     Timing,
     Voice,
+    spoken_language,
 )
 from .provisioning import ConfigError, Configure, Prepared, Registry, flag
 from .settings import Settings
@@ -52,6 +53,10 @@ __all__ = [
     "Speech",
     "TimedSpeech",
     "Timing",
+    # The spelling `Voice.language` is held in. An engine reads it to answer for
+    # a language of its own — the constructor stamps the field either way, so
+    # nothing has to call this to be correct.
+    "spoken_language",
     # ...and what an engine raises when it made no audio at all, which an outside
     # engine has to be able to raise by name rather than reinvent.
     "Silence",

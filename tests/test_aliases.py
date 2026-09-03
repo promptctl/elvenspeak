@@ -39,7 +39,7 @@ import pytest
 
 from conftest import SERVES
 from elvenspeak.declarations import _DIRECTORY, model_ids, voice_aliases
-from elvenspeak.engine import Voice
+from elvenspeak.engine import Voice, spoken_language
 from elvenspeak.engines import ENGINES
 from elvenspeak.voices import load_aliases
 from test_dockerfile import DOCKERFILE, instructions
@@ -289,7 +289,7 @@ def test_no_alias_points_at_a_voice_the_image_does_not_bake(name):
     assert declared, f"{name}.toml declares no aliases — the parser is wrong, not the file"
 
     installed = {
-        voice: Voice(id=voice, name=voice, description="", models=SERVES)
+        voice: Voice(id=voice, name=voice, description="", models=SERVES, language="en")
         for voice in baked
     }
     live = load_aliases(name, installed)
@@ -298,4 +298,40 @@ def test_no_alias_points_at_a_voice_the_image_does_not_bake(name):
     assert not dead, (
         f"{name}.toml aliases voices the image does not bake "
         f"(ARG {name.upper()}_VOICES = {', '.join(baked)}):\n  " + "\n  ".join(dead)
+    )
+
+
+def test_every_piper_alias_target_speaks_english():
+    """The invariant `piper.toml` states in prose, held to this file's own bar.
+
+    That table is the ElevenLabs compatibility surface: its nine keys are
+    ElevenLabs' original English speakers, and a client holding one is asking for
+    that speaker, not for a language. Repointing Rachel at `es_MX-claude-high`
+    would serve an English caller fluent Spanish — audio that plays perfectly and
+    is wrong, which is the failure the rest of this epic exists to stop, arriving
+    through the file that warns against it. Nothing failed if it happened:
+    `load_aliases` and `Catalog` have no opinion about language, so the two
+    checks above stay green while every English caller is answered in Spanish.
+
+    Read off the key rather than a sidecar, because no `.onnx.json` exists in the
+    tree — this file's whole premise is that both sides are visible statically.
+    That is the weaker of the two readings Piper accepts and it is the one that
+    catches this drift: every Spanish voice the image bakes states its family in
+    the key too, so a repointed alias fails here.
+
+    Piper only. Kokoro's ids carry no `<family>_<REGION>` to read, and a mapping
+    for them here would be a second answer to what language an id names — the one
+    thing this file's docstring refuses to write.
+    """
+    targets = sorted(set(declared_aliases("piper").values()))
+    assert targets, "piper.toml declares no aliases — the parser is wrong, not the file"
+
+    foreign = {
+        target: spoken_language(target.split("-")[0])
+        for target in targets
+        if spoken_language(target.split("-")[0]) != "en"
+    }
+    assert not foreign, (
+        "piper.toml states that every target is English, and these are not:\n  "
+        + "\n  ".join(f"{target} -> {language}" for target, language in foreign.items())
     )

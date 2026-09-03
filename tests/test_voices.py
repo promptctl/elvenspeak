@@ -15,16 +15,29 @@ from elvenspeak.engine import Voice
 from conftest import SERVES
 from elvenspeak import declarations as declarations_mod
 from elvenspeak.provisioning import ConfigError
-from elvenspeak.voices import Catalog, Substitution, VoiceNotInstalled, load_aliases
+from elvenspeak.voices import (
+    Catalog,
+    Substitution,
+    VoiceNotInstalled,
+    load_aliases,
+)
 
 
 def voice(key: str) -> Voice:
+    """A stand-in voice, its language read off its key as Piper reads a real one.
+
+    Piper keys are `<family>_<REGION>-<name>-<quality>`, so deriving the language
+    here rather than passing it means a test naming `es_ES-...` gets a Spanish
+    voice without saying so twice — and a key and a language cannot be set to
+    disagree in a fixture in a way no real voice could.
+    """
     return Voice(
         id=key,
         name=key.split("-")[1] if "-" in key else key,
         description=key,
-        labels=(("language", "en_US"), ("quality", "medium")),
+        labels=(("quality", "medium"),),
         models=SERVES,
+        language=key.split("_")[0] if "_" in key else "en",
     )
 
 
@@ -425,3 +438,162 @@ def test_an_engine_with_no_declarations_gets_an_empty_table(tmp_path, monkeypatc
     """
     monkeypatch.setattr(declarations_mod, "_DIRECTORY", tmp_path)
     assert load_aliases("brought-its-own", {"en_US-lessac-medium": object()}) == {}
+
+
+# --------------------------------------------------------------- language
+
+
+def test_a_language_outranks_the_voice_id_that_was_named():
+    """Asking for Spanish gets Spanish, even when the id names an English voice.
+
+    This is the case openconv actually produces: an agent configured with an
+    English default voice and `language: es`. The two cannot both be honoured —
+    our voices are monolingual — and the voice is the one that gives, because a
+    substitute voice is still an answer to "say this" while English phonemes over
+    Spanish text is a different answer that sounds like a correct one.
+    """
+    cat = catalog("en_US-lessac-medium", "es_ES-davefx-medium", fallback="en_US-lessac-medium")
+
+    spoken = cat.resolve("en_US-lessac-medium", "es")
+
+    assert spoken.voice.id == "es_ES-davefx-medium"
+    assert spoken.voice.language == "es"
+    # Reported like every other substitution, so `x-elvenspeak-voice` names what
+    # actually spoke rather than echoing what was asked for.
+    assert spoken.substituted
+
+
+def test_a_voice_that_already_speaks_the_language_is_not_a_substitution():
+    """The narrowing must not turn a correct request into a substituted one.
+
+    A caller that names a Spanish voice and says `es` agreed with itself, and a
+    response claiming it was given something else would send a client looking for
+    a substitution that never happened.
+    """
+    cat = catalog("en_US-lessac-medium", "es_ES-davefx-medium", fallback="en_US-lessac-medium")
+
+    spoken = cat.resolve("es_ES-davefx-medium", "es")
+
+    assert spoken.voice.id == "es_ES-davefx-medium"
+    assert not spoken.substituted
+
+
+def test_a_language_no_voice_speaks_steers_nothing():
+    """An unanswerable language is reported, never refused.
+
+    The rule `model_id` already set: an id this deployment does not map steers
+    nothing and comes back in `x-elvenspeak-ignored`. A language nothing speaks is
+    the same unanswerable ask, and refusing it would 404 a voice that is installed
+    and was never the problem — breaking a stock client that sends
+    `language_code` on every request.
+    """
+    cat = catalog("en_US-lessac-medium", fallback="en_US-lessac-medium")
+
+    spoken = cat.resolve("en_US-lessac-medium", "ja")
+
+    assert spoken.voice.id == "en_US-lessac-medium"
+    assert not spoken.substituted
+
+
+def test_a_language_is_answered_even_when_the_fallback_does_not_speak_it():
+    """The fallback is a default, not a veto.
+
+    A deployment's fallback is one configured id, so it speaks one language. If it
+    outranked the narrowing, then every deployment whose fallback is English would
+    answer every Spanish request in English — which is the whole failure this
+    change exists to remove, reintroduced through the back door.
+    """
+    cat = catalog(
+        "en_US-lessac-medium", "es_MX-claude-high", fallback="en_US-lessac-medium"
+    )
+
+    spoken = cat.resolve("no-such-voice", "es")
+
+    assert spoken.voice.id == "es_MX-claude-high"
+    assert spoken.substituted
+
+
+def test_an_alias_is_not_followed_out_of_the_requested_language():
+    """An alias maps an id onto a voice, and cannot override the language.
+
+    The shipped tables point ElevenLabs' English speakers at English voices by
+    design. Following one while Spanish was asked for would answer a Spanish
+    request in English through a table that has no opinion about language at all.
+    """
+    cat = catalog(
+        "en_US-hfc_female-medium",
+        "es_MX-claude-high",
+        fallback="en_US-hfc_female-medium",
+    )
+
+    spoken = cat.resolve("21m00Tcm4TlvDq8ikWAM", "es")
+
+    assert spoken.voice.id == "es_MX-claude-high"
+
+
+def test_a_language_cannot_steer_a_deployment_that_switched_substitution_off():
+    """The false 404 that language narrowing introduced, and the rule that ends it.
+
+    Narrowing is a substitution — it answers with a voice other than the one the
+    caller named — and it arrived as the only one not answering to the switch that
+    governs the rest. With no fallback configured the narrowed table did not hold
+    the exact id, the alias step missed too, and `resolve` raised
+    `VoiceNotInstalled` for a voice whose own message then listed it as available:
+    a 404 for `en_US-lessac-high` on a deployment that had baked
+    `en_US-lessac-high`.
+
+    Two installed voices, not one, because that is what makes the narrowing bite:
+    a catalog where nothing speaks Spanish falls back to the whole table via
+    `speaking` and resolves correctly by accident.
+
+    The answer is the id the caller named, unsubstituted. `api.py` then reports
+    `language_code` in `x-elvenspeak-ignored`, since the voice does not speak it —
+    which is the honest answer a 404 was not.
+    """
+    cat = catalog("en_US-lessac-high", "es_MX-claude-high", fallback=None)
+
+    spoken = cat.resolve("en_US-lessac-high", "es")
+
+    assert spoken.voice.id == "en_US-lessac-high"
+    assert not spoken.substituted
+
+
+def test_switching_substitution_off_still_refuses_an_id_nothing_installs():
+    """The other half, which the fix above must not have bought at its expense.
+
+    Ungating narrowing where there is no fallback could as easily have been done
+    by ignoring the absent fallback, which would answer every unknown id with
+    whatever spoke the language — turning the switch off into a substitution rule
+    of its own. The refusal is the whole point of the setting and survives.
+    """
+    cat = catalog("en_US-lessac-high", "es_MX-claude-high", fallback=None)
+
+    with pytest.raises(VoiceNotInstalled):
+        cat.resolve("en_US-not-installed", "es")
+
+
+def test_an_alias_reaches_its_voice_where_substitution_is_off():
+    """The gate covers all three steps, and the alias step is why that is right.
+
+    Narrowing the alias step alone — while leaving the exact-id step gated, which
+    is what "narrow for aliases even with substitution off" would mean — puts the
+    alias step back into the false 404 the gate was added to end: the alias
+    resolves to a voice narrowing has removed, `aliased in speaking` misses, and
+    `VoiceNotInstalled` names as *available* the very voice that would have
+    answered.
+
+    So the alias is followed and `language_code` comes back reported in
+    `x-elvenspeak-ignored`, which differs from the substitution-on case above by
+    design. A deployment with no fallback has not opted out of aliasing — it has
+    opted out of having anywhere for a narrowed-away id to land.
+    """
+    cat = catalog(
+        "en_US-hfc_female-medium",
+        "es_MX-claude-high",
+        fallback=None,
+    )
+
+    spoken = cat.resolve("21m00Tcm4TlvDq8ikWAM", "es")
+
+    assert spoken.voice.id == "en_US-hfc_female-medium"
+    assert spoken.substituted is True

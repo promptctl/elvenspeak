@@ -21,7 +21,7 @@ from elvenspeak import piper
 from elvenspeak.engine import Capability, Prosody, Voice
 
 RATE = 22050
-VOICE = Voice(id="test", name="test", description="test", models=SERVES)
+VOICE = Voice(id="test", name="test", description="test", models=SERVES, language="en")
 
 
 @dataclass

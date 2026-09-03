@@ -51,7 +51,7 @@ EVERYTHING = frozenset(Capability)
 #: by beginning with an `f` that happens to mean French. Renaming a conftest
 #: voice would then break this file for a reason with no visible connection to
 #: it, so the kokoro tests bring an id kokoro can actually read.
-KOKORO_VOICE = Voice(id="af_test", name="test", description="test", models=SERVES)
+KOKORO_VOICE = Voice(id="af_test", name="test", description="test", models=SERVES, language="en")
 
 
 def _settings() -> Settings:

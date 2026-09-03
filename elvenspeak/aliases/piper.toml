@@ -48,6 +48,13 @@ elevenlabs_models = ["eleven_flash_v2_5", "eleven_turbo_v2_5"]
 # indistinguishable. The five male ids do collapse, because the image bakes one
 # male voice — if that reads as too thin, the fix is a second male voice in
 # PIPER_VOICES and a line here, not a low-quality one.
+#
+# EVERY TARGET HERE IS ENGLISH, DELIBERATELY, AND THE IMAGE ALSO BAKES SPANISH.
+# The nine keys are ElevenLabs' original English speakers, and a client holding
+# one of them is asking for that speaker, not for a language — so pointing Rachel
+# at es_MX-claude-high would serve an English caller Spanish and be a worse
+# answer than the English substitution above. Spanish is reached by naming a
+# Spanish voice, never by landing on one from an id that meant something else.
 "21m00Tcm4TlvDq8ikWAM" = "en_US-lessac-high"      # Rachel
 "AZnzlk1XvdvUeBnXmlld" = "en_US-ljspeech-high"    # Domi
 "EXAVITQu4vr4xnSDxMaL" = "en_US-lessac-high"      # Bella

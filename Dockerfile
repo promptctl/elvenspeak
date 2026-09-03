@@ -87,18 +87,58 @@ ENV UV_NO_SYNC=1
 # `KOKORO_MODEL` and vice versa — which is the point of an engine parsing its own
 # environment: adding the second engine's settings here costs the first engine
 # nothing and changes no shared type.
-# Three voices rather than one, because one voice makes the ElevenLabs alias
-# table unanswerable: it maps nine foreign ids onto voices of two registers, and
-# an alias whose target is not baked is dropped at startup — so the image that
-# baked a single voice resolved none of the nine. Two female and one male is the
-# smallest set the table can be honest about, at ~291 MB.
+# Three English voices rather than one, because one voice makes the ElevenLabs
+# alias table unanswerable: it maps nine foreign ids onto voices of two
+# registers, and an alias whose target is not baked is dropped at startup — so
+# the image that baked a single voice resolved none of the nine. Two female and
+# one male is the smallest set the table can be honest about, at 278 MiB.
+#
+# Then two Spanish voices, 120 MiB more, so that a Spanish reply can be spoken
+# with Spanish phonemes instead of read aloud by an English voice. That failure
+# is not audible as a failure — espeak renders the same sentence
+# `ˈola, kˈomo estˈas?` under `es` and `ˈoʊlæ, kəmˈoʊ ɛstˈɑːz?` under `en-us`,
+# which plays perfectly and is nonsense. One of each register again, and the
+# regions differ because Piper publishes no single-speaker Castilian female
+# above `low`: es_ES-sharvard-medium is the only other Castilian at tier and it
+# carries two speakers.
+#
+# BOTH SIZES ARE SUMMED FROM THE FILES AND STATED IN MiB. Read decimally the
+# same English trio is 291 MB, which is where an unexplained 13 MB drift
+# appears to come from; it is one measurement in two units. The Spanish figure
+# is measured too rather than a tier multiplied out: es_MX-claude-high is
+# 60 MiB, a `-high` the size of a `-medium`, where the English `-high` voices
+# are 109 MiB each.
+#
+# REGISTER WAS MEASURED, NOT READ OFF THE NAME — the upstream index carries
+# quality, language and speaker count but no gender. Same method and the same
+# control voice as `elvenspeak/aliases/piper.toml` records, re-measured on this
+# table's own line: pitch is a property of what was said as well as of who said
+# it, so the control reads 115 Hz here on the Spanish sentence and 121 Hz there
+# on the English one. Two numbers for one voice is the method working, not a
+# disagreement between the tables.
+#
+#   es_MX-claude-high      200 Hz   female — the name reads male to an English
+#                                   eye, which is the whole reason for measuring
+#   es_AR-daniela-high     185 Hz   female — not baked: 111 MB alone, nearly
+#                                   double the others, for a register claude
+#                                   already covers
+#   es_ES-davefx-medium    122 Hz   male
+#   en_US-hfc_male-medium  115 Hz   the control, and where a male speaker belongs
+#
+# KOKORO BAKES NO SPANISH VOICE, and that is measured too. Its Spanish voices
+# reach the phonemizer for free (`kokoro.py` maps the id prefix `e` to `es`),
+# but they fail the short utterances openconv's turn loop is made of — the same
+# zero-sample defect that keeps bf_emma out of the alias table, an order worse:
+# ef_dora 15/16, em_alex 14/16, em_santa 12/16 one- and two-word Spanish lines
+# returned no samples, against 0/16 for both Piper voices above. Longer text is
+# fine in all of them, which is exactly what makes it dangerous to bake.
 #
 # [LAW:one-source-of-truth] The first name here is `piper.DEFAULT_VOICE`, and
 # `tests/test_dockerfile.py` fails if it is not. First is the one that matters:
 # a deployment naming no fallback speaks unknown ids in whichever voice the
 # engine offers first, so reordering this line changes what every such
 # deployment says.
-ARG PIPER_VOICES=en_US-lessac-high,en_US-ljspeech-high,en_US-hfc_male-medium
+ARG PIPER_VOICES=en_US-lessac-high,en_US-ljspeech-high,en_US-hfc_male-medium,es_ES-davefx-medium,es_MX-claude-high
 ARG KOKORO_VOICES=af_heart,am_michael,bf_emma,bm_george
 ARG KOKORO_MODEL=kokoro-v1.0.int8.onnx
 

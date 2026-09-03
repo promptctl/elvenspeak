@@ -109,6 +109,16 @@ _VOICE_LANGUAGES = {
 #: choosing a voice wants it and ElevenLabs publishes `labels` as an open map.
 _VOICE_GENDERS = {"f": "female", "m": "male"}
 
+#: Where espeak's spelling and ISO 639-1's differ. espeak names Mandarin by its
+#: own `cmn`; every other value in `_VOICE_LANGUAGES` is either the ISO family
+#: already or that family with a region suffix, so the split below covers them.
+#:
+#: [LAW:one-source-of-truth] An exception table read on top of `_VOICE_LANGUAGES`
+#: rather than a second prefix-to-ISO map beside it. Two full tables keyed by the
+#: same character are two answers to "what does `z` speak", free to disagree the
+#: day a language is added to one of them.
+_ISO_SPELLINGS = {"cmn": "zh"}
+
 #: Phonemes that mark a gap between words rather than a sound inside one. Space
 #: is the separator espeak emits between words; the punctuation marks are the
 #: pauses it holds time for. The one place Kokoro's alphabet is interpreted, so
@@ -510,6 +520,19 @@ def _language(key: str) -> str:
     return _VOICE_LANGUAGES[key[0]]
 
 
+def _iso_language(key: str) -> str:
+    """The same language as [`_language`], spelled the way a caller asks for it.
+
+    ElevenLabs' `language_code` is ISO 639-1, and espeak's codes are not: `en-us`
+    carries a region this comparison does not want, and `cmn` is espeak's own name
+    for what ISO calls `zh`. Derived from the phonemizer's answer rather than
+    looked up separately, so the language a voice is *matched* on cannot come
+    apart from the language it is actually *spoken* in.
+    """
+    espeak = _language(key)
+    return _ISO_SPELLINGS.get(espeak, espeak.split("-")[0])
+
+
 def _describe(key: str, serves: frozenset[str]) -> engine.Voice:
     """One voice as the API surface has to show it, read out of its id.
 
@@ -530,11 +553,11 @@ def _describe(key: str, serves: frozenset[str]) -> engine.Voice:
         description=f"Kokoro {name} ({language}, {gender})",
         # The Kokoro facts with no ElevenLabs field of their own.
         labels=(
-            ("language", language),
             ("gender", gender),
             ("engine", "kokoro"),
         ),
         models=serves,
+        language=_iso_language(key),
     )
 
 
