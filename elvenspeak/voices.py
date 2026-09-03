@@ -110,10 +110,15 @@ def spoken_language(tag: str | None) -> str | None:
     a match that fails on the punctuation would report the language ignored while
     a voice that speaks it sat in the catalog.
 
-    `None` in, `None` out: a request that named no language is not a request for
-    an unnamed one, and [`Catalog.speaking`] reads that as "every voice".
+    Nothing in, `None` out — and blank counts as nothing. A request that named no
+    language is not a request for an unnamed one, and [`Catalog.speaking`] reads
+    `None` as "every voice". `""` is what a form or a JS client sends for "unset",
+    and taken literally it is a language no voice speaks, so the caller was told
+    their `language_code` was ignored when they had expressed none. The trailing
+    `or None` collapses `None`, `""`, `"  "` and `"-"` onto the one answer, in
+    place of the branch that caught only `None`.
     """
-    return None if tag is None else tag.strip().lower().replace("_", "-").split("-")[0]
+    return (tag or "").strip().lower().replace("_", "-").split("-")[0] or None
 
 
 class VoiceNotInstalled(LookupError):
@@ -295,8 +300,19 @@ class Catalog:
         request, it is a different and wrong one, and it is inaudible as a
         failure. The substitution is reported like every other, so a caller is
         never left guessing which voice spoke.
+
+        [LAW:single-enforcer] Which is why narrowing answers to the same switch
+        every other substitution does. Answering with a voice other than the one
+        named *is* substituting, however the choice was reached, and a deployment
+        with no fallback has said it will not — so a language cannot steer one off
+        an exact id there. Ungated, it made the line above false: an installed
+        voice whose language differed from a requested one raised
+        [`VoiceNotInstalled`], whose message then listed that same voice as
+        available. Such a deployment gets the id it named and hears `language_code`
+        reported in `x-elvenspeak-ignored`, which is the true answer where a 404
+        was not.
         """
-        speaking = self.speaking(language)
+        speaking = self.speaking(language if self._fallback is not None else None)
 
         exact = speaking.get(requested)
         if exact is not None:

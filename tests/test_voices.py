@@ -554,3 +554,59 @@ def test_an_alias_is_not_followed_out_of_the_requested_language():
     spoken = cat.resolve("21m00Tcm4TlvDq8ikWAM", "es")
 
     assert spoken.voice.id == "es_MX-claude-high"
+
+
+def test_a_language_cannot_steer_a_deployment_that_switched_substitution_off():
+    """The false 404 that language narrowing introduced, and the rule that ends it.
+
+    Narrowing is a substitution — it answers with a voice other than the one the
+    caller named — and it arrived as the only one not answering to the switch that
+    governs the rest. With no fallback configured the narrowed table did not hold
+    the exact id, the alias step missed too, and `resolve` raised
+    `VoiceNotInstalled` for a voice whose own message then listed it as available:
+    a 404 for `en_US-lessac-high` on a deployment that had baked
+    `en_US-lessac-high`.
+
+    Two installed voices, not one, because that is what makes the narrowing bite:
+    a catalog where nothing speaks Spanish falls back to the whole table via
+    `speaking` and resolves correctly by accident.
+
+    The answer is the id the caller named, unsubstituted. `api.py` then reports
+    `language_code` in `x-elvenspeak-ignored`, since the voice does not speak it —
+    which is the honest answer a 404 was not.
+    """
+    cat = catalog("en_US-lessac-high", "es_MX-claude-high", fallback=None)
+
+    spoken = cat.resolve("en_US-lessac-high", "es")
+
+    assert spoken.voice.id == "en_US-lessac-high"
+    assert not spoken.substituted
+
+
+def test_switching_substitution_off_still_refuses_an_id_nothing_installs():
+    """The other half, which the fix above must not have bought at its expense.
+
+    Ungating narrowing where there is no fallback could as easily have been done
+    by ignoring the absent fallback, which would answer every unknown id with
+    whatever spoke the language — turning the switch off into a substitution rule
+    of its own. The refusal is the whole point of the setting and survives.
+    """
+    cat = catalog("en_US-lessac-high", "es_MX-claude-high", fallback=None)
+
+    with pytest.raises(VoiceNotInstalled):
+        cat.resolve("en_US-not-installed", "es")
+
+
+def test_a_blank_language_is_no_language_rather_than_one_nothing_speaks():
+    """What a form or a JS client sends for "unset".
+
+    `""` reaching `Catalog.speaking` as a literal language matches no voice, so
+    the catalog falls back to the whole table and the right voice still speaks —
+    the damage is downstream, in `_honoured`, where `spoke` compares the voice's
+    language against `""` and reports `language_code` ignored on every such
+    request. A caller who expressed no preference is told their preference was
+    dropped.
+    """
+    assert spoken_language("") is None
+    assert spoken_language("   ") is None
+    assert spoken_language("-") is None
