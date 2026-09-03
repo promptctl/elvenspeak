@@ -36,7 +36,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from . import engine
+from . import engine, voices
 from .discovery import TRANSPORT_FAILURES, Backend
 from .provisioning import ConfigError
 
@@ -279,8 +279,18 @@ def _voice(published: Any, service: str) -> engine.Voice:
     # every language request ignored for that backend's voices — a fleet-wide
     # capability silently switched off by one stale image, which is exactly the
     # shape of failure per-voice facts were moved onto the voice to prevent.
-    language = published.get("language")
-    if not isinstance(language, str) or not language:
+    # [LAW:single-enforcer] Normalised through the one function that makes a
+    # language tag comparable, rather than checked with a `.strip()` of its own.
+    # A local strip would be a second, partial answer to the same question and
+    # would drift from `spoken_language` silently — and it would still admit
+    # `"ES"` and `"es-MX"`, which are as unreachable by a caller asking for `es`
+    # as the `" "` that prompted this. The `isinstance` stays because the wire is
+    # untrusted JSON and a number has no tag to normalise.
+    published_language = published.get("language")
+    language = voices.spoken_language(
+        published_language if isinstance(published_language, str) else None
+    )
+    if language is None:
         raise ConfigError(
             [
                 f"{service}: voice {voice_id!r} named no language. "

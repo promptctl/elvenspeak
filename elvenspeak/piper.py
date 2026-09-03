@@ -473,15 +473,15 @@ def _describe(
     # spellings of `audio` were how they came to disagree.
     audio = config.get("audio") or {}
     declared = config.get("language") or {}
-    language = declared.get("code") or (
-        parts[0] if len(parts) == _KEY_PARTS else key
-    )
+    code = declared.get("code") or (parts[0] if len(parts) == _KEY_PARTS else None)
     # The sidecar's own `family` where it has one — every voice in the published
-    # index does — and otherwise the code's first part, since `code` is
-    # `<family>_<REGION>` throughout. The split is the sidecar's structure rather
-    # than a guess about it, which is what makes it a safe fallback for a
-    # hand-written sidecar that states only the code.
-    family = declared.get("family") or language.split("_")[0]
+    # index does; checked against all six sidecars this repo downloads, which
+    # carry `code, country_english, family, name_english, name_native, region` —
+    # and otherwise the code's first part, since `code` is `<family>_<REGION>`
+    # throughout. The split is the sidecar's structure rather than a guess about
+    # it, which is what makes it a safe fallback for a hand-written sidecar that
+    # states only the code.
+    family = declared.get("family") or (code or "").split("_")[0]
     name = config.get("dataset") or (parts[1] if len(parts) == _KEY_PARTS else key)
     quality = audio.get("quality") or (
         parts[2] if len(parts) == _KEY_PARTS else "medium"
@@ -504,6 +504,22 @@ def _describe(
             f"(found {rate!r}); the rate its samples will have cannot be inferred"
         )
 
+    # The second field with no fallback, and it earned the refusal the same way.
+    # Reached only when the sidecar states neither `family` nor `code` and the key
+    # does not parse — an operator-chosen `PIPER_VOICES` id beside a hand-written
+    # sidecar. `family` was then the whole key, which is a language code no
+    # caller's `language_code` can equal: the voice becomes silently unreachable
+    # by language while appearing in `GET /v1/models`' `languages` list, which is
+    # the answer-shaped void `remote.py` refuses for a backend and this refuses
+    # for a voice.
+    if not family:
+        raise ValueError(
+            f"voice {key!r} states no language.family or language.code in its "
+            f".onnx.json and its key does not parse as "
+            f"<family>_<REGION>-<name>-<quality>; the language it speaks cannot "
+            f"be inferred"
+        )
+
     return (
         engine.Voice(
             # Piper's own identifier doubles as the voice_id a caller names, so a
@@ -511,7 +527,7 @@ def _describe(
             # names something real.
             id=key,
             name=name,
-            description=f"Piper {name} ({language}, {quality})",
+            description=f"Piper {name} ({code or key}, {quality})",
             # The Piper facts with no ElevenLabs field of their own. Carried
             # rather than dropped: a caller choosing a voice wants the quality
             # tier, and `speakers` says out loud what a listener would otherwise

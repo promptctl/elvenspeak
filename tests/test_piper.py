@@ -175,6 +175,69 @@ def test_an_explicitly_null_section_reads_as_an_absent_one(tmp_path):
     assert voice.name == "lessac"
 
 
+def test_the_sidecars_own_family_is_what_a_voice_speaks(tmp_path):
+    """The primary source for `Voice.language`, which nothing else here reaches.
+
+    Every other fixture states only `language.code`, so every other test exercises
+    the `code.split("_")` fallback — and an implementation that ignored the
+    sidecar's `family` outright would pass all of them. Every real downloaded
+    voice takes this branch instead, which makes it the one that decides the
+    language of everything a deployment actually bakes.
+
+    The fixture makes `family` **disagree** with the split, which is what gives
+    the assertion teeth: `pt_BR` would derive `pt`, so a `family` of `es` can only
+    come from the sidecar. No real voice disagrees this way — the point is that
+    the test cannot pass by accident.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / f"{KEY}.onnx").write_bytes(b"not a real model")
+    (tmp_path / f"{KEY}.onnx.json").write_text(
+        json.dumps(
+            {
+                "language": {"code": "pt_BR", "family": "es"},
+                "audio": {"sample_rate": 22050},
+                "dataset": "lessac",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    voice = load(tmp_path).voices()[0]
+
+    assert voice.language == "es"
+    # The display code stays the sidecar's own, so the two are visibly separate
+    # facts rather than one derived twice.
+    assert "pt_BR" in voice.description
+
+
+def test_a_voice_that_states_no_language_at_all_is_refused(tmp_path):
+    """[LAW:no-silent-failure] The second field with no honest default.
+
+    A sidecar stating neither `family` nor `code`, under a key that does not parse
+    as `<family>_<REGION>-<name>-<quality>` — an operator-chosen `PIPER_VOICES` id
+    beside a hand-written sidecar, which is the only way to reach it. The language
+    was then the whole key, a code no caller's `language_code` can equal, so the
+    voice was silently unreachable by language while listed in `GET /v1/models`'
+    `languages` as though it spoke one.
+
+    Refused at load like a missing `sample_rate` and for the same reason: the
+    alternative is a value that looks like an answer and is not. Named in the
+    message, so an operator learns which of their voices it was.
+    """
+    key = "customvoice"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / f"{key}.onnx").write_bytes(b"not a real model")
+    (tmp_path / f"{key}.onnx.json").write_text(
+        json.dumps({"audio": {"sample_rate": 22050}}), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError) as raised:
+        piper_prepared(tmp_path, voices=(key,)).open().voices()
+
+    assert key in str(raised.value)
+    assert "language" in str(raised.value)
+
+
 def test_engine_facts_with_no_elevenlabs_field_travel_as_labels(tmp_path):
     """The open map is how a voice keeps what the schema has no room for.
 
