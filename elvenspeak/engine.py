@@ -201,10 +201,8 @@ class Voice:
     #: because a capability is a fact about *what will speak*, `models` moved here
     #: because which engine speaks is the same kind of fact, and a language is the
     #: most literal member of that family — it is the one thing a voice
-    #: unavoidably is. It lived in `labels` as a free-form string, which is where
-    #: both of the others started and for the same reason: a fact with no field of
-    #: its own goes in the open map until something needs to read it. Something
-    #: does now.
+    #: unavoidably is. This one lived in `labels`: a fact with no field of its own
+    #: goes in the open map until something needs to read it. Something does now.
     #:
     #: [LAW:types-are-the-program] ISO 639-1, the family alone, because that is the
     #: vocabulary ElevenLabs' `language_code` speaks and this field exists to be
