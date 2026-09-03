@@ -211,6 +211,13 @@ class SpeechRequest(BaseModel):
         Normalised rather than refused, because `es-MX`, `es_MX` and `ES` are all
         the same question and ElevenLabs accepts them; only a value naming no
         language at all becomes `None`, which is what absence already means here.
+
+        A non-string is handed on rather than normalised, which is the one place
+        this field does not want [`spoken_language`]'s answer: it reduces `5` to
+        `None` like any other tag naming no language, and `None` is a value this
+        model accepts. Passed through, it reaches pydantic's own `str | None` and
+        comes back a 422. A dropped parameter and a refused one are different
+        answers, and the caller who sent `5` deserves the second.
         """
         return spoken_language(value) if isinstance(value, str) else value
 

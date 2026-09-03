@@ -86,7 +86,7 @@ class Capability(Enum):
     TIMESTAMPS = "report how long each part of an utterance took"
 
 
-def spoken_language(tag: str | None) -> str | None:
+def spoken_language(tag: object) -> str | None:
     """A language tag reduced to the ISO 639-1 family a voice speaks.
 
     [LAW:single-enforcer] The one place any language tag — a caller's
@@ -100,15 +100,20 @@ def spoken_language(tag: str | None) -> str | None:
     caller's `es` could ever equal, unreachable by language while still listed as
     speaking it in `GET /v1/models`.
 
-    Nothing in, `None` out — and blank counts as nothing. A request that named no
-    language is not a request for an unnamed one, and [`Catalog.speaking`] reads
-    `None` as "every voice". `""` is what a form or a JS client sends for "unset",
-    and taken literally it is a language no voice speaks, so the caller was told
-    their `language_code` was ignored when they had expressed none. The trailing
-    `or None` collapses `None`, `""`, `"  "` and `"-"` onto the one answer, in
-    place of the branch that caught only `None`.
+    Nothing in, `None` out — and blank counts as nothing, as does anything that is
+    not a string at all. A request that named no language is not a request for an
+    unnamed one, and [`Catalog.speaking`] reads `None` as "every voice". `""` is
+    what a form or a JS client sends for "unset", and taken literally it is a
+    language no voice speaks, so the caller was told their `language_code` was
+    ignored when they had expressed none. `5` off a wire or out of a config is the
+    same fact arriving in a different shape, and it belongs here for the reason
+    the rest does: this is exported, and every caller that had to write its own
+    `isinstance` first was a second checkpoint for this rule — including the
+    outside engine that would not have known to write one and got an
+    `AttributeError` from inside a `.strip()`.
     """
-    return (tag or "").strip().lower().replace("_", "-").split("-")[0] or None
+    stated = tag if isinstance(tag, str) else ""
+    return stated.strip().lower().replace("_", "-").split("-")[0] or None
 
 
 @dataclass(frozen=True)
@@ -236,8 +241,7 @@ class Voice:
         exists to refuse: read as a real answer it says "this voice does not
         speak what you asked for", which is a claim no engine intended to make.
         """
-        stated = self.language if isinstance(self.language, str) else None
-        family = spoken_language(stated)
+        family = spoken_language(self.language)
         if family is None:
             raise ValueError(
                 f"voice {self.id!r} states no language it speaks "

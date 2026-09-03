@@ -91,6 +91,11 @@ def test_a_blank_language_is_no_language_rather_than_one_nothing_speaks():
     assert spoken_language("") is None
     assert spoken_language("   ") is None
     assert spoken_language("-") is None
+    # Exported, so the untrusted shapes reach it too: a config value, a raw JSON
+    # field. Reduced to the same answer rather than crashing inside a `.strip()`,
+    # so no caller has to write an `isinstance` in front of the one enforcer.
+    assert spoken_language(5) is None
+    assert spoken_language(["es"]) is None
 
 
 @pytest.mark.parametrize("declared", ["ES", " es ", "es_MX", "es-MX"])

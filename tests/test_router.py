@@ -772,8 +772,10 @@ def test_a_backend_that_names_no_model_ids_fails_the_boot(published, why):
         ({}, "omits the field"),
         ({"language": ""}, "publishes an empty code"),
         ({"language": None}, "publishes a null"),
+        ({"language": 5}, "publishes a number"),
+        ({"language": ["es"]}, "publishes a list"),
     ],
-    ids=["absent", "empty", "null"],
+    ids=["absent", "empty", "null", "number", "list"],
 )
 def test_a_backend_that_names_no_language_fails_the_boot(published, why):
     """The rolling deploy `piper-language-j1c.2` opens, held to the `models` bar.
@@ -787,6 +789,11 @@ def test_a_backend_that_names_no_language_fails_the_boot(published, why):
     Spanish voice this epic exists to reach. Silent, audible only as English
     phonemes over Spanish words, and the same class of wrong answer the `models`
     check refuses — so the boot stops here too, naming the backend.
+
+    The wire is untrusted JSON, so a value that is not a string at all is the
+    same fact in a different shape and gets the same refusal. That case pins the
+    fold: `spoken_language` is what decides a non-string names no language, and a
+    `str()` anywhere on this path would mint `"5"` as a language a voice speaks.
     """
     mute = FastAPI()
 

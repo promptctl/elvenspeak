@@ -280,15 +280,11 @@ def _voice(published: Any, service: str) -> engine.Voice:
     # capability silently switched off by one stale image, which is exactly the
     # shape of failure per-voice facts were moved onto the voice to prevent.
     # [LAW:single-enforcer] Asked through the one function that decides what a
-    # language tag reduces to, so `" "`, `"ES"` and `"es-MX"` — each as
-    # unreachable by a caller asking for `es` as an absent tag — are one answer
-    # here rather than three the router would have to remember. `Voice` stamps
-    # the value again on the way in; this call is what lets the refusal below
-    # name the backend, which a constructor two frames down cannot.
-    published_language = published.get("language")
-    language = engine.spoken_language(
-        published_language if isinstance(published_language, str) else None
-    )
+    # language tag reduces to, so `" "`, `"ES"`, `"es-MX"` and the `5` untrusted
+    # JSON can put here are one answer rather than four the router would have to
+    # remember. `Voice` stamps the value again on the way in; this call is what
+    # lets the refusal below name the backend, which a constructor cannot.
+    language = engine.spoken_language(published.get("language"))
     if language is None:
         raise ConfigError(
             [
