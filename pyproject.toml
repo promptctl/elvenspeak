@@ -40,6 +40,16 @@ piper = ["piper-tts[alignment]>=1.7.0"]
 # Pulls onnxruntime, numpy and phonemizer. Also needs espeak-ng, which is a
 # native library no Python metadata can install; see the README.
 kokoro = ["kokoro-onnx>=0.6.1"]
+# `setuptools<81` is not incidental and must not be tidied away. `chatterbox-tts`
+# reaches its watermarker through `perth`, whose `__init__` does
+# `try: from ...perth_watermarker import PerthImplicitWatermarker` /
+# `except ImportError: PerthImplicitWatermarker = None`. The import really fails
+# on `from pkg_resources import resource_filename`, which setuptools removed in
+# 81 — so on a current setuptools the name silently becomes None and the model
+# constructor dies forty lines away with `TypeError: 'NoneType' object is not
+# callable`, naming nothing. [LAW:no-silent-failure], upstream, where it can only
+# be pinned around.
+chatterbox = ["chatterbox-tts>=0.1.7", "setuptools<81"]
 # Empty, and true rather than a placeholder: the router's backends are other
 # elvenspeak servers, reached over HTTP with `urllib` from the standard library,
 # so it needs nothing beyond `fastapi` and `uvicorn` above. `pip install

@@ -75,7 +75,7 @@ _ENVIRONMENT = (
 #: through their own engine's extra. A second copy would let a third engine be
 #: added to one list and forgotten in the other, and the file that forgot goes
 #: quietly vacuous rather than red.
-ENGINE_LIBRARIES = frozenset({"piper", "kokoro_onnx"})
+ENGINE_LIBRARIES = frozenset({"piper", "kokoro_onnx", "chatterbox"})
 
 
 def declared(engine) -> frozenset[Capability]:
