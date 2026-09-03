@@ -979,3 +979,29 @@ def test_a_model_id_the_language_steered_away_from_is_refused_not_reported():
     # "resolved", so it asserts a property of the sentence rather than of the
     # value, and would pass with `language_code` dropped from the message.
     assert "language_code 'es'" in message
+def test_a_model_lists_only_the_languages_its_own_backend_speaks():
+    """`GET /v1/models` and the 422 have to read the same fact.
+
+    `languages` was a union over the whole fleet stamped onto every entry, which
+    reads harmlessly next to `capabilities` — that one is a union too — and is
+    not, because the two overclaims cost differently. A capability an engine's
+    voices lack degrades: the 501 gate and `x-elvenspeak-ignored` read the
+    resolved voice's own set. A language they do not speak walks a client into a
+    refusal: it picks `alpha` because the listing showed `es`, sends it with
+    `language_code=es`, and gets the 422 the test above asserts.
+
+    Two maps of one territory, and the refusal is the one that had to be right.
+    """
+    hablante = replace(BETA_VOICES[0], id="beta-uno", language="es")
+
+    with cluster(
+        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", (hablante,), EVERYTHING)
+    ) as consul:
+        listed = routed(consul).get("/v1/models").json()
+
+    spoken = {
+        entry["model_id"]: [item["language_id"] for item in entry["languages"]]
+        for entry in listed
+    }
+    assert spoken["alpha"] == ["en"]
+    assert spoken["beta"] == ["es"]

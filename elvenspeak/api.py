@@ -888,13 +888,31 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         # Derived once per request rather than once per entry: it is a union over
         # every installed voice, and every model id here gets the same answer.
         deployment_wide = offered()
-        # Derived once per request for the reason `deployment_wide` is: it is a
-        # union over every installed voice, and every model id here gets the same
-        # answer. Sorted so the listing is stable across restarts — a client
-        # diffing this response should see a change only when one happened.
-        spoken = tuple(sorted({voice.language for voice in cat.installed}))
         return [
-            _model_json(model_id, deployment_wide, spoken)
+            _model_json(
+                model_id,
+                deployment_wide,
+                # Per entry, unlike `capabilities` beside it, because the two
+                # overclaims do not cost the same. A capability this engine's
+                # voices lack degrades: the 501 gate and `x-elvenspeak-ignored`
+                # both read the resolved voice's own set. A language they do not
+                # speak does not — a caller who picks this `model_id` because the
+                # listing showed `es`, and sends it with `language_code=es`,
+                # resolves to a Spanish voice on another engine and is refused
+                # 422. So this is read off the same fact that refusal is
+                # ([LAW:one-source-of-truth]): the voices this id actually
+                # reaches. Sorted so a client diffing the response sees a change
+                # only when one happened.
+                tuple(
+                    sorted(
+                        {
+                            voice.language
+                            for voice in cat.installed
+                            if model_id in voice.models
+                        }
+                    )
+                ),
+            )
             for model_id in directory.listed()
         ]
 
@@ -1103,8 +1121,9 @@ def _model_json(
         "max_characters_request_free_user": None,
         "max_characters_request_subscribed_user": None,
         "maximum_text_length_per_request": None,
-        # [LAW:one-source-of-truth] Derived from the voices on offer, like
-        # `capabilities` beside it, never held. This was empty while a voice's
+        # [LAW:one-source-of-truth] Derived from the voices this id reaches —
+        # narrower than `capabilities` beside it, for the reason the caller
+        # states — never held. This was empty while a voice's
         # language lived in `Voice.labels` as a string nothing read — the comment
         # here said filling it would mean inventing a second, coarser copy, and it
         # was right: the fix was to give the voices a real language field first,
