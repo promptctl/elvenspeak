@@ -9,6 +9,7 @@ different program. The engines behind those servers are the existing
 from __future__ import annotations
 
 from contextlib import ExitStack
+from dataclasses import replace
 
 import pytest
 from fastapi import FastAPI, Response
@@ -38,13 +39,21 @@ BETA_MODELS = frozenset({"beta", "eleven_beta_v1"})
 
 ALPHA_VOICES = (
     Voice(
-        id="alpha-one", name="Alpha One", description="alpha's", models=ALPHA_MODELS
-    ,
+        id="alpha-one",
+        name="Alpha One",
+        description="alpha's",
+        models=ALPHA_MODELS,
         language="en",
     ),
 )
 BETA_VOICES = (
-    Voice(id="beta-one", name="Beta One", description="beta's", models=BETA_MODELS, language="en"),
+    Voice(
+        id="beta-one",
+        name="Beta One",
+        description="beta's",
+        models=BETA_MODELS,
+        language="en",
+    ),
 )
 
 
@@ -258,6 +267,63 @@ def test_each_voice_carries_what_its_own_backend_will_honour():
 
     assert offered["alpha-one"] == EVERYTHING
     assert offered["beta-one"] == NOTHING
+
+
+def test_each_voice_carries_the_language_its_own_backend_speaks():
+    """The language axis across a fleet, which every fixture in this file hides.
+
+    Every voice here says `en`, so a router that read one backend's language for
+    all of its voices, or collapsed the fleet onto a single value, passes the rest
+    of the file. Built the way the capability test above is built — the two
+    backends made deliberately to disagree — because agreement is what a bug of
+    this shape looks like from the outside.
+
+    The fleet is the shape a Spanish deployment actually takes: one backend baking
+    English voices, another baking Spanish ones, behind one endpoint. If the
+    languages merged into one value, `Catalog.speaking` narrows onto the wrong
+    half of the fleet and a Spanish request is answered in English — the failure
+    this epic exists to end, arriving through the router instead of through a
+    missing field.
+    """
+    hablante = replace(BETA_VOICES[0], id="beta-uno", language="es")
+
+    with cluster(
+        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", (hablante,), EVERYTHING)
+    ) as consul:
+        spoken = {voice.id: voice.language for voice in opened(consul).voices()}
+
+    assert spoken == {"alpha-one": "en", "beta-uno": "es"}
+
+
+def test_a_language_steers_a_request_to_the_backend_that_speaks_it():
+    """The same fleet, through the surface a caller actually reaches.
+
+    The listing above proves the languages survive the merge; this proves they
+    steer. A router that carried the field into `GET /v1/voices` and then resolved
+    without it would pass that test and answer this request in English — which is
+    exactly the split the whole epic is about, since nothing audible says which
+    happened.
+
+    The caller names alpha's English voice and asks for Spanish, so the language
+    has to outrank the id *and* cross a backend boundary to be honoured. The two
+    headers together are the proof: one says a Spanish voice spoke, the other says
+    nothing was dropped to make that happen.
+    """
+    hablante = replace(BETA_VOICES[0], id="beta-uno", language="es")
+
+    with cluster(
+        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", (hablante,), EVERYTHING)
+    ) as consul:
+        response = routed(consul).post(
+            "/v1/text-to-speech/alpha-one/stream",
+            json={"text": "hola", "language_code": "es"},
+            params={"output_format": "pcm_22050"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["x-elvenspeak-voice"] == "beta-uno"
+    assert response.headers["x-elvenspeak-voice-requested"] == "alpha-one"
+    assert "language_code" not in response.headers.get("x-elvenspeak-ignored", "")
 
 
 def test_a_fleet_with_no_engines_boots_and_offers_nothing():
