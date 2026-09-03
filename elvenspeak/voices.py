@@ -281,14 +281,13 @@ class Catalog:
         failure. The substitution is reported like every other, so a caller is
         never left guessing which voice spoke.
 
-        [LAW:single-enforcer] Which is why narrowing answers to the same switch
-        every other substitution does. Answering with a voice other than the one
-        named *is* substituting, however the choice was reached, and a deployment
-        with no fallback has said it will not — so a language cannot steer one off
-        an exact id there. Ungated, it made the line above false: an installed
-        voice whose language differed from a requested one raised
-        [`VoiceNotInstalled`], whose message then listed that same voice as
-        available. Such a deployment gets the id it named and hears `language_code`
+        Narrowing is gated on there being a fallback, and gated once for all three
+        steps, because without one there is nothing to catch an id that narrowing
+        removed: the request cannot fall through to a substitute, so it falls
+        through to [`VoiceNotInstalled`] — whose message then lists as *available*
+        the very voice that would have answered. Ungated, an exact id did exactly
+        that. Applying it to the alias step alone would do it again, for aliases.
+        So such a deployment gets the id it named and hears `language_code`
         reported in `x-elvenspeak-ignored`, which is the true answer where a 404
         was not.
         """

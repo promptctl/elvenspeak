@@ -570,3 +570,30 @@ def test_switching_substitution_off_still_refuses_an_id_nothing_installs():
 
     with pytest.raises(VoiceNotInstalled):
         cat.resolve("en_US-not-installed", "es")
+
+
+def test_an_alias_reaches_its_voice_where_substitution_is_off():
+    """The gate covers all three steps, and the alias step is why that is right.
+
+    Narrowing the alias step alone — while leaving the exact-id step gated, which
+    is what "narrow for aliases even with substitution off" would mean — puts the
+    alias step back into the false 404 the gate was added to end: the alias
+    resolves to a voice narrowing has removed, `aliased in speaking` misses, and
+    `VoiceNotInstalled` names as *available* the very voice that would have
+    answered.
+
+    So the alias is followed and `language_code` comes back reported in
+    `x-elvenspeak-ignored`, which differs from the substitution-on case above by
+    design. A deployment with no fallback has not opted out of aliasing — it has
+    opted out of having anywhere for a narrowed-away id to land.
+    """
+    cat = catalog(
+        "en_US-hfc_female-medium",
+        "es_MX-claude-high",
+        fallback=None,
+    )
+
+    spoken = cat.resolve("21m00Tcm4TlvDq8ikWAM", "es")
+
+    assert spoken.voice.id == "en_US-hfc_female-medium"
+    assert spoken.substituted is True
