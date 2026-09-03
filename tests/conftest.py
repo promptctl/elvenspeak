@@ -304,12 +304,14 @@ DECLARED_VOICES = (
         name="Fake",
         description="a test engine's voice",
         models=DECLARED_MODELS,
+        language="en",
     ),
     Voice(
         id="fake-voice-two",
         name="Fake Two",
         description="its other voice",
         models=DECLARED_MODELS,
+        language="en",
     ),
 )
 

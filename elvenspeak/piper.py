@@ -448,6 +448,48 @@ def _separates_words(phoneme: str) -> bool:
     return phoneme.isspace() or phoneme in _BOUNDARY_PHONEMES
 
 
+def _stated(declared: dict, name: str) -> str | None:
+    """One `language` field of a sidecar, where the sidecar states a real one.
+
+    [LAW:parse-dont-validate] A `.onnx.json` is untrusted the way the wire is —
+    [`_describe`]'s own comments anticipate one hand-written beside an
+    operator-chosen `PIPER_VOICES` id — and a number has no tag to read. Without
+    this, `{"code": 5}` reached `(5 or "").split("_")` and raised an
+    `AttributeError` from inside an expression, in place of the clear refusal
+    this function's callers raise for every other language problem.
+
+    A non-string and a blank fall to the same `None`, so both land on the
+    key-derived fallback the callers already have, and reach that refusal only
+    when the key cannot supply one either.
+    """
+    value = declared.get(name)
+    return value.strip() or None if isinstance(value, str) else None
+
+
+def _section(config: dict, name: str) -> dict:
+    """One section of a sidecar, where the sidecar states a real one.
+
+    [LAW:parse-dont-validate] The crossing [`_stated`] makes for a field, made
+    for the section holding it. Every field below is read with `.get`, so a
+    section that is not an object has to become the empty one here or raise
+    `AttributeError` from inside an expression — the crash that names nothing,
+    in place of the refusal this module's callers raise for every other
+    malformed sidecar.
+
+    Two spellings preceded this and each covered half. `.get(name, {})`
+    substitutes only for an absent key, so an explicit null returned `None`;
+    `or {}` covered that and still let a truthy `"language": "es"` — the shape a
+    hand-written sidecar reaches for instead of `{"code": "es"}` — through to
+    `"es".get("code")`. Both land on the key-derived fallbacks these expressions
+    already promise, and on the refusal when the key supplies none either.
+
+    Read into a local per section rather than inlined at each field; the two
+    spellings of `audio` were how they came to disagree.
+    """
+    section = config.get(name)
+    return section if isinstance(section, dict) else {}
+
+
 def _describe(
     key: str, model_path: Path, serves: frozenset[str]
 ) -> tuple[engine.Voice, int]:
@@ -465,16 +507,19 @@ def _describe(
         config = json.load(handle)
 
     parts = key.split("-")
-    # `or {}` throughout rather than a default argument: `.get(name, {})`
-    # substitutes only for an absent key, so an explicit null in a hand-edited or
-    # half-written sidecar returned None and the chained lookup raised
-    # AttributeError — instead of the key-derived fallback these expressions
-    # already promise. Read into locals so each section is spelled once; the two
-    # spellings of `audio` were how they came to disagree.
-    audio = config.get("audio") or {}
-    language = (config.get("language") or {}).get("code") or (
-        parts[0] if len(parts) == _KEY_PARTS else key
+    audio = _section(config, "audio")
+    declared = _section(config, "language")
+    code = _stated(declared, "code") or (
+        parts[0] if len(parts) == _KEY_PARTS else None
     )
+    # The sidecar's own `family` where it has one — every voice in the published
+    # index does; checked against all six sidecars this repo downloads, which
+    # carry `code, country_english, family, name_english, name_native, region` —
+    # and otherwise the code's first part, since `code` is `<family>_<REGION>`
+    # throughout. The split is the sidecar's structure rather than a guess about
+    # it, which is what makes it a safe fallback for a hand-written sidecar that
+    # states only the code.
+    family = _stated(declared, "family") or (code or "").split("_")[0]
     name = config.get("dataset") or (parts[1] if len(parts) == _KEY_PARTS else key)
     quality = audio.get("quality") or (
         parts[2] if len(parts) == _KEY_PARTS else "medium"
@@ -497,6 +542,22 @@ def _describe(
             f"(found {rate!r}); the rate its samples will have cannot be inferred"
         )
 
+    # The second field with no fallback, and it earned the refusal the same way.
+    # Reached only when the sidecar states neither `family` nor `code` and the key
+    # does not parse — an operator-chosen `PIPER_VOICES` id beside a hand-written
+    # sidecar. `family` was then the whole key, which is a language code no
+    # caller's `language_code` can equal: the voice becomes silently unreachable
+    # by language while appearing in `GET /v1/models`' `languages` list, which is
+    # the answer-shaped void `remote.py` refuses for a backend and this refuses
+    # for a voice.
+    if not family:
+        raise ValueError(
+            f"voice {key!r} states no language.family or language.code in its "
+            f".onnx.json and its key does not parse as "
+            f"<family>_<REGION>-<name>-<quality>; the language it speaks cannot "
+            f"be inferred"
+        )
+
     return (
         engine.Voice(
             # Piper's own identifier doubles as the voice_id a caller names, so a
@@ -504,19 +565,19 @@ def _describe(
             # names something real.
             id=key,
             name=name,
-            description=f"Piper {name} ({language}, {quality})",
+            description=f"Piper {name} ({code or key}, {quality})",
             # The Piper facts with no ElevenLabs field of their own. Carried
             # rather than dropped: a caller choosing a voice wants the quality
             # tier, and `speakers` says out loud what a listener would otherwise
             # discover — there is no ElevenLabs field to select a speaker with, so
             # a multi-speaker model always speaks as its default.
             labels=(
-                ("language", language),
                 ("quality", quality),
                 ("engine", "piper"),
                 ("speakers", str(int(config.get("num_speakers") or 1))),
             ),
             models=serves,
+            language=family,
         ),
         int(rate),
     )

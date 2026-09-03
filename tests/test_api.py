@@ -323,6 +323,34 @@ def test_models_listing_has_the_elevenlabs_shape(client):
     assert body[0]["can_do_text_to_speech"] is True
 
 
+def test_every_model_advertises_the_languages_its_own_voices_speak(client):
+    """[LAW:one-source-of-truth] The two listings answer from the same voices.
+
+    `languages` is derived per entry — the voices an id actually reaches, not the
+    deployment-wide union `capabilities` beside it takes — and until now the only
+    test reading the field at all drove a router over two backends. The narrowing
+    was unexercised for the ordinary single-engine deployment this file serves,
+    which is the shape the Dockerfile in this change now bakes two languages into.
+
+    Asserted against `GET /v1/voices` rather than against a literal `["en"]`,
+    because the property is not which language this fixture happens to install:
+    it is that a caller choosing a `model_id` off one listing and a voice off the
+    other cannot be told two different things about what will be spoken. A
+    hardcoded expectation passes just as well when the derivation is replaced by a
+    constant, and says nothing about the two endpoints agreeing.
+    """
+    voices = client.get("/v1/voices").json()["voices"]
+    spoken = sorted({voice["language"] for voice in voices})
+    assert spoken, "the fixture installs no voice, so this proves nothing"
+
+    for entry in client.get("/v1/models").json():
+        # ElevenLabs' own object shape, so the codes are read back out of it
+        # rather than compared against it — the field carries a display `name`
+        # beside the id, and this is asking what is spoken, not how it is dressed.
+        advertised = [language["language_id"] for language in entry["languages"]]
+        assert advertised == spoken, entry["model_id"]
+
+
 def test_the_listing_names_every_model_id_the_service_will_accept(client):
     """[LAW:one-source-of-truth] Advertised and accepted are one answer.
 
@@ -660,3 +688,53 @@ def test_multi_speaker_voices_are_reported_in_the_listing(client):
     body = client.get("/v1/voices").json()
     assert body["voices"]
     assert all("speakers" in voice["labels"] for voice in body["voices"])
+
+
+@pytest.mark.parametrize("sent", ["", "   ", "-"])
+def test_a_blank_language_is_not_reported_as_a_dropped_preference(client, sent):
+    """The spelling a form or a JS client sends for "unset", end to end.
+
+    `spoken_language` has always answered `None` for these in isolation, and the
+    request still arrived carrying one: `SpeechRequest.requested` reads its
+    fields through `model_fields` and asked only whether the value `is not None`,
+    which `""` passes. So `language_code` entered the candidate list, `spoke`
+    compared a real voice's language against a blank and came back false, and the
+    header told a caller who had expressed no preference that theirs was dropped.
+
+    Asserted through the endpoint rather than on the validator, because the two
+    halves — what counts as asked for, and what counts as spoken — are read in
+    different modules and it was their disagreement that shipped.
+    """
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}/stream",
+        json={"text": "hello", "language_code": sent},
+    )
+    assert response.status_code == 200
+    assert "language_code" not in response.headers.get("x-elvenspeak-ignored", "")
+
+
+@pytest.mark.parametrize("sent", [5, ["es"], {"code": "es"}, True])
+def test_a_language_code_that_is_not_a_tag_is_refused_rather_than_dropped(
+    client, sent
+):
+    """The other half of the validator above, and the half it does not normalise.
+
+    `spoken_language` reduces anything naming no language to `None`, and `None` is
+    a value this field accepts — so routing a non-string through it would turn `5`
+    into a silently dropped parameter, which is the answer the test above exists to
+    make correct for `""` and the wrong one here. Blank is a caller expressing no
+    preference; `5` is a caller expressing a broken one, and the two deserve
+    different answers.
+
+    Asserted end to end for the same reason the blank case is: the behaviour is a
+    collaboration between this validator declining to normalise and pydantic's own
+    `str | None` refusing what it hands on, and a unit test on either half alone
+    passes while the pair disagrees. `True` is in the table because `bool` is an
+    `int` and not a `str` — it takes the same path, and a guard rewritten as a
+    truthiness check would let it through.
+    """
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}/stream",
+        json={"text": "hello", "language_code": sent},
+    )
+    assert response.status_code == 422, response.text

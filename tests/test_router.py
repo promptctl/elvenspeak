@@ -9,6 +9,7 @@ different program. The engines behind those servers are the existing
 from __future__ import annotations
 
 from contextlib import ExitStack
+from dataclasses import replace
 
 import pytest
 from fastapi import FastAPI, Response
@@ -38,11 +39,21 @@ BETA_MODELS = frozenset({"beta", "eleven_beta_v1"})
 
 ALPHA_VOICES = (
     Voice(
-        id="alpha-one", name="Alpha One", description="alpha's", models=ALPHA_MODELS
+        id="alpha-one",
+        name="Alpha One",
+        description="alpha's",
+        models=ALPHA_MODELS,
+        language="en",
     ),
 )
 BETA_VOICES = (
-    Voice(id="beta-one", name="Beta One", description="beta's", models=BETA_MODELS),
+    Voice(
+        id="beta-one",
+        name="Beta One",
+        description="beta's",
+        models=BETA_MODELS,
+        language="en",
+    ),
 )
 
 
@@ -161,6 +172,7 @@ def test_two_engines_offering_the_same_voice_id_stop_the_boot():
             name="Contested",
             description="offered twice",
             models=frozenset({"shared-engine"}),
+            language="en",
         ),
     )
     with cluster(("alpha", shared, EVERYTHING), ("beta", shared, EVERYTHING)) as consul:
@@ -255,6 +267,63 @@ def test_each_voice_carries_what_its_own_backend_will_honour():
 
     assert offered["alpha-one"] == EVERYTHING
     assert offered["beta-one"] == NOTHING
+
+
+def test_each_voice_carries_the_language_its_own_backend_speaks():
+    """The language axis across a fleet, which every fixture in this file hides.
+
+    Every voice here says `en`, so a router that read one backend's language for
+    all of its voices, or collapsed the fleet onto a single value, passes the rest
+    of the file. Built the way the capability test above is built — the two
+    backends made deliberately to disagree — because agreement is what a bug of
+    this shape looks like from the outside.
+
+    The fleet is the shape a Spanish deployment actually takes: one backend baking
+    English voices, another baking Spanish ones, behind one endpoint. If the
+    languages merged into one value, `Catalog.speaking` narrows onto the wrong
+    half of the fleet and a Spanish request is answered in English — the failure
+    this epic exists to end, arriving through the router instead of through a
+    missing field.
+    """
+    hablante = replace(BETA_VOICES[0], id="beta-uno", language="es")
+
+    with cluster(
+        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", (hablante,), EVERYTHING)
+    ) as consul:
+        spoken = {voice.id: voice.language for voice in opened(consul).voices()}
+
+    assert spoken == {"alpha-one": "en", "beta-uno": "es"}
+
+
+def test_a_language_steers_a_request_to_the_backend_that_speaks_it():
+    """The same fleet, through the surface a caller actually reaches.
+
+    The listing above proves the languages survive the merge; this proves they
+    steer. A router that carried the field into `GET /v1/voices` and then resolved
+    without it would pass that test and answer this request in English — which is
+    exactly the split the whole epic is about, since nothing audible says which
+    happened.
+
+    The caller names alpha's English voice and asks for Spanish, so the language
+    has to outrank the id *and* cross a backend boundary to be honoured. The two
+    headers together are the proof: one says a Spanish voice spoke, the other says
+    nothing was dropped to make that happen.
+    """
+    hablante = replace(BETA_VOICES[0], id="beta-uno", language="es")
+
+    with cluster(
+        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", (hablante,), EVERYTHING)
+    ) as consul:
+        response = routed(consul).post(
+            "/v1/text-to-speech/alpha-one/stream",
+            json={"text": "hola", "language_code": "es"},
+            params={"output_format": "pcm_22050"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["x-elvenspeak-voice"] == "beta-uno"
+    assert response.headers["x-elvenspeak-voice-requested"] == "alpha-one"
+    assert "language_code" not in response.headers.get("x-elvenspeak-ignored", "")
 
 
 def test_a_fleet_with_no_engines_boots_and_offers_nothing():
@@ -395,6 +464,7 @@ def test_a_backend_that_cannot_describe_itself_fails_the_boot_by_name():
                     "name": "Ancient",
                     "capabilities": ["speed"],
                     "models": ["ancient"],
+                    "language": "en",
                 }
             ]
         }
@@ -527,6 +597,7 @@ def test_a_timestamp_that_is_not_a_usable_number_fails_the_request(alignment):
                     "name": "Alpha One",
                     "capabilities": ["speed", "timestamps"],
                     "models": ["odd"],
+                    "language": "en",
                 }
             ]
         }
@@ -695,6 +766,67 @@ def test_a_backend_that_names_no_model_ids_fails_the_boot(published, why):
     assert "named no models" in message, why
 
 
+@pytest.mark.parametrize(
+    "published, why",
+    [
+        ({}, "omits the field"),
+        ({"language": ""}, "publishes an empty code"),
+        ({"language": None}, "publishes a null"),
+        ({"language": 5}, "publishes a number"),
+        ({"language": ["es"]}, "publishes a list"),
+    ],
+    ids=["absent", "empty", "null", "number", "list"],
+)
+def test_a_backend_that_names_no_language_fails_the_boot(published, why):
+    """The rolling deploy `piper-language-j1c.2` opens, held to the `models` bar.
+
+    A backend from before per-voice languages publishes voices carrying
+    `capabilities` and `models` — new enough to pass both checks above — and says
+    nothing about what its voices speak. There is no honest default: read as `""`,
+    the voice matches no caller's `language_code`, so the router narrows every
+    Spanish request onto an empty table, falls back to the whole fleet, and
+    reports `language_code` ignored for a backend that may well have baked the
+    Spanish voice this epic exists to reach. Silent, audible only as English
+    phonemes over Spanish words, and the same class of wrong answer the `models`
+    check refuses — so the boot stops here too, naming the backend.
+
+    The wire is untrusted JSON, so a value that is not a string at all is the
+    same fact in a different shape and gets the same refusal. That case pins the
+    fold: `spoken_language` is what decides a non-string names no language, and a
+    `str()` anywhere on this path would mint `"5"` as a language a voice speaks.
+    """
+    mute = FastAPI()
+
+    @mute.get("/v1/models")
+    def models():
+        return [{"model_id": "mute", "capabilities": ["speed"]}]
+
+    @mute.get("/v1/voices")
+    def voices() -> dict:
+        return {
+            "voices": [
+                {
+                    "voice_id": "mute-one",
+                    "name": "Mute One",
+                    "capabilities": ["speed"],
+                    "models": ["mute"],
+                }
+                | published
+            ]
+        }
+
+    with serving(mute) as backend, serving(
+        registered_consul([Registered(service="elvenspeak-mute", base_url=backend)])
+    ) as consul:
+        with pytest.raises(ConfigError) as raised:
+            opened(consul)
+
+    message = str(raised.value)
+    assert "elvenspeak-mute" in message, why
+    assert "mute-one" in message, why
+    assert "named no language" in message, why
+
+
 # ------------------------------------------------- the engine axis, end to end
 #
 # `piper-routing-7e2.17`, whose symptoms were all measured against the running
@@ -809,3 +941,67 @@ def test_an_id_no_backend_answers_to_is_still_ignored_rather_than_refused():
 
     assert response.status_code == 200, response.text
     assert "model_id" in response.headers["x-elvenspeak-ignored"]
+
+
+def test_a_model_id_the_language_steered_away_from_is_refused_not_reported():
+    """The engine axis holds even when a language moved the request off it.
+
+    The caller names alpha's voice, alpha's own `model_id`, and Spanish — a
+    combination that was valid before languages steered anything, and that the
+    fleet can no longer honour whole: the Spanish voice lives on beta. One of the
+    two has to give, and it is not the engine. A voice can substitute because a
+    substitute voice is still an answer to "say this"; a caller who asked for
+    alpha and gets fluent beta was answered by something else entirely, and a
+    header naming `model_id` as ignored is not consent.
+
+    So this is a 422, and the test exists because narrowing made an old
+    combination newly refusable — nothing else here sends `model_id` with a
+    language at all. The message has to name what the caller sent: it used to
+    name only `beta-uno`, a voice they never asked for and could not connect to
+    anything in their request.
+    """
+    hablante = replace(BETA_VOICES[0], id="beta-uno", language="es")
+
+    with cluster(
+        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", (hablante,), EVERYTHING)
+    ) as consul:
+        response = routed(consul).post(
+            "/v1/text-to-speech/alpha-one/stream",
+            json={"text": "hola", "language_code": "es", "model_id": "alpha"},
+            params={"output_format": "pcm_22050"},
+        )
+
+    assert response.status_code == 422, response.text
+    message = response.json()["detail"]["message"]
+    assert "alpha" in message
+    assert "alpha-one" in message
+    # The field and its value together. Bare `"es"` is already in "does" and in
+    # "resolved", so it asserts a property of the sentence rather than of the
+    # value, and would pass with `language_code` dropped from the message.
+    assert "language_code 'es'" in message
+def test_a_model_lists_only_the_languages_its_own_backend_speaks():
+    """`GET /v1/models` and the 422 have to read the same fact.
+
+    `languages` was a union over the whole fleet stamped onto every entry, which
+    reads harmlessly next to `capabilities` — that one is a union too — and is
+    not, because the two overclaims cost differently. A capability an engine's
+    voices lack degrades: the 501 gate and `x-elvenspeak-ignored` read the
+    resolved voice's own set. A language they do not speak walks a client into a
+    refusal: it picks `alpha` because the listing showed `es`, sends it with
+    `language_code=es`, and gets the 422 the test above asserts.
+
+    Two maps of one territory, and the refusal is the one that had to be right.
+    """
+    hablante = replace(BETA_VOICES[0], id="beta-uno", language="es")
+
+    with cluster(
+        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", (hablante,), EVERYTHING)
+    ) as consul:
+        listed = routed(consul).get("/v1/models").json()
+
+    spoken = {
+        entry["model_id"]: [item["language_id"] for item in entry["languages"]]
+        for entry in listed
+    }
+    assert spoken["alpha"] == ["en"]
+    assert spoken["beta"] == ["es"]

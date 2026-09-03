@@ -151,6 +151,7 @@ class ToneEngine:
                 # have derived this — and a router in front of it reads the
                 # answer off each voice to know which engine speaks it.
                 models=self._serves,
+                language="en",
             )
             for name, hertz in self._pitches
         )
@@ -391,10 +392,18 @@ def test_the_listing_is_the_supplied_engines_voices(client):
     the engine's own order means something else — see the test below. Asserting
     the engine's order here would pin a coincidence and go red the day somebody
     renames a voice.
+
+    `language` is asserted alongside `labels`, because it is the other per-voice
+    fact the wire carries and the newest: an outside engine states it on every
+    voice, and a serialization that dropped it would leave a stock client unable
+    to pick a voice for the language it holds, silently. It has no counterpart in
+    `labels` on purpose — it earned a field of its own — so nothing else here
+    would notice its absence.
     """
     listed = client.get("/v1/voices").json()["voices"]
     assert {voice["voice_id"] for voice in listed} == {"tone-low", "tone-high"}
     assert all(voice["labels"]["engine"] == "tone" for voice in listed)
+    assert all(voice["language"] == "en" for voice in listed)
 
 
 def test_the_engine_axis_reaches_a_supplied_engine_too(client):

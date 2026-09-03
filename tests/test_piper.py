@@ -146,7 +146,13 @@ def test_a_minimal_config_derives_its_metadata_from_the_key(tmp_path):
     voice = load(tmp_path).voices()[0]
     labels = dict(voice.labels)
     assert voice.name == "lessac"
-    assert labels["language"] == "en_US"
+    # Both halves of the key-derived language: the display code the description
+    # carries, and the ISO family a caller's `language_code` is matched on. A
+    # sidecar this bare exercises the fallback for both, and they are derived one
+    # from the other — asserting only the family would pass on a key split that
+    # dropped the region entirely.
+    assert "en_US" in voice.description
+    assert voice.language == "en"
     assert labels["quality"] == "medium"
 
 
@@ -164,8 +170,72 @@ def test_an_explicitly_null_section_reads_as_an_absent_one(tmp_path):
         encoding="utf-8",
     )
     voice = load(tmp_path).voices()[0]
-    assert dict(voice.labels)["language"] == "en_US"
+    assert "en_US" in voice.description
+    assert voice.language == "en"
     assert voice.name == "lessac"
+
+
+def test_the_sidecars_own_family_is_what_a_voice_speaks(tmp_path):
+    """The primary source for `Voice.language`, which nothing else here reaches.
+
+    Every other fixture states only `language.code`, so every other test exercises
+    the `code.split("_")` fallback — and an implementation that ignored the
+    sidecar's `family` outright would pass all of them. Every real downloaded
+    voice takes this branch instead, which makes it the one that decides the
+    language of everything a deployment actually bakes.
+
+    The fixture makes `family` **disagree** with the split, which is what gives
+    the assertion teeth: `pt_BR` would derive `pt`, so a `family` of `es` can only
+    come from the sidecar. No real voice disagrees this way — the point is that
+    the test cannot pass by accident.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / f"{KEY}.onnx").write_bytes(b"not a real model")
+    (tmp_path / f"{KEY}.onnx.json").write_text(
+        json.dumps(
+            {
+                "language": {"code": "pt_BR", "family": "es"},
+                "audio": {"sample_rate": 22050},
+                "dataset": "lessac",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    voice = load(tmp_path).voices()[0]
+
+    assert voice.language == "es"
+    # The display code stays the sidecar's own, so the two are visibly separate
+    # facts rather than one derived twice.
+    assert "pt_BR" in voice.description
+
+
+def test_a_voice_that_states_no_language_at_all_is_refused(tmp_path):
+    """[LAW:no-silent-failure] The second field with no honest default.
+
+    A sidecar stating neither `family` nor `code`, under a key that does not parse
+    as `<family>_<REGION>-<name>-<quality>` — an operator-chosen `PIPER_VOICES` id
+    beside a hand-written sidecar, which is the only way to reach it. The language
+    was then the whole key, a code no caller's `language_code` can equal, so the
+    voice was silently unreachable by language while listed in `GET /v1/models`'
+    `languages` as though it spoke one.
+
+    Refused at load like a missing `sample_rate` and for the same reason: the
+    alternative is a value that looks like an answer and is not. Named in the
+    message, so an operator learns which of their voices it was.
+    """
+    key = "customvoice"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / f"{key}.onnx").write_bytes(b"not a real model")
+    (tmp_path / f"{key}.onnx.json").write_text(
+        json.dumps({"audio": {"sample_rate": 22050}}), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError) as raised:
+        piper_prepared(tmp_path, voices=(key,)).open().voices()
+
+    assert key in str(raised.value)
+    assert "language" in str(raised.value)
 
 
 def test_engine_facts_with_no_elevenlabs_field_travel_as_labels(tmp_path):
@@ -470,3 +540,76 @@ def test_the_voices_a_build_reports_declare_what_the_ones_it_boots_will(tmp_path
 
     assert baked_models == booted_models
     assert baked_models["en_US-lessac-medium"] == serves("piper")
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        {"code": 5},
+        {"family": 5},
+        {"code": 5, "family": 5},
+        {"family": "   "},
+        "es",
+        ["es"],
+        5,
+    ],
+)
+def test_a_sidecar_that_states_a_language_that_is_not_one_is_refused(
+    tmp_path, declared
+):
+    """A hand-written `.onnx.json` is untrusted the way the wire is.
+
+    `{"code": 5}` used to reach `(5 or "").split("_")` and raise `AttributeError`
+    from inside an expression — a crash at boot naming nothing, where every other
+    language problem in this file names the voice. `{"family": 5}` was worse: `5`
+    is truthy, so it passed the emptiness check and put an `int` on
+    `Voice.language`, which surfaced later as a `TypeError` sorting the
+    `languages` list on `GET /v1/models`, one endpoint and one deploy away.
+
+    The bare rows are the section itself malformed rather than a value inside it,
+    and `"es"` is the one an operator actually writes: it is what `language` looks
+    like everywhere else in this service, so a hand-written sidecar reaches for it
+    instead of `{"code": "es"}`. Being truthy, it slipped past the emptiness check
+    the null rows had covered and reached `"es".get("code")` — the same
+    `AttributeError` at boot, one level up.
+
+    All of them land on the same refusal, because a section of the wrong type, a
+    value of the wrong type and an absent one are the same fact — the sidecar
+    states no language — and the key here supplies no fallback either.
+    """
+    key = "customvoice"
+    (tmp_path / f"{key}.onnx").write_bytes(b"not a real model")
+    (tmp_path / f"{key}.onnx.json").write_text(
+        json.dumps({"audio": {"sample_rate": 22050}, "language": declared}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as raised:
+        piper_prepared(tmp_path, voices=(key,)).open().voices()
+
+    assert key in str(raised.value)
+    assert "language" in str(raised.value)
+
+
+@pytest.mark.parametrize("declared", ["22050", [22050], 22050])
+def test_a_sidecar_whose_audio_section_is_not_one_is_refused(tmp_path, declared):
+    """The other section the same crossing guards, held to the same bar.
+
+    `audio` is read exactly as `language` is — `.get` against whatever the file
+    put there — so a sidecar stating `"audio": 22050` instead of
+    `{"sample_rate": 22050}` reached `22050.get("quality")` and crashed at boot
+    naming nothing. Tested here rather than left to the language rows above
+    because one guard now answers for both sections, and a fix that covers two
+    call sites is only proved by exercising both.
+
+    The refusal it lands on is the rate's, not the language's: with no readable
+    section there is no sample rate, and that is already the one field this
+    module refuses to guess.
+    """
+    _write_sidecar(tmp_path, {"audio": declared, "language": {"code": "en_US"}})
+
+    with pytest.raises(ValueError) as raised:
+        load(tmp_path).voices()
+
+    assert KEY in str(raised.value)
+    assert "sample_rate" in str(raised.value)
