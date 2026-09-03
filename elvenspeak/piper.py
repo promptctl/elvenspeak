@@ -466,6 +466,30 @@ def _stated(declared: dict, name: str) -> str | None:
     return value.strip() or None if isinstance(value, str) else None
 
 
+def _section(config: dict, name: str) -> dict:
+    """One section of a sidecar, where the sidecar states a real one.
+
+    [LAW:parse-dont-validate] The crossing [`_stated`] makes for a field, made
+    for the section holding it. Every field below is read with `.get`, so a
+    section that is not an object has to become the empty one here or raise
+    `AttributeError` from inside an expression — the crash that names nothing,
+    in place of the refusal this module's callers raise for every other
+    malformed sidecar.
+
+    Two spellings preceded this and each covered half. `.get(name, {})`
+    substitutes only for an absent key, so an explicit null returned `None`;
+    `or {}` covered that and still let a truthy `"language": "es"` — the shape a
+    hand-written sidecar reaches for instead of `{"code": "es"}` — through to
+    `"es".get("code")`. Both land on the key-derived fallbacks these expressions
+    already promise, and on the refusal when the key supplies none either.
+
+    Read into a local per section rather than inlined at each field; the two
+    spellings of `audio` were how they came to disagree.
+    """
+    section = config.get(name)
+    return section if isinstance(section, dict) else {}
+
+
 def _describe(
     key: str, model_path: Path, serves: frozenset[str]
 ) -> tuple[engine.Voice, int]:
@@ -483,14 +507,8 @@ def _describe(
         config = json.load(handle)
 
     parts = key.split("-")
-    # `or {}` throughout rather than a default argument: `.get(name, {})`
-    # substitutes only for an absent key, so an explicit null in a hand-edited or
-    # half-written sidecar returned None and the chained lookup raised
-    # AttributeError — instead of the key-derived fallback these expressions
-    # already promise. Read into locals so each section is spelled once; the two
-    # spellings of `audio` were how they came to disagree.
-    audio = config.get("audio") or {}
-    declared = config.get("language") or {}
+    audio = _section(config, "audio")
+    declared = _section(config, "language")
     code = _stated(declared, "code") or (
         parts[0] if len(parts) == _KEY_PARTS else None
     )

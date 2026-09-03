@@ -549,6 +549,9 @@ def test_the_voices_a_build_reports_declare_what_the_ones_it_boots_will(tmp_path
         {"family": 5},
         {"code": 5, "family": 5},
         {"family": "   "},
+        "es",
+        ["es"],
+        5,
     ],
 )
 def test_a_sidecar_that_states_a_language_that_is_not_one_is_refused(
@@ -563,9 +566,16 @@ def test_a_sidecar_that_states_a_language_that_is_not_one_is_refused(
     `Voice.language`, which surfaced later as a `TypeError` sorting the
     `languages` list on `GET /v1/models`, one endpoint and one deploy away.
 
-    Both land on the same refusal now, because a value of the wrong type and a
-    value that is absent are the same fact — the sidecar states no language —
-    and the key here supplies no fallback either.
+    The bare rows are the section itself malformed rather than a value inside it,
+    and `"es"` is the one an operator actually writes: it is what `language` looks
+    like everywhere else in this service, so a hand-written sidecar reaches for it
+    instead of `{"code": "es"}`. Being truthy, it slipped past the emptiness check
+    the null rows had covered and reached `"es".get("code")` — the same
+    `AttributeError` at boot, one level up.
+
+    All of them land on the same refusal, because a section of the wrong type, a
+    value of the wrong type and an absent one are the same fact — the sidecar
+    states no language — and the key here supplies no fallback either.
     """
     key = "customvoice"
     (tmp_path / f"{key}.onnx").write_bytes(b"not a real model")
@@ -579,3 +589,27 @@ def test_a_sidecar_that_states_a_language_that_is_not_one_is_refused(
 
     assert key in str(raised.value)
     assert "language" in str(raised.value)
+
+
+@pytest.mark.parametrize("declared", ["22050", [22050], 22050])
+def test_a_sidecar_whose_audio_section_is_not_one_is_refused(tmp_path, declared):
+    """The other section the same crossing guards, held to the same bar.
+
+    `audio` is read exactly as `language` is — `.get` against whatever the file
+    put there — so a sidecar stating `"audio": 22050` instead of
+    `{"sample_rate": 22050}` reached `22050.get("quality")` and crashed at boot
+    naming nothing. Tested here rather than left to the language rows above
+    because one guard now answers for both sections, and a fix that covers two
+    call sites is only proved by exercising both.
+
+    The refusal it lands on is the rate's, not the language's: with no readable
+    section there is no sample rate, and that is already the one field this
+    module refuses to guess.
+    """
+    _write_sidecar(tmp_path, {"audio": declared, "language": {"code": "en_US"}})
+
+    with pytest.raises(ValueError) as raised:
+        load(tmp_path).voices()
+
+    assert KEY in str(raised.value)
+    assert "sample_rate" in str(raised.value)
