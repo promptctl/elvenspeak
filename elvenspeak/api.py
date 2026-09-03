@@ -617,8 +617,10 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
                     # and a message claiming otherwise would send an operator
                     # looking for a backend that is up.
                     "message": (
-                        f"model_id {body.model_id!r} names an engine that is not "
-                        f"speaking voice {resolution.voice.id!r}"
+                        f"model_id {body.model_id!r} does not name the engine "
+                        f"speaking voice {resolution.voice.id!r}, which is what "
+                        f"voice_id {resolution.requested!r} and language_code "
+                        f"{body.language_code!r} resolved to"
                     ),
                     "served": list(directory.listed()),
                 },

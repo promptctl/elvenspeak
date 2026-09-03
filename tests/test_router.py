@@ -934,3 +934,38 @@ def test_an_id_no_backend_answers_to_is_still_ignored_rather_than_refused():
 
     assert response.status_code == 200, response.text
     assert "model_id" in response.headers["x-elvenspeak-ignored"]
+
+
+def test_a_model_id_the_language_steered_away_from_is_refused_not_reported():
+    """The engine axis holds even when a language moved the request off it.
+
+    The caller names alpha's voice, alpha's own `model_id`, and Spanish — a
+    combination that was valid before languages steered anything, and that the
+    fleet can no longer honour whole: the Spanish voice lives on beta. One of the
+    two has to give, and it is not the engine. A voice can substitute because a
+    substitute voice is still an answer to "say this"; a caller who asked for
+    alpha and gets fluent beta was answered by something else entirely, and a
+    header naming `model_id` as ignored is not consent.
+
+    So this is a 422, and the test exists because narrowing made an old
+    combination newly refusable — nothing else here sends `model_id` with a
+    language at all. The message has to name what the caller sent: it used to
+    name only `beta-uno`, a voice they never asked for and could not connect to
+    anything in their request.
+    """
+    hablante = replace(BETA_VOICES[0], id="beta-uno", language="es")
+
+    with cluster(
+        ("alpha", ALPHA_VOICES, EVERYTHING), ("beta", (hablante,), EVERYTHING)
+    ) as consul:
+        response = routed(consul).post(
+            "/v1/text-to-speech/alpha-one/stream",
+            json={"text": "hola", "language_code": "es", "model_id": "alpha"},
+            params={"output_format": "pcm_22050"},
+        )
+
+    assert response.status_code == 422, response.text
+    message = response.json()["detail"]["message"]
+    assert "alpha" in message
+    assert "alpha-one" in message
+    assert "es" in message
