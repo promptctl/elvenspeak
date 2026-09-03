@@ -56,7 +56,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import alignment as align_mod
 from . import encoding, models, text, voices
-from .engine import Capability, Engine, Prosody, Silence, Voice
+from .engine import Capability, Engine, Prosody, Silence, Voice, spoken_language
 from .formats import (
     DEFAULT_OUTPUT_FORMAT,
     SUPPORTED_OUTPUT_FORMATS,
@@ -193,6 +193,27 @@ class SpeechRequest(BaseModel):
 
     model_id: str | None = None
     language_code: str | None = None
+
+    @field_validator("language_code", mode="before")
+    @classmethod
+    def _blank_is_no_language(cls, value: object) -> object:
+        """Reduces a language tag to the family a voice speaks, or to nothing.
+
+        [LAW:parse-dont-validate] The crossing, so that every later reader holds
+        a tag already comparable to [`engine.Voice.language`] and none of them
+        normalises again. Both did before, and a third could not: [`requested`]
+        reads this field through `model_fields` and cannot special-case it, so a
+        `""` — what a form or a JS client sends for "unset" — counted as a
+        language asked for, matched no voice, and came back named in
+        `x-elvenspeak-ignored` on every such request. A caller who expressed no
+        preference was told their preference was dropped.
+
+        Normalised rather than refused, because `es-MX`, `es_MX` and `ES` are all
+        the same question and ElevenLabs accepts them; only a value naming no
+        language at all becomes `None`, which is what absence already means here.
+        """
+        return spoken_language(value) if isinstance(value, str) else value
+
     seed: int | None = Field(default=None, ge=0, le=4294967295)
     previous_text: str | None = None
     next_text: str | None = None
@@ -295,8 +316,9 @@ def _honoured(
     the caller holds both the request and the resolved voice, and threading each
     new fact in as its own parameter is how this function grows a signature per
     axis. Comparing one already-normalised language to another is the whole of
-    that half, and [`elvenspeak.voices.spoken_language`] is where the
-    normalisation lives.
+    that half — both sides were stamped by [`elvenspeak.engine.spoken_language`]
+    before they arrived, the request's at its field validator and the voice's in
+    [`engine.Voice.__post_init__`].
 
     Per request, and not cacheable: behind [`elvenspeak.router`] the same
     parameter is honoured for one voice and reported ignored for the next, in the
@@ -578,9 +600,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         what that status is for here and what `output_format` already answers.
         """
         try:
-            resolution = cat.resolve(
-                voice_id, voices.spoken_language(body.language_code)
-            )
+            resolution = cat.resolve(voice_id, body.language_code)
         except voices.VoiceNotInstalled as error:
             raise HTTPException(status_code=404, detail=str(error)) from None
 
@@ -626,14 +646,8 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
                 honoured(resolution.voice),
                 directory.reach(body.model_id, resolution.voice.models),
                 # The voice that resolved really speaks what was asked for.
-                # `resolve` narrowed the catalog by this same language, so this is
-                # false only when no installed voice could speak it — the case
-                # `Catalog.speaking` deliberately lets through rather than
-                # refusing, and the case this header exists to name.
-                spoke=(
-                    resolution.voice.language
-                    == voices.spoken_language(body.language_code)
-                ),
+                # When it does not, `Catalog.resolve`'s docstring says why.
+                spoke=resolution.voice.language == body.language_code,
             )
         )
         if ignored:

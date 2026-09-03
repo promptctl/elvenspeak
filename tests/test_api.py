@@ -660,3 +660,26 @@ def test_multi_speaker_voices_are_reported_in_the_listing(client):
     body = client.get("/v1/voices").json()
     assert body["voices"]
     assert all("speakers" in voice["labels"] for voice in body["voices"])
+
+
+@pytest.mark.parametrize("sent", ["", "   ", "-"])
+def test_a_blank_language_is_not_reported_as_a_dropped_preference(client, sent):
+    """The spelling a form or a JS client sends for "unset", end to end.
+
+    `spoken_language` has always answered `None` for these in isolation, and the
+    request still arrived carrying one: `SpeechRequest.requested` reads its
+    fields through `model_fields` and asked only whether the value `is not None`,
+    which `""` passes. So `language_code` entered the candidate list, `spoke`
+    compared a real voice's language against a blank and came back false, and the
+    header told a caller who had expressed no preference that theirs was dropped.
+
+    Asserted through the endpoint rather than on the validator, because the two
+    halves — what counts as asked for, and what counts as spoken — are read in
+    different modules and it was their disagreement that shipped.
+    """
+    response = client.post(
+        f"/v1/text-to-speech/{VOICE}/stream",
+        json={"text": "hello", "language_code": sent},
+    )
+    assert response.status_code == 200
+    assert "language_code" not in response.headers.get("x-elvenspeak-ignored", "")
