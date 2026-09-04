@@ -40,6 +40,8 @@ does not pretend to be measured — are ones only the real library can answer fo
 from __future__ import annotations
 
 import re
+import threading
+import time
 
 import pytest
 from conftest import (
@@ -336,6 +338,108 @@ def test_the_setuptools_pin_that_keeps_the_watermarker_importable_is_still_there
         requirement.replace(" ", "").startswith("setuptools<")
         for requirement in requirements
     ), requirements
+
+
+# ------------------------------------------------------- who `builtin` turns out to be
+
+
+class _MarkedConditionals:
+    """A cloned identity distinguishable in the samples it produces."""
+
+    def __init__(self, mark: float) -> None:
+        self.mark = mark
+
+
+class _AlreadyCloned:
+    """A model at the point `_cloned` really meets it: holding the last clone."""
+
+    def __init__(self, conds) -> None:
+        self.conds = conds
+
+
+def test_the_builtin_speaker_is_the_checkpoints_own_voice_however_late_it_is_named(
+    tmp_path,
+):
+    """[LAW:no-ambient-temporal-coupling] Cloning order cannot decide who `builtin` is.
+
+    `prepare_conditionals` writes `model.conds`, and `voices` makes the
+    configured speaker order load-bearing rather than sorted, so
+    `CHATTERBOX_SPEAKERS=alice,builtin` is ordinary input and reaches this
+    function with the model holding alice. Read back off the model, `builtin`
+    would be alice — every `builtin-*` voice a different person, baked into the
+    image at build, with nothing raised and nothing logged.
+    """
+    checkpoint = _MarkedConditionals(0.25)
+    model = _AlreadyCloned(_MarkedConditionals(0.75))
+
+    assert chatterbox._cloned(model, "builtin", tmp_path, checkpoint) is checkpoint
+
+
+# ----------------------------------------- speaking two voices at the same time
+
+
+class _EchoingModel:
+    """A model that answers with whichever speaker `conds` names when it reads it.
+
+    The real `generate` reads `self.conds` partway through its work, which is
+    what makes a second writer able to land between another caller's write and
+    its read. This one reproduces that shape and nothing else: it waits, then
+    reads, then says what it read — turning "answered in somebody else's voice"
+    into a value a test can compare instead of something only an ear can catch.
+    """
+
+    def __init__(self, torch) -> None:
+        self.conds = None
+        self._torch = torch
+
+    def generate(self, text: str, language_id: str):
+        time.sleep(0.05)
+        return self._torch.full((1, 1), self.conds.mark)
+
+
+def test_two_voices_spoken_at_once_are_each_answered_in_their_own_voice():
+    """The engine serialises synthesis, so overlap cannot swap two callers' speakers.
+
+    Selecting a voice means writing to the model object, and the server calls
+    engines off the event loop, so two requests naming two voices really are
+    inside `speak` at once. Unserialised, the second one's write lands between
+    the first one's write and its read and the first caller is answered as
+    somebody else — audio that is fluent and simply the wrong person, which no
+    assertion about rates or lengths would ever catch.
+
+    Asserted against each voice's own uncontended result rather than against the
+    lock: any implementation that keeps the two apart passes, and one that stops
+    keeping them apart fails.
+    """
+    torch = pytest.importorskip("torch")
+
+    voices = {
+        speaker: chatterbox._describe(
+            speaker, "en", _MarkedConditionals(mark), serves("chatterbox")
+        )
+        for speaker, mark in (("alice", 0.25), ("bob", 0.75))
+    }
+    serving = chatterbox.ChatterboxEngine(
+        _EchoingModel(torch), {item.voice.id: item for item in voices.values()}, 24000
+    )
+
+    def spoken(speaker: str) -> bytes:
+        return serving.speak_timed(voices[speaker].voice, TEXT, Prosody()).pcm
+
+    alone = {speaker: spoken(speaker) for speaker in voices}
+    assert alone["alice"] != alone["bob"], "the stand-in cannot tell the two apart"
+
+    together: dict[str, bytes] = {}
+    threads = [
+        threading.Thread(target=lambda s=speaker: together.__setitem__(s, spoken(s)))
+        for speaker in voices
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert together == alone
 
 
 # ============================================================================
