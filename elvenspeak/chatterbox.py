@@ -81,7 +81,7 @@ and Kokoro ~0.77 on this class of machine.
     device                          RTF, warm     resident
     RTX 2070 (CUDA, fp32)           0.76 - 1.09   3.2 GiB VRAM + 3.5 GiB host
     Apple M-series GPU (MPS, fp32)  2.33 - 4.30   ~4.8 GiB unified
-    CPU (12 cores)                  7.62 - 33.3   4.8 GiB, 6.8 GiB peak
+    CPU (12 cores, 4 threads)       7.62 - 33.3   4.8 GiB, 6.8 GiB peak
 
 Three things follow, and each of them is a decision in the code below.
 
@@ -455,10 +455,15 @@ class _Prepared:
         model = ChatterboxMultilingualTTS.from_local(checkpoints, self.device)
 
         # [LAW:no-ambient-temporal-coupling] Taken before the speaker loop, which
-        # overwrites `model.conds` on every clone. The operator is free to name
+        # rebinds `model.conds` on every clone. The operator is free to name
         # `builtin` after a reference speaker, and read inside the loop this would
         # be whichever speaker was cloned last — every `builtin-*` voice would
         # silently become that person, fluently and with nothing raised.
+        #
+        # A reference is enough because `prepare_conditionals` ends
+        # `self.conds = Conditionals(...)` — it constructs a new one rather than
+        # writing into the old. Were it to mutate in place, this line would read
+        # like a fix and be none, so it is the library behaviour this depends on.
         builtin = model.conds
 
         spoken: dict[str, _Spoken] = {}
