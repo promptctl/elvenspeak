@@ -28,6 +28,7 @@ from pathlib import Path
 from elvenspeak.engines import ENGINES
 
 WORKFLOW = Path(__file__).parent.parent / ".gitea" / "workflows" / "publish-image.yaml"
+ENGINE_SOURCE = Path(__file__).parent.parent / "elvenspeak" / "chatterbox.py"
 
 #: The build matrix's one axis. Matched against the file with its comments
 #: removed — this workflow's comments discuss the engine list at length, and a
@@ -83,3 +84,43 @@ def test_no_engine_is_built_twice():
     """
     engines = matrix_engines()
     assert len(engines) == len(set(engines)), engines
+
+
+#: The CPU row of `elvenspeak.chatterbox`'s measurement table: resident, then peak.
+_MEASURED = re.compile(r"^\s*CPU \([^)]*\)\s+[\d.\s-]+\s+([\d.]+) GiB, ([\d.]+) GiB peak\s*$", re.MULTILINE)
+
+#: The same two figures where the workflow quotes them at an operator.
+_QUOTED = re.compile(r"([\d.]+) GiB resident and ([\d.]+) GiB peak")
+
+
+def test_the_ram_the_workflow_quotes_is_the_ram_the_engine_measured():
+    """[LAW:one-source-of-truth] One measurement, quoted in the place it is acted on.
+
+    The workflow tells whoever runs `git push gitea master` to check this
+    runner's free RAM against a figure, because a chatterbox leg that peaks over
+    what the host has left is an OOM kill on some other leg — a build failure
+    with nothing to do with the commit that hit it. So the number has to be
+    right where it is read, and a YAML comment cannot compute one.
+
+    These two lived apart and had already drifted: the table said 4.8/6.8 and the
+    workflow 4.69/6.68, which is not a rounding of it. Nobody would have caught
+    that by reading either file, and the direction of the error is the dangerous
+    one — a comment that understates the peak reads exactly like a safe one.
+
+    Both figures are read as source text, never through `chatterbox.__doc__`, for
+    the reason this module's own docstring gives about the workflow: the file is
+    the artifact, and anything else is a copy that can go stale in the direction
+    that hides the bug. Which is not hypothetical here — an edit that kept the
+    row's byte length and landed in the same second as the last import left
+    `__doc__` reporting the previous numbers off a `.pyc` Python thought current.
+    """
+    measured = _MEASURED.search(ENGINE_SOURCE.read_text(encoding="utf-8"))
+    assert measured, "no CPU row found in chatterbox's measurement table"
+
+    quoted = _QUOTED.search(WORKFLOW.read_text(encoding="utf-8"))
+    assert quoted, "the workflow no longer quotes a resident/peak pair"
+
+    assert quoted.groups() == measured.groups(), (
+        f"the workflow quotes {quoted.groups()} GiB where chatterbox measured "
+        f"{measured.groups()} GiB"
+    )

@@ -509,7 +509,11 @@ jobs:
     # before it just built rather than contending for the CPU the build is bound by. The
     # router leg is the cheap one — no ONNX runtime, no baked assets — but it contends
     # for the same daemon. The chatterbox leg is the opposite: its bake loads the model
-    # to clone from it, measured at 4.69 GiB resident and 6.68 GiB peak for one model.
+    # to clone from it: 4.69 GiB resident and 6.68 GiB peak for one model. That figure
+    # is `elvenspeak/chatterbox.py`'s to own — its module docstring holds the table this
+    # row is read from, and `tests/test_workflow.py` fails if the two ever disagree,
+    # because a comment telling an operator to check free RAM against a stale number is
+    # worse than one that says nothing.
     # Concurrent, as this scheduler actually runs them, that single leg's peak is most of
     # the host. Nothing here enforces that and nothing should: the trigger for a build is
     # a person running `git push gitea master`, so this paragraph is addressed to them.

@@ -38,7 +38,7 @@ intended outcome — it is the only test proving the lock that keeps two callers
 from being answered in each other's voice, and a skip is indistinguishable from
 a pass in a summary.
 
-Below the divider the checkpoints are on disk: ~3.06 GiB fetched once, ~4.8 GiB
+Below the divider the checkpoints are on disk: ~3.06 GiB fetched once, ~4.7 GiB
 resident per model opened, and synthesis at 8-33x real time on `cpu`. No test
 holds two at once — measured, two live models are 8.11 GiB against a build runner
 with 7.9 GB — and the refusals hold none, answerable from a table and a stat.
@@ -489,7 +489,7 @@ def test_two_voices_spoken_at_once_are_each_answered_in_their_own_voice():
 
 
 # ============================================================================
-# Everything below opens the real model: ~3.06 GiB fetched, ~4.8 GiB resident,
+# Everything below opens the real model: ~3.06 GiB fetched, ~4.7 GiB resident,
 # and synthesis at 8-33x real time on `cpu`.
 # ============================================================================
 

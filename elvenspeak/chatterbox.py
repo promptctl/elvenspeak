@@ -81,7 +81,7 @@ and Kokoro ~0.77 on this class of machine.
     device                          RTF, warm     resident
     RTX 2070 (CUDA, fp32)           0.76 - 1.09   3.2 GiB VRAM + 3.5 GiB host
     Apple M-series GPU (MPS, fp32)  2.33 - 4.30   ~4.8 GiB unified
-    CPU (12 cores, 4 threads)       7.62 - 33.3   4.8 GiB, 6.8 GiB peak
+    CPU (12 cores, 4 threads)       7.62 - 33.3   4.69 GiB, 6.68 GiB peak
 
 Three things follow, and each of them is a decision in the code below.
 
