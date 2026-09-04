@@ -53,13 +53,27 @@ kokoro = ["kokoro-onnx>=0.6.1"]
 # callable`, naming nothing. [LAW:no-silent-failure], upstream, where it can only
 # be pinned around.
 #
-# `torch` and `torchaudio` are named without a version, which is deliberate: the
-# version stays `chatterbox-tts`'s to choose, and naming them here only makes
-# them direct dependencies, which is what `[tool.uv.sources]` at the foot of this
-# file needs in order to route them off PyPI's CUDA build on linux. See there for
-# why. Dropping either name silently restores ~3 GiB of unreachable nvidia
-# wheels, so the pair is load-bearing and `tests/test_chatterbox.py` holds it.
-chatterbox = ["chatterbox-tts>=0.1.7", "setuptools<81", "torch", "torchaudio"]
+# `<0.2` is a bound on internals, not caution about a minor release. This
+# module's correctness rests on things `chatterbox-tts` never promised:
+# `_cloned`'s ordering fix holds only because `prepare_conditionals` rebinds
+# `self.conds` instead of writing into it; `_synthesized`'s guard depends on
+# `generate` mutating `conds.t3` only when `exaggeration` is passed;
+# `_ASSETS` names this release's exact checkpoint filenames. A release that
+# changed any of them would import cleanly and pass every test here — each
+# builtin-* voice would simply become the wrong person, which
+# elvenspeak/chatterbox.py documents as a failure no test in this repo can
+# observe. So `uv lock --upgrade` has to stop and ask.
+#
+# NOT ROUTED TO A CPU-ONLY TORCH INDEX, though the ~3 GiB of `nvidia-*-cu12`
+# wheels PyPI's linux `torch` drags in are real and somebody will propose it
+# again. `CHATTERBOX_DEVICE=cpu` in the Dockerfile is an `ARG`, which is the
+# *builder's* device and is gone from the image; `DEVICES` in
+# elvenspeak/chatterbox.py admits `cuda`, `configure` accepts it, and the module
+# docstring publishes measured RTX 2070 figures because that node is the only
+# hardware this engine is worth running on. A cpu-only wheel leaves `cuda`
+# accepted at parse and dead at `.to("cuda")` with "Torch not compiled with CUDA
+# enabled" — trading the engine's one viable runtime for build-host disk.
+chatterbox = ["chatterbox-tts>=0.1.7,<0.2", "setuptools<81"]
 # Empty, and true rather than a placeholder: the router's backends are other
 # elvenspeak servers, reached over HTTP with `urllib` from the standard library,
 # so it needs nothing beyond `fastapi` and `uvicorn` above. `pip install
@@ -82,24 +96,3 @@ packages = ["elvenspeak"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-
-# The chatterbox extra is the only thing here that pulls torch, and on linux the
-# default PyPI wheel declares thirteen `nvidia-*-cu12` runtime packages plus
-# `triton` — around 3 GiB installed, none of it reachable: `CHATTERBOX_DEVICE`
-# has no default and every deployment and every build sets it to `cpu`. The
-# builder these images are published from has 7.9 GB of disk in total, so this
-# is not tidiness.
-#
-# `explicit = true` keeps the index off every other package: it is consulted only
-# for the two named below, so nothing else in the lock can silently start
-# resolving from a host that is not PyPI. macOS is left on PyPI because its
-# wheels carry no CUDA to begin with, and adding a second source for an identical
-# artifact would only be a second thing to keep true.
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[tool.uv.sources]
-torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
-torchaudio = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]

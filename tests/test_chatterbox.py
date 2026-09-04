@@ -348,21 +348,19 @@ def test_the_setuptools_pin_that_keeps_the_watermarker_importable_is_still_there
     ), requirements
 
 
-def test_torch_is_routed_to_the_cpu_index_this_engine_actually_runs_on():
-    """[LAW:one-source-of-truth] Two lines that only work together, held together.
+def test_the_upper_bound_that_pins_chatterbox_to_the_internals_we_read_is_there():
+    """[LAW:one-source-of-truth] A bound on internals, held where it can be checked.
 
-    On linux the default PyPI `torch` declares thirteen `nvidia-*-cu12` packages
-    and `triton` — around 3 GiB installed — and no deployment of this engine can
-    reach any of it: `CHATTERBOX_DEVICE` has no default and everything that sets
-    it sets `cpu`. The builder that publishes these images has 7.9 GB of disk in
-    total.
+    This module reads `chatterbox-tts` internals no release note covers:
+    `_cloned`'s ordering fix holds only because `prepare_conditionals` rebinds
+    `self.conds` rather than writing into it, `_synthesized`'s guard depends on
+    `generate` mutating `conds.t3` only when `exaggeration` is passed, and
+    `_ASSETS` names this release's exact checkpoint filenames.
 
-    `[tool.uv.sources]` only applies to a project's *direct* dependencies, so the
-    routing works solely because this extra names `torch` and `torchaudio`
-    itself. That coupling is invisible from either line: delete a name here and
-    the source entry below silently stops applying, `uv lock` succeeds, the suite
-    passes, and 3 GiB of unreachable CUDA quietly returns to every image. Nothing
-    else in this repository would notice, which is why this asserts both ends.
+    A release that changed any of them would import cleanly and pass every test
+    in this file — the only symptom is each builtin-* voice becoming the wrong
+    person, which no test here can observe. So the lock is not allowed to walk
+    across a minor on its own: `uv lock --upgrade` has to stop and ask.
     """
     import tomllib
     from pathlib import Path
@@ -370,17 +368,13 @@ def test_torch_is_routed_to_the_cpu_index_this_engine_actually_runs_on():
     pyproject = tomllib.loads(
         (Path(__file__).parent.parent / "pyproject.toml").read_text(encoding="utf-8")
     )
-    named = {
-        re.split(r"[<>=!~\[]", requirement, maxsplit=1)[0].strip()
-        for requirement in pyproject["project"]["optional-dependencies"]["chatterbox"]
-    }
-    sources = pyproject["tool"]["uv"]["sources"]
+    requirements = pyproject["project"]["optional-dependencies"]["chatterbox"]
 
-    assert {"torch", "torchaudio"} <= named, named
-    for package in ("torch", "torchaudio"):
-        routed = sources[package]
-        assert any(entry["index"] == "pytorch-cpu" for entry in routed), routed
-        assert any("linux" in entry.get("marker", "") for entry in routed), routed
+    assert any(
+        "chatterbox-tts" in requirement.replace(" ", "")
+        and "<" in requirement.replace(" ", "")
+        for requirement in requirements
+    ), requirements
 
 
 # ------------------------------------------------------- who `builtin` turns out to be
