@@ -156,7 +156,7 @@ ARG ROUTER_CONSUL_URL=http://built-without-a-fleet.invalid:8500
 
 # The second setting that exists only to get through the build, and it is spent
 # for the same reason `ROUTER_CONSUL_URL` is. `chatterbox.configure` names no
-# default device on purpose: `cpu` boots anywhere and then serves at 10-33x real
+# default device on purpose: `cpu` boots anywhere and then serves at 8-33x real
 # time, so a default is a claim that one answer is right when the deployment said
 # nothing, and there is no such answer. The bake still has to open the model —
 # `acquire` loads the checkpoints to prove they are a model rather than 3 GiB of

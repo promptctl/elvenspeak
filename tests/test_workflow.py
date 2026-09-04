@@ -99,13 +99,48 @@ _PEAK = re.compile(r"([\d.]+) GiB peak")
 #: Every restatement of the RTF range, in the two shapes this repository writes it.
 _RTF = re.compile(r"(\d+)\s*(?:-|to)\s*(\d+)\s*(?:x real time|times real time)")
 
-#: Where a restatement may live. Read as text, never imported, so a stale `.pyc`
-#: cannot answer for a file (see the test below).
-_QUOTING = sorted(
-    path
-    for pattern in ("elvenspeak/*.py", "tests/*.py", ".gitea/workflows/*.yaml")
-    for path in (Path(__file__).parent.parent).glob(pattern)
-)
+#: A line break inside a comment or docstring, with whatever marker and
+#: indentation continue it. Collapsed before matching, because a quotation is
+#: prose and prose wraps: the `Dockerfile`'s figure sat across "8-33x real" /
+#: "# time" and no pattern anchored to contiguous text could ever have seen it —
+#: which is how it survived a review round that was looking straight at it.
+_WRAP = re.compile(r"\n[ \t]*(?:#:?|//|--)?[ \t]*")
+
+
+def flowed(text: str) -> str:
+    """`text` with wrapped lines rejoined, so a quotation reads as one string."""
+    return _WRAP.sub(" ", text)
+
+
+def quoting() -> list[Path]:
+    """Every tracked file, because a restatement may live in any of them.
+
+    [LAW:single-enforcer] The first version of this listed globs —
+    `elvenspeak/*.py`, `tests/*.py`, `.gitea/workflows/*.yaml` — and review found
+    a stale figure in the `Dockerfile` the same day, invisible to the check
+    written to prevent exactly that. A list of places to look is the same
+    hand-maintained map that lets a fact drift in the first place; it just moves
+    the drift one level up, to the list.
+
+    So there is no list. `git ls-files` is the repository's own answer to "what
+    is in this repository", and a file added tomorrow is scanned without anyone
+    remembering to say so. Read as text, never imported, so a stale `.pyc` cannot
+    answer for a file (see the test below).
+    """
+    import subprocess
+
+    listed = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=Path(__file__).parent.parent,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    return sorted(
+        Path(__file__).parent.parent / name
+        for name in listed.stdout.split("\0")
+        if name
+    )
 
 
 def test_every_quotation_of_chatterbox_cost_matches_what_it_measured():
@@ -125,8 +160,8 @@ def test_every_quotation_of_chatterbox_cost_matches_what_it_measured():
     reads exactly like a safe one.
 
     So the table in `elvenspeak/chatterbox.py` owns both figures and this holds
-    every other copy equal to it. Scanning rather than listing the files,
-    because a list is the same hand-maintained map that let these drift.
+    every other copy equal to it, anywhere in the repository — see [`quoting`]
+    for why it scans everything tracked rather than a list of likely files.
 
     Read as source text, never through `chatterbox.__doc__`: an edit preserving
     a row's byte length and landing in the same second as the last import left
@@ -140,9 +175,13 @@ def test_every_quotation_of_chatterbox_cost_matches_what_it_measured():
     # The table carries the raw measurement; prose rounds it to whole numbers.
     expected_rtf = (str(round(float(rtf_low))), str(round(float(rtf_high))))
 
-    for path in _QUOTING:
-        text = path.read_text(encoding="utf-8")
+    for path in quoting():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue  # a binary asset quotes nothing
         where = path.relative_to(Path(__file__).parent.parent)
+        text = flowed(text)
         for quoted in _PEAK.findall(text):
             assert quoted == peak, f"{where} quotes a {quoted} GiB peak; measured {peak}"
         for quoted in _RTF.findall(text):
