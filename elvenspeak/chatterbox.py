@@ -423,6 +423,34 @@ class _Prepared:
         from chatterbox.mtl_tts import SUPPORTED_LANGUAGES, ChatterboxMultilingualTTS
 
         checkpoints = _fetch(self.models_dir, allow_download)
+
+        # Refused here rather than in `configure`, because the authority on which
+        # languages exist is the library and `configure` must parse the
+        # environment without importing it — see this module's registration in
+        # `elvenspeak.engines`, and `tests/test_encoding.py`, which proves the
+        # ElevenLabs surface cannot reach an engine library through configuration.
+        #
+        # Before `from_local`, and collected the way `configure` collects: a
+        # language code is a lookup in a table the import already carries and a
+        # reference speaker is a stat, so loading first would spend ~4.7 GiB and a
+        # minute of an operator's restart to report a typo — twice, if they have
+        # two typos.
+        problems = [
+            f"{LANGUAGES} names {name!r}, which this model does not speak; "
+            f"it speaks {', '.join(sorted(SUPPORTED_LANGUAGES))}"
+            for name in self.languages
+            if name not in SUPPORTED_LANGUAGES
+        ]
+        problems += [
+            f"{SPEAKERS} names {speaker!r}, so {_reference(self.models_dir, speaker)} "
+            f"has to be a reference recording of that speaker, and it is not there"
+            for speaker in self.speakers
+            if speaker != BUILTIN_SPEAKER
+            and not _reference(self.models_dir, speaker).is_file()
+        ]
+        if problems:
+            raise ConfigError(problems)
+
         _LOGGER.info("opening chatterbox on %s from %s", self.device, checkpoints)
         model = ChatterboxMultilingualTTS.from_local(checkpoints, self.device)
 
@@ -432,21 +460,6 @@ class _Prepared:
         # be whichever speaker was cloned last — every `builtin-*` voice would
         # silently become that person, fluently and with nothing raised.
         builtin = model.conds
-
-        # Refused here rather than in `configure`, because the authority on which
-        # languages exist is the library and `configure` must parse the
-        # environment without importing it — see this module's registration in
-        # `elvenspeak.engines`, and `tests/test_encoding.py`, which proves the
-        # ElevenLabs surface cannot reach an engine library through configuration.
-        unknown = [name for name in self.languages if name not in SUPPORTED_LANGUAGES]
-        if unknown:
-            raise ConfigError(
-                [
-                    f"{LANGUAGES} names {name!r}, which this model does not speak; "
-                    f"it speaks {', '.join(sorted(SUPPORTED_LANGUAGES))}"
-                    for name in unknown
-                ]
-            )
 
         spoken: dict[str, _Spoken] = {}
         for speaker in self.speakers:
@@ -590,6 +603,17 @@ def _fetch(models_dir: Path, allow_download: bool) -> Path:
     )
 
 
+def _reference(models_dir: Path, speaker: str) -> Path:
+    """Where a named speaker's reference recording is baked.
+
+    [LAW:one-source-of-truth] Composed once because [`_Prepared._open`] refuses a
+    speaker whose recording is missing and [`_cloned`] clones the one that is
+    there: two spellings of this path would be two answers to "which file is
+    alice", and the refusal would name a file the clone never reads.
+    """
+    return models_dir / REFERENCES_DIR / f"{speaker}.wav"
+
+
 def _cloned(
     model: "ChatterboxMultilingualTTS",
     speaker: str,
@@ -598,11 +622,11 @@ def _cloned(
 ) -> "Conditionals":
     """One speaker's identity, computed once and shared by every voice of theirs.
 
-    Each branch turns one name into the identity behind it, or refuses it by
-    naming the asset that is missing: `builtin` is what the checkpoint shipped,
-    every other name is a reference `.wav` baked beside the model files. Cloning
-    here — at build and at boot, never inside a request — is what makes a voice
-    id stable and what keeps [`Engine.voices`]' "now, not eventually" true.
+    `builtin` is what the checkpoint shipped; every other name is a reference
+    `.wav` whose presence [`_Prepared._open`] established before the model was
+    loaded, so there is nothing left to check here. Cloning at build and at boot,
+    never inside a request, is what makes a voice id stable and what keeps
+    [`Engine.voices`]' "now, not eventually" true.
 
     `prepare_conditionals` returns nothing and writes `model.conds`, so the
     result is read back off the model and the model is left holding whichever
@@ -625,14 +649,7 @@ def _cloned(
             )
         return builtin
 
-    reference = models_dir / REFERENCES_DIR / f"{speaker}.wav"
-    if not reference.is_file():
-        raise ConfigError(
-            [
-                f"{SPEAKERS} names {speaker!r}, so {reference} has to be a "
-                f"reference recording of that speaker, and it is not there"
-            ]
-        )
+    reference = _reference(models_dir, speaker)
     _LOGGER.info("cloning speaker %r from %s", speaker, reference)
     model.prepare_conditionals(str(reference))
     return model.conds

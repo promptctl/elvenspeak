@@ -31,14 +31,15 @@ network and does not import the library — which is the same seam
 environment without importing `chatterbox`, so a machine with no accelerator and
 no 3 GiB to spare still checks the decisions this module actually makes.
 
-Below the divider each test opens the real model: ~3.06 GiB fetched once, ~4.8
-GiB resident, and synthesis at 8-33x real time on `cpu`. They are here anyway,
-because the properties they check — an unknown language refused, a timeline that
-does not pretend to be measured — are ones only the real library can answer for.
+Below the divider the checkpoints are on disk: ~3.06 GiB fetched once, ~4.8 GiB
+resident per model opened, and synthesis at 8-33x real time on `cpu`. No test
+holds two at once — measured, two live models are 8.11 GiB against a build runner
+with 7.9 GB — and the refusals hold none, answerable from a table and a stat.
 """
 
 from __future__ import annotations
 
+import gc
 import re
 import threading
 import time
@@ -454,7 +455,7 @@ def engine(chatterbox_installed):
     return chatterbox_prepared(languages=("en", "es")).open()
 
 
-def test_the_offered_order_is_the_configured_order(engine):
+def test_the_offered_order_is_the_configured_order(chatterbox_installed):
     """[LAW:one-source-of-truth] The first voice offered is the default voice.
 
     `Engine.voices` makes this order load-bearing: a deployment naming no
@@ -462,8 +463,18 @@ def test_the_offered_order_is_the_configured_order(engine):
     sort-for-tidiness bug of exactly this shape, so every engine here is held to
     it — and this one has a second way to get it wrong, since its voices come out
     of a nested loop over two configured lists rather than out of one.
+
+    The one test here that needs two differently configured models, so it owns
+    both and holds them one at a time: measured, a second live model is 8.11 GiB
+    resident against a build runner with 7.9 GB. It takes `chatterbox_installed`
+    rather than `engine` for that reason — the module fixture would still be
+    holding the first while this opened the second.
     """
-    assert [voice.id for voice in engine.voices()] == ["builtin-en", "builtin-es"]
+    ordered = chatterbox_prepared(languages=("en", "es")).open()
+    assert [voice.id for voice in ordered.voices()] == ["builtin-en", "builtin-es"]
+
+    del ordered
+    gc.collect()
 
     reversed_order = chatterbox_prepared(languages=("es", "en")).open()
     assert [voice.id for voice in reversed_order.voices()] == [
