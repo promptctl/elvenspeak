@@ -483,8 +483,10 @@ def test_two_voices_spoken_at_once_are_each_answered_in_their_own_voice():
 
 
 # ============================================================================
-# Everything below opens the real model: ~3.06 GiB fetched, ~4.7 GiB resident,
-# and synthesis at 8-33x real time on `cpu`.
+# The divider the module docstring names. Below it the checkpoints are on disk;
+# what that costs, and why the refusals down here deliberately do not pay it, is
+# stated there rather than copied here — a second copy of a measured figure is
+# free to drift from the table it came from, and this one had.
 # ============================================================================
 
 
@@ -679,7 +681,7 @@ def test_a_timestamps_request_is_refused_rather_than_answered_with_invented_numb
     assert "alignment" not in response.text
 
 
-def test_the_engine_speaks_on_the_device_the_deployment_named(engine):
+def test_a_short_utterance_is_answered_with_audio_rather_than_silence(engine):
     """The short-utterance property the eventual mixed-language work needs.
 
     Kokoro has a measured zero-sample defect on short inputs, which is why its
