@@ -426,6 +426,13 @@ class _Prepared:
         _LOGGER.info("opening chatterbox on %s from %s", self.device, checkpoints)
         model = ChatterboxMultilingualTTS.from_local(checkpoints, self.device)
 
+        # [LAW:no-ambient-temporal-coupling] Taken before the speaker loop, which
+        # overwrites `model.conds` on every clone. The operator is free to name
+        # `builtin` after a reference speaker, and read inside the loop this would
+        # be whichever speaker was cloned last — every `builtin-*` voice would
+        # silently become that person, fluently and with nothing raised.
+        builtin = model.conds
+
         # Refused here rather than in `configure`, because the authority on which
         # languages exist is the library and `configure` must parse the
         # environment without importing it — see this module's registration in
@@ -443,7 +450,7 @@ class _Prepared:
 
         spoken: dict[str, _Spoken] = {}
         for speaker in self.speakers:
-            conditionals = _cloned(model, speaker, self.models_dir)
+            conditionals = _cloned(model, speaker, self.models_dir, builtin)
             for language in self.languages:
                 item = _describe(speaker, language, conditionals, self.serves)
                 spoken[item.voice.id] = item
@@ -584,29 +591,31 @@ def _fetch(models_dir: Path, allow_download: bool) -> Path:
 
 
 def _cloned(
-    model: "ChatterboxMultilingualTTS", speaker: str, models_dir: Path
+    model: "ChatterboxMultilingualTTS",
+    speaker: str,
+    models_dir: Path,
+    builtin: "Conditionals | None",
 ) -> "Conditionals":
     """One speaker's identity, computed once and shared by every voice of theirs.
 
-    [`BUILTIN_SPEAKER`] is the identity the model ships with, already loaded from
-    `conds.pt` as part of the checkpoint set. Every other name is a reference
-    `.wav` baked beside the model files, and cloning it here — at build and at
-    boot, never inside a request — is what makes its voice id stable and what
-    keeps [`Engine.voices`]' "now, not eventually" true.
+    Each branch turns one name into the identity behind it, or refuses it by
+    naming the asset that is missing: `builtin` is what the checkpoint shipped,
+    every other name is a reference `.wav` baked beside the model files. Cloning
+    here — at build and at boot, never inside a request — is what makes a voice
+    id stable and what keeps [`Engine.voices`]' "now, not eventually" true.
 
     `prepare_conditionals` returns nothing and writes `model.conds`, so the
     result is read back off the model and the model is left holding whichever
     speaker was cloned last. That is harmless because nothing reads `model.conds`
     except [`ChatterboxEngine._synthesized`], which writes it first under the
-    lock — but it is why the value is captured here rather than left where the
-    library put it.
+    lock — and it is why `builtin` arrives as an argument rather than being read
+    back out of a slot this function overwrites.
     """
     if speaker == BUILTIN_SPEAKER:
-        # The one speaker with no reference audio: `from_local` loaded `conds.pt`
-        # into `model.conds` already. A checkpoint set without it would leave this
-        # None, and the voices built from it would fail on their first request
-        # rather than here, so it is refused at the moment it is missing.
-        if model.conds is None:
+        # A checkpoint set without `conds.pt` carries no builtin identity, and the
+        # voices built from it would fail on their first request rather than here,
+        # so it is refused at the moment it is missing.
+        if builtin is None:
             raise ConfigError(
                 [
                     f"the chatterbox checkpoints carry no {BUILTIN_SPEAKER!r} voice "
@@ -614,7 +623,7 @@ def _cloned(
                     f"name reference speakers in {SPEAKERS} instead"
                 ]
             )
-        return model.conds
+        return builtin
 
     reference = models_dir / REFERENCES_DIR / f"{speaker}.wav"
     if not reference.is_file():
