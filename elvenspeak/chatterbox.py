@@ -536,7 +536,7 @@ def configure(
     THE DEVICE HAS NO DEFAULT, which is this function's one real decision. Every
     candidate default is wrong somewhere and silently so: `cuda` refuses to boot
     on the Apple hardware this has been run on, and `cpu` boots everywhere and
-    then serves at 10 to 33 times real time — measured, and an order of magnitude
+    then serves at 8 to 33 times real time — measured, and an order of magnitude
     past useful. A default is a claim that one answer is right when the
     deployment says nothing, and there is no such answer here, so the deployment
     says something. This is the same reasoning [`engine.Voice.language`] and
@@ -568,7 +568,7 @@ def configure(
         problems.append(
             f"{DEVICE}={device or '(unset)'!s} is not one of {', '.join(DEVICES)}; "
             f"name the accelerator this deployment has. There is no default: cpu "
-            f"runs this model at 10-33x real time and would boot anywhere"
+            f"runs this model at 8-33x real time and would boot anywhere"
         )
 
     try:

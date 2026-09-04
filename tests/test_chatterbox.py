@@ -97,7 +97,7 @@ def test_an_unset_device_is_refused_rather_than_defaulted():
     """[LAW:types-are-the-program] The decision this engine is arranged around.
 
     Every candidate default is wrong somewhere and silently so: `cuda` will not
-    boot on Apple hardware, and `cpu` boots everywhere and then serves at 10-33
+    boot on Apple hardware, and `cpu` boots everywhere and then serves at 8-33
     times real time — measured, and an order of magnitude past useful. A default
     is a claim that one answer is right when the deployment said nothing, and
     there is no such answer, so an omission that would be read as a real answer

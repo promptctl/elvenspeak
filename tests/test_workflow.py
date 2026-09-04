@@ -86,41 +86,67 @@ def test_no_engine_is_built_twice():
     assert len(engines) == len(set(engines)), engines
 
 
-#: The CPU row of `elvenspeak.chatterbox`'s measurement table: resident, then peak.
-_MEASURED = re.compile(r"^\s*CPU \([^)]*\)\s+[\d.\s-]+\s+([\d.]+) GiB, ([\d.]+) GiB peak\s*$", re.MULTILINE)
+#: The CPU row of `elvenspeak.chatterbox`'s measurement table, which owns both
+#: figures every other file quotes: the RTF range, then resident and peak.
+_MEASURED = re.compile(
+    r"^\s*CPU \([^)]*\)\s+([\d.]+) - ([\d.]+)\s+([\d.]+) GiB, ([\d.]+) GiB peak\s*$",
+    re.MULTILINE,
+)
 
-#: The same two figures where the workflow quotes them at an operator.
-_QUOTED = re.compile(r"([\d.]+) GiB resident and ([\d.]+) GiB peak")
+#: Every restatement of the peak, wherever it is quoted.
+_PEAK = re.compile(r"([\d.]+) GiB peak")
+
+#: Every restatement of the RTF range, in the two shapes this repository writes it.
+_RTF = re.compile(r"(\d+)\s*(?:-|to)\s*(\d+)\s*(?:x real time|times real time)")
+
+#: Where a restatement may live. Read as text, never imported, so a stale `.pyc`
+#: cannot answer for a file (see the test below).
+_QUOTING = sorted(
+    path
+    for pattern in ("elvenspeak/*.py", "tests/*.py", ".gitea/workflows/*.yaml")
+    for path in (Path(__file__).parent.parent).glob(pattern)
+)
 
 
-def test_the_ram_the_workflow_quotes_is_the_ram_the_engine_measured():
-    """[LAW:one-source-of-truth] One measurement, quoted in the place it is acted on.
+def test_every_quotation_of_chatterbox_cost_matches_what_it_measured():
+    """[LAW:single-enforcer] One measurement, however many places quote it.
 
-    The workflow tells whoever runs `git push gitea master` to check this
-    runner's free RAM against a figure, because a chatterbox leg that peaks over
-    what the host has left is an OOM kill on some other leg — a build failure
-    with nothing to do with the commit that hit it. So the number has to be
-    right where it is read, and a YAML comment cannot compute one.
+    Two figures travel: the CPU peak an operator checks free RAM against before
+    `git push gitea master`, and the RTF range that justifies this engine having
+    no default device. Both are quoted at people who act on them, in files that
+    cannot compute — a YAML comment, a `ConfigError` message, half a dozen
+    docstrings — so every quotation is a hand-copy that can drift.
 
-    These two lived apart and had already drifted: the table said 4.8/6.8 and the
-    workflow 4.69/6.68, which is not a rounding of it. Nobody would have caught
-    that by reading either file, and the direction of the error is the dangerous
-    one — a comment that understates the peak reads exactly like a safe one.
+    They already had, three ways. The peak was written 6.8, 6.83 and 6.68 in
+    three files; the RTF low bound was 10 in `chatterbox.py` and 8 in every file
+    quoting it, where 10 is neither measurement's low end but a splice of the
+    12-thread low with the 4-thread high. Nobody would catch that reading any one
+    file, and the dangerous direction is silent: a comment understating the peak
+    reads exactly like a safe one.
 
-    Both figures are read as source text, never through `chatterbox.__doc__`, for
-    the reason this module's own docstring gives about the workflow: the file is
-    the artifact, and anything else is a copy that can go stale in the direction
-    that hides the bug. Which is not hypothetical here — an edit that kept the
-    row's byte length and landed in the same second as the last import left
-    `__doc__` reporting the previous numbers off a `.pyc` Python thought current.
+    So the table in `elvenspeak/chatterbox.py` owns both figures and this holds
+    every other copy equal to it. Scanning rather than listing the files,
+    because a list is the same hand-maintained map that let these drift.
+
+    Read as source text, never through `chatterbox.__doc__`: an edit preserving
+    a row's byte length and landing in the same second as the last import left
+    `__doc__` serving the previous numbers off a `.pyc` Python thought current.
+    That cost a false green while this test was being written.
     """
     measured = _MEASURED.search(ENGINE_SOURCE.read_text(encoding="utf-8"))
     assert measured, "no CPU row found in chatterbox's measurement table"
 
-    quoted = _QUOTED.search(WORKFLOW.read_text(encoding="utf-8"))
-    assert quoted, "the workflow no longer quotes a resident/peak pair"
+    rtf_low, rtf_high, _resident, peak = measured.groups()
+    # The table carries the raw measurement; prose rounds it to whole numbers.
+    expected_rtf = (str(round(float(rtf_low))), str(round(float(rtf_high))))
 
-    assert quoted.groups() == measured.groups(), (
-        f"the workflow quotes {quoted.groups()} GiB where chatterbox measured "
-        f"{measured.groups()} GiB"
-    )
+    for path in _QUOTING:
+        text = path.read_text(encoding="utf-8")
+        where = path.relative_to(Path(__file__).parent.parent)
+        for quoted in _PEAK.findall(text):
+            assert quoted == peak, f"{where} quotes a {quoted} GiB peak; measured {peak}"
+        for quoted in _RTF.findall(text):
+            assert quoted == expected_rtf, (
+                f"{where} quotes {quoted[0]}-{quoted[1]}x real time; "
+                f"measured {rtf_low}-{rtf_high}"
+            )
