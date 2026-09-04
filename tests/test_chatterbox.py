@@ -348,6 +348,41 @@ def test_the_setuptools_pin_that_keeps_the_watermarker_importable_is_still_there
     ), requirements
 
 
+def test_torch_is_routed_to_the_cpu_index_this_engine_actually_runs_on():
+    """[LAW:one-source-of-truth] Two lines that only work together, held together.
+
+    On linux the default PyPI `torch` declares thirteen `nvidia-*-cu12` packages
+    and `triton` — around 3 GiB installed — and no deployment of this engine can
+    reach any of it: `CHATTERBOX_DEVICE` has no default and everything that sets
+    it sets `cpu`. The builder that publishes these images has 7.9 GB of disk in
+    total.
+
+    `[tool.uv.sources]` only applies to a project's *direct* dependencies, so the
+    routing works solely because this extra names `torch` and `torchaudio`
+    itself. That coupling is invisible from either line: delete a name here and
+    the source entry below silently stops applying, `uv lock` succeeds, the suite
+    passes, and 3 GiB of unreachable CUDA quietly returns to every image. Nothing
+    else in this repository would notice, which is why this asserts both ends.
+    """
+    import tomllib
+    from pathlib import Path
+
+    pyproject = tomllib.loads(
+        (Path(__file__).parent.parent / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    named = {
+        re.split(r"[<>=!~\[]", requirement, maxsplit=1)[0].strip()
+        for requirement in pyproject["project"]["optional-dependencies"]["chatterbox"]
+    }
+    sources = pyproject["tool"]["uv"]["sources"]
+
+    assert {"torch", "torchaudio"} <= named, named
+    for package in ("torch", "torchaudio"):
+        routed = sources[package]
+        assert any(entry["index"] == "pytorch-cpu" for entry in routed), routed
+        assert any("linux" in entry.get("marker", "") for entry in routed), routed
+
+
 # ------------------------------------------------------- who `builtin` turns out to be
 
 
