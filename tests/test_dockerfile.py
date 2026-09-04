@@ -440,3 +440,53 @@ def test_every_engine_can_be_configured_from_what_the_build_provides(engine_name
     # Parsing only. `configure` does no I/O — that is what `Prepared` is for — so
     # this needs no models directory, no network and no engine library.
     Settings.from_env(ENGINES, build_environment(engine_name))
+
+
+#: What each cache-home variable resolves to, asked of the library that owns it.
+#: One line each, run in a fresh interpreter rather than here: both libraries
+#: read their variable at import, so setting it in this process would either come
+#: too late or leave the imported module pointing at a temporary directory for
+#: every test that ran afterwards.
+_CACHE_HOMES = {
+    "PKUSEG_HOME": "from spacy_pkuseg.config import Config; print(Config().pkuseg_home)",
+    "HF_HOME": "from huggingface_hub.constants import HF_HOME; print(HF_HOME)",
+}
+
+
+@pytest.mark.parametrize("variable", sorted(_CACHE_HOMES))
+def test_a_cache_home_the_build_names_is_the_one_its_library_reads(variable, tmp_path):
+    """[LAW:verifiable-goals] The variable names are claims, and this is the check.
+
+    The image sets both so the assets baked as root are the assets found at boot
+    as `elvenspeak`, under `/app/models` where the `chown` already reaches. All
+    of that rests on these being the exact spellings the libraries consult, and a
+    library that renamed its variable would not fail the build: the bake would
+    write to `/root` again, the image would pass its healthcheck, and the first
+    Chinese-adjacent tokenization on an offline host would try for 34 MB it
+    cannot reach — the one failure baking exists to prevent.
+
+    Asked of the library rather than asserted about it, in a subprocess so that
+    neither import can be poisoned by the environment this test invents.
+    """
+    import subprocess
+    import sys
+
+    baked = build_environment("chatterbox")[variable]
+    assert baked.startswith("/app/models/"), (
+        f"{variable} is baked as {baked!r}, outside the directory the image "
+        f"chowns to the runtime user"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", _CACHE_HOMES[variable]],
+        cwd=REPO,
+        env={"PATH": os.environ["PATH"], variable: str(tmp_path)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(tmp_path), (
+        f"{variable} is not the variable that library reads: it resolved to "
+        f"{result.stdout.strip()!r} with {variable}={tmp_path}"
+    )

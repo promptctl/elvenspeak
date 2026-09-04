@@ -28,6 +28,23 @@ jobs:
     # audio on cpu; measured at 12m20s here with every engine's extra. This is
     # the "something hung" bound, not the expected duration.
     timeout-minutes: 30
+
+    # Both libraries otherwise cache under `$HOME`, which the step below does not
+    # cache, so the ~34 MB `spacy_ontonotes.zip` that loading the Chatterbox
+    # tokenizer fetches unconditionally was re-downloaded on every run of a job
+    # whose cache exists precisely so a required check does not depend on a
+    # third-party host being up. Pointed under `models` they are cached with
+    # everything else.
+    #
+    # The same two variables the Dockerfile sets, for the same reason and not as
+    # a copy of it: there the second home is `USER elvenspeak`, here it is the
+    # uncached one. Neither file can read the other, so the shared fact is pinned
+    # where it can be: `tests/test_dockerfile.py` asks each library whether these
+    # are the names it actually reads.
+    env:
+      HF_HOME: ${{ github.workspace }}/models/huggingface
+      PKUSEG_HOME: ${{ github.workspace }}/models/pkuseg
+
     steps:
       - uses: actions/checkout@v4
 
