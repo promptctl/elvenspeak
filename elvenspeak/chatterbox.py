@@ -137,17 +137,17 @@ _LOGGER = logging.getLogger("elvenspeak.chatterbox")
 _REPO = "ResembleAI/chatterbox"
 _REVISION = "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18"
 
-#: Exactly the files the multilingual model opens, and no others. The repository
-#: holds 13.2 GiB across several generations of export — `t3_cfg`, `t3_23lang`,
-#: `s3gen_v3`, `t3_mtl23ls_v3` — of which this model reads 3.06 GiB. Named rather
-#: than mirrored, because a full snapshot would quadruple the image for exports
-#: nothing loads.
 #: The precomputed conditionals for [`BUILTIN_SPEAKER`]. [LAW:one-source-of-truth]
 #: — the fetch below asks the hub for this name and [`_Prepared._open`] refuses a
 #: snapshot that came back without it, and two spellings would let the refusal
 #: name a file nothing downloads.
 _BUILTIN_CONDITIONALS = "conds.pt"
 
+#: Exactly the files the multilingual model opens, and no others. The repository
+#: holds 13.2 GiB across several generations of export — `t3_cfg`, `t3_23lang`,
+#: `s3gen_v3`, `t3_mtl23ls_v3` — of which this model reads 3.06 GiB. Named rather
+#: than mirrored, because a full snapshot would quadruple the image for exports
+#: nothing loads.
 _ASSETS = (
     "ve.pt",
     "t3_mtl23ls_v2.safetensors",
@@ -428,19 +428,22 @@ class _Prepared:
         """
         from chatterbox.mtl_tts import SUPPORTED_LANGUAGES, ChatterboxMultilingualTTS
 
-        checkpoints = _fetch(self.models_dir, allow_download)
-
         # Refused here rather than in `configure`, because the authority on which
         # languages exist is the library and `configure` must parse the
         # environment without importing it — see this module's registration in
         # `elvenspeak.engines`, and `tests/test_encoding.py`, which proves the
         # ElevenLabs surface cannot reach an engine library through configuration.
         #
-        # Before `from_local`, and collected the way `configure` collects: a
-        # language code is a lookup in a table the import already carries, and
-        # both speaker checks are a stat on a path `_fetch` has already returned,
-        # so loading first would spend ~4.7 GiB and a minute of an operator's
-        # restart to report a typo — twice, if they have two typos.
+        # Two stages, and the order is the whole point. Everything answerable from
+        # the configuration alone is answered first, before a byte is fetched or a
+        # weight is loaded: a language code is a lookup in a table the import
+        # already carries, and a reference recording is a stat on `models_dir`.
+        # Neither reads `checkpoints`, so asking them after the fetch would spend
+        # ~3.06 GiB of download and then ~4.69 GiB of load to report a typo — and
+        # again on the next restart, for the operator's second typo.
+        #
+        # Collected rather than raised one at a time, the way `configure` collects,
+        # so one restart reports every problem this stage can see.
         problems = [
             f"{LANGUAGES} names {name!r}, which this model does not speak; "
             f"it speaks {', '.join(sorted(SUPPORTED_LANGUAGES))}"
@@ -454,6 +457,15 @@ class _Prepared:
             if speaker != BUILTIN_SPEAKER
             and not _reference(self.models_dir, speaker).is_file()
         ]
+        if problems:
+            raise ConfigError(problems)
+
+        checkpoints = _fetch(self.models_dir, allow_download)
+
+        # The second stage, and the only question that needed the fetch: whether
+        # the snapshot that arrived carries a builtin voice. Still a stat, and
+        # still ahead of `from_local`, so it costs the download and not the load.
+        #
         # Asked only of a deployment that named `builtin`: a fleet that clones
         # every voice from reference audio is entitled to checkpoints that ship no
         # builtin identity, and refusing it a voice it never asked for would be an
@@ -462,14 +474,14 @@ class _Prepared:
             BUILTIN_SPEAKER in self.speakers
             and not (checkpoints / _BUILTIN_CONDITIONALS).is_file()
         ):
-            problems.append(
-                f"{SPEAKERS} names {BUILTIN_SPEAKER!r}, but the chatterbox "
-                f"checkpoints carry no such voice ({_BUILTIN_CONDITIONALS} is "
-                f"absent from {_REPO}@{_REVISION[:8]}); name reference speakers "
-                f"in {SPEAKERS} instead"
+            raise ConfigError(
+                [
+                    f"{SPEAKERS} names {BUILTIN_SPEAKER!r}, but the chatterbox "
+                    f"checkpoints carry no such voice ({_BUILTIN_CONDITIONALS} is "
+                    f"absent from {_REPO}@{_REVISION[:8]}); name reference "
+                    f"speakers in {SPEAKERS} instead"
+                ]
             )
-        if problems:
-            raise ConfigError(problems)
 
         _LOGGER.info("opening chatterbox on %s from %s", self.device, checkpoints)
         model = ChatterboxMultilingualTTS.from_local(checkpoints, self.device)

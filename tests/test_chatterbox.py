@@ -537,8 +537,29 @@ def test_the_engine_declares_nothing_it_cannot_do(engine):
     assert declared(engine) == frozenset()
 
 
+@pytest.fixture
+def unfetched(monkeypatch):
+    """`_fetch` rigged to fail the test that reaches it.
+
+    Everything a deployment can get wrong about its languages or its speakers is
+    answerable from a static table and a stat on `models_dir`, so `open` answers
+    all of it before it downloads anything. Ordered the other way the same typo
+    costs ~3.06 GiB and several minutes before it is reported — and the two tests
+    below would not notice, because a refusal that arrives late is still a
+    refusal. This is what makes the ordering a property rather than an accident.
+
+    It is also what lets those two tests take no `chatterbox_installed`: with the
+    fetch refused, they need the library and no checkpoints at all.
+    """
+
+    def unreached(models_dir, allow_download):
+        pytest.fail("_fetch ran: a refusal answerable from configuration paid for it")
+
+    monkeypatch.setattr(chatterbox, "_fetch", unreached)
+
+
 def test_a_language_the_model_does_not_speak_is_refused_when_it_is_discovered(
-    chatterbox_installed,
+    unfetched,
 ):
     """The library is the authority on its own languages, and it is asked.
 
@@ -554,9 +575,7 @@ def test_a_language_the_model_does_not_speak_is_refused_when_it_is_discovered(
     assert "kl" in "\n".join(raised.value.problems)
 
 
-def test_a_speaker_with_no_reference_recording_is_refused_at_boot(
-    chatterbox_installed,
-):
+def test_a_speaker_with_no_reference_recording_is_refused_at_boot(unfetched):
     """A voice id is stable because its speaker is an asset, not a request-time upload.
 
     So a named speaker whose `.wav` was never baked is a deployment that would
