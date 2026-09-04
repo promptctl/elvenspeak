@@ -11,6 +11,16 @@ and read exactly like success.
 can only confirm the assumption. So this reads the Dockerfile itself and resolves
 each path against the filesystem — no pattern to get wrong, and it runs on every
 commit rather than on whoever remembers.
+
+One test here is not extras-agnostic, and it is stated rather than skipped past:
+`test_a_cache_home_the_build_names_is_the_one_its_library_reads` asks
+`spacy_pkuseg` and `huggingface_hub` what they read, and both arrive only with
+the chatterbox extra. On an install without it that test errors rather than
+skipping, which is the same choice `tests/test_chatterbox.py` makes about its
+concurrency test and for the same reason: the thing it catches is a silently
+mislocated cache, and a check that quietly removes itself on the installs nobody
+is watching is indistinguishable from one that passed. CI installs every extra,
+so the constraint binds on a partial local install and nowhere else.
 """
 
 from __future__ import annotations
