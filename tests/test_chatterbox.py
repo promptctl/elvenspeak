@@ -380,7 +380,10 @@ def test_the_builtin_speaker_is_the_checkpoints_own_voice_however_late_it_is_nam
     checkpoint = _MarkedConditionals(0.25)
     model = _AlreadyCloned(_MarkedConditionals(0.75))
 
-    assert chatterbox._cloned(model, "builtin", tmp_path, checkpoint) is checkpoint
+    assert (
+        chatterbox._cloned(model, chatterbox.BUILTIN_SPEAKER, tmp_path, checkpoint)
+        is checkpoint
+    )
 
 
 # ----------------------------------------- speaking two voices at the same time
@@ -531,6 +534,39 @@ def test_a_speaker_with_no_reference_recording_is_refused_at_boot(
     reported = "\n".join(raised.value.problems)
     assert "nobody" in reported
     assert chatterbox.REFERENCES_DIR in reported
+
+
+def test_checkpoints_with_no_builtin_voice_are_refused_before_the_model_loads(
+    tmp_path, monkeypatch
+):
+    """[LAW:parse-dont-validate] The refusal costs a stat rather than 4.69 GiB.
+
+    A snapshot without `conds.pt` carries no `builtin` identity, and this asks
+    two things of that: that it is refused at all, and that it is refused at the
+    same moment as a typo'd language or a missing reference `.wav` — before
+    `from_local`. Read back off the loaded model instead, the same deployment
+    would spend ~4.69 GiB and a minute of an operator's restart to be told what a
+    directory listing already said.
+
+    Takes no `chatterbox_installed`: `_fetch` is answered with an empty directory
+    and `from_local` is the thing that must not run, so the property is provable
+    without the 3.06 GiB the fixture downloads. The library itself is needed, for
+    the `SUPPORTED_LANGUAGES` the sibling checks read.
+    """
+    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+
+    def unreached(*_args, **_kwargs):
+        pytest.fail("from_local ran: the refusal moved back behind the model load")
+
+    monkeypatch.setattr(chatterbox, "_fetch", lambda models_dir, allow: tmp_path)
+    monkeypatch.setattr(ChatterboxMultilingualTTS, "from_local", unreached)
+
+    with pytest.raises(ConfigError) as raised:
+        chatterbox_prepared(speakers=(chatterbox.BUILTIN_SPEAKER,)).open()
+
+    reported = "\n".join(raised.value.problems)
+    assert chatterbox._BUILTIN_CONDITIONALS in reported
+    assert chatterbox.BUILTIN_SPEAKER in reported
 
 
 def test_an_engine_that_cannot_measure_says_so_rather_than_inventing_a_timeline(

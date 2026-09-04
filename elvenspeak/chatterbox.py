@@ -142,12 +142,18 @@ _REVISION = "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18"
 #: `s3gen_v3`, `t3_mtl23ls_v3` — of which this model reads 3.06 GiB. Named rather
 #: than mirrored, because a full snapshot would quadruple the image for exports
 #: nothing loads.
+#: The precomputed conditionals for [`BUILTIN_SPEAKER`]. [LAW:one-source-of-truth]
+#: — the fetch below asks the hub for this name and [`_Prepared._open`] refuses a
+#: snapshot that came back without it, and two spellings would let the refusal
+#: name a file nothing downloads.
+_BUILTIN_CONDITIONALS = "conds.pt"
+
 _ASSETS = (
     "ve.pt",
     "t3_mtl23ls_v2.safetensors",
     "s3gen.pt",
     "grapheme_mtl_merged_expanded_v1.json",
-    "conds.pt",
+    _BUILTIN_CONDITIONALS,
     "Cangjie5_TC.json",
 )
 
@@ -431,10 +437,10 @@ class _Prepared:
         # ElevenLabs surface cannot reach an engine library through configuration.
         #
         # Before `from_local`, and collected the way `configure` collects: a
-        # language code is a lookup in a table the import already carries and a
-        # reference speaker is a stat, so loading first would spend ~4.7 GiB and a
-        # minute of an operator's restart to report a typo — twice, if they have
-        # two typos.
+        # language code is a lookup in a table the import already carries, and
+        # both speaker checks are a stat on a path `_fetch` has already returned,
+        # so loading first would spend ~4.7 GiB and a minute of an operator's
+        # restart to report a typo — twice, if they have two typos.
         problems = [
             f"{LANGUAGES} names {name!r}, which this model does not speak; "
             f"it speaks {', '.join(sorted(SUPPORTED_LANGUAGES))}"
@@ -448,6 +454,20 @@ class _Prepared:
             if speaker != BUILTIN_SPEAKER
             and not _reference(self.models_dir, speaker).is_file()
         ]
+        # Asked only of a deployment that named `builtin`: a fleet that clones
+        # every voice from reference audio is entitled to checkpoints that ship no
+        # builtin identity, and refusing it a voice it never asked for would be an
+        # invented requirement.
+        if (
+            BUILTIN_SPEAKER in self.speakers
+            and not (checkpoints / _BUILTIN_CONDITIONALS).is_file()
+        ):
+            problems.append(
+                f"{SPEAKERS} names {BUILTIN_SPEAKER!r}, but the chatterbox "
+                f"checkpoints carry no such voice ({_BUILTIN_CONDITIONALS} is "
+                f"absent from {_REPO}@{_REVISION[:8]}); name reference speakers "
+                f"in {SPEAKERS} instead"
+            )
         if problems:
             raise ConfigError(problems)
 
@@ -623,13 +643,16 @@ def _cloned(
     model: "ChatterboxMultilingualTTS",
     speaker: str,
     models_dir: Path,
-    builtin: "Conditionals | None",
+    builtin: "Conditionals",
 ) -> "Conditionals":
     """One speaker's identity, computed once and shared by every voice of theirs.
 
     `builtin` is what the checkpoint shipped; every other name is a reference
-    `.wav` whose presence [`_Prepared._open`] established before the model was
-    loaded, so there is nothing left to check here. Cloning at build and at boot,
+    `.wav`. [`_Prepared._open`] established both before the model was loaded —
+    that `conds.pt` is there when anyone asks for `builtin`, and that each other
+    speaker has their recording — so there is nothing left to check here, and the
+    non-optional `builtin` is that refusal carried in the type rather than
+    repeated. Cloning at build and at boot,
     never inside a request, is what makes a voice id stable and what keeps
     [`Engine.voices`]' "now, not eventually" true.
 
@@ -641,17 +664,6 @@ def _cloned(
     back out of a slot this function overwrites.
     """
     if speaker == BUILTIN_SPEAKER:
-        # A checkpoint set without `conds.pt` carries no builtin identity, and the
-        # voices built from it would fail on their first request rather than here,
-        # so it is refused at the moment it is missing.
-        if builtin is None:
-            raise ConfigError(
-                [
-                    f"the chatterbox checkpoints carry no {BUILTIN_SPEAKER!r} voice "
-                    f"(conds.pt is absent from {_REPO}@{_REVISION[:8]}); "
-                    f"name reference speakers in {SPEAKERS} instead"
-                ]
-            )
         return builtin
 
     reference = _reference(models_dir, speaker)
