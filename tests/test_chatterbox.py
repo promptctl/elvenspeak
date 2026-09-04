@@ -31,6 +31,13 @@ network and does not import the library — which is the same seam
 environment without importing `chatterbox`, so a machine with no accelerator and
 no 3 GiB to spare still checks the decisions this module actually makes.
 
+One exception, and it is stated rather than skipped past: the concurrency test
+imports torch, because the code it exercises builds its samples through
+`torch.int16`. On an install without the chatterbox extra it errors. That is the
+intended outcome — it is the only test proving the lock that keeps two callers
+from being answered in each other's voice, and a skip is indistinguishable from
+a pass in a summary.
+
 Below the divider the checkpoints are on disk: ~3.06 GiB fetched once, ~4.8 GiB
 resident per model opened, and synthesis at 8-33x real time on `cpu`. No test
 holds two at once — measured, two live models are 8.11 GiB against a build runner
@@ -412,7 +419,7 @@ def test_two_voices_spoken_at_once_are_each_answered_in_their_own_voice():
     lock: any implementation that keeps the two apart passes, and one that stops
     keeping them apart fails.
     """
-    torch = pytest.importorskip("torch")
+    import torch
 
     voices = {
         speaker: chatterbox._describe(
@@ -549,7 +556,7 @@ def test_an_engine_that_cannot_measure_says_so_rather_than_inventing_a_timeline(
 
 
 def test_a_timestamps_request_is_refused_rather_than_answered_with_invented_numbers(
-    chatterbox_installed,
+    engine,
 ):
     """The refusal end to end, assembled from `Capability`'s own sentence.
 
@@ -575,7 +582,7 @@ def test_a_timestamps_request_is_refused_rather_than_answered_with_invented_numb
         host="127.0.0.1",
         port=0,
     )
-    client = TestClient(create_app(settings, prepared.open()))
+    client = TestClient(create_app(settings, engine))
 
     response = client.post(
         "/v1/text-to-speech/builtin-en/with-timestamps", json={"text": "Hello there."}
