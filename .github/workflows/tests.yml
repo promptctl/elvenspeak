@@ -24,9 +24,9 @@ jobs:
   pytest:
     name: pytest
     runs-on: ubuntu-latest
-    # The suite fetches ~300 MB of models on a cold cache and synthesizes real
-    # audio; a warm run is about a minute. This is the "something hung" bound,
-    # not the expected duration.
+    # The suite fetches ~3.4 GB of models on a cold cache and synthesizes real
+    # audio on cpu; measured at 12m20s here with every engine's extra. This is
+    # the "something hung" bound, not the expected duration.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

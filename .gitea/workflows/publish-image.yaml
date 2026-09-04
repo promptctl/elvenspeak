@@ -376,9 +376,10 @@ jobs:
   tests:
     runs-on: ubuntu-latest
 
-    # The suite fetches ~300 MB of models on a cold cache and synthesizes real audio.
-    # This is the "something hung" bound, not the expected duration, and it is longer
-    # than GitHub's 30 because there is no model cache on this side (see below).
+    # The suite fetches ~3.4 GB of models on a cold cache and synthesizes real audio on
+    # cpu; the same suite measures 12m20s on GitHub's runner. This is the "something
+    # hung" bound, not the expected duration, and it is longer than GitHub's 30 because
+    # there is no model cache on this side (see below) and this host has half the cpu.
     timeout-minutes: 45
 
     steps:
@@ -501,11 +502,18 @@ jobs:
     # with capacity 4. Gitea's scheduler does not implement the key, so what is written
     # above is a request this forge declines.
     #
-    # What it asks for is still what this host wants: all three legs share one Docker
-    # daemon on 2 cpu and 7.9GB, a cold build is ~10 minutes, and in sequence each leg
-    # reuses the base layers the one before it just built rather than contending for the
-    # CPU the build is bound by. The router leg is the cheap one — no ONNX runtime, no
-    # baked assets — but it contends for the same daemon. Enforcing it needs a mechanism act_runner actually reads — the
+    # What it asks for is still what this host wants, and the fourth leg is why it now
+    # matters more than tidiness: every leg shares one Docker daemon on 2 cpu and 7.9GB,
+    # a cold build is ~10 minutes, and in sequence each reuses the base layers the one
+    # before it just built rather than contending for the CPU the build is bound by. The
+    # router leg is the cheap one — no ONNX runtime, no baked assets — but it contends
+    # for the same daemon. The chatterbox leg is the opposite: its bake loads the model
+    # to clone from it, measured at 4.69 GiB resident and 6.68 GiB peak for one model.
+    # Concurrent, as this scheduler actually runs them, that single leg's peak is most of
+    # the host — so size this runner before clearing chatterbox to publish, because the
+    # symptom of getting it wrong is an OOM kill on whichever leg was unlucky, which is
+    # again a build failure with nothing to do with the commit that hit it.
+    # Enforcing it needs a mechanism act_runner actually reads — the
     # workflow-level `concurrency` group below is the only one proved on this runner, and
     # it scopes across runs rather than within one. Deliberately not replaced with an
     # untested job-level `concurrency` expression: this file has no way to verify such a
