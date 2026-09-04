@@ -453,6 +453,13 @@ jobs:
     needs: [reachability, tests]
     runs-on: ubuntu-latest
 
+    # The "something hung" bound, per leg. A leg fetches its engine's assets at build
+    # time -- ~3 GiB for chatterbox -- and `cancel-in-progress: false` means a stalled
+    # download does not just lose its own run, it holds the concurrency group and every
+    # publish queued behind it. Unbounded, that is a pipeline that stops with no failure
+    # anywhere to explain it.
+    timeout-minutes: 60
+
     # Which commits become published images, stated once.
     #
     # `master` because a dated tag is a permanent claim about a commit: a branch can be
@@ -954,12 +961,10 @@ jobs:
           echo "that commit and the $ENGINE engine it carries."
 
       # The registry now holds the bytes, so the daemon's copy is a duplicate on a disk
-      # this workflow has to share. Three images per run against a runner with ~11 GB
-      # free, and the piper and kokoro legs are what size this: each carries a python
-      # base, an ONNX runtime and up to ~142 MB of baked assets. The router leg has
-      # neither runtime nor assets and is a rounding error beside them. Kept, the two
-      # heavy ones fill the disk in a handful of commits, and the symptom is a build
-      # failure with nothing to do with the commit that hit it.
+      # this workflow has to share — one per row of the `engine` matrix, every run, the
+      # heaviest of them a torch install over ~3 GiB of baked checkpoints. Kept, they
+      # fill the runner in a handful of commits, and the symptom is a build failure with
+      # nothing to do with the commit that hit it.
       #
       # Only this run's tags, and only the final images — the BuildKit layer cache is what
       # turns a 10-minute cold build into a 60-second warm one and is deliberately left
