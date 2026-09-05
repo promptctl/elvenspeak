@@ -39,6 +39,7 @@ holds the two `run:` lines equal, and an instrument that edited them would be
 changing the thing it was brought in to observe.
 """
 
+import gc
 import os
 import resource
 import subprocess
@@ -157,8 +158,34 @@ def _report_if_worth_a_line(nodeid, before, after, peak):
     if not (rose or after > _DANGER_MIB):
         return
     _write_line(
-        f"[rss] peak {peak:9.1f} MiB  (rss {before:.1f} -> {after:.1f})  {nodeid}"
+        f"[rss] peak {peak:9.1f} MiB  (rss {before:.1f} -> {after:.1f})"
+        f"{_models_still_live(after)}  {nodeid}"
     )
+
+
+def _models_still_live(rss):
+    """How many Chatterbox models Python can still reach, above the floor.
+
+    The one thing four runs of rows cannot distinguish: whether the 3412 MiB
+    riding under `test_conformance.py` is a model something still holds, or free
+    memory too fragmented for `malloc_trim` to hand back. Those have opposite
+    fixes -- drop a reference, or stop asking the allocator for the impossible --
+    and runs 24, 25 and 26 spent three cycles not saying which. Counting by type
+    name rather than by import, so this stays true whether or not
+    `chatterbox-tts` is installed in the environment being measured.
+
+    Walking the whole heap is far too expensive to do 625 times, so it is asked
+    only where the answer matters, on the same threshold everything else here
+    uses.
+    """
+    if rss <= _DANGER_MIB:
+        return ""
+    live = sum(
+        1
+        for obj in gc.get_objects()
+        if type(obj).__name__ in ("ChatterboxEngine", "ChatterboxMultilingualTTS")
+    )
+    return f"  live={live}"
 
 
 def _write_line(text):
