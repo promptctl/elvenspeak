@@ -24,10 +24,27 @@ jobs:
   pytest:
     name: pytest
     runs-on: ubuntu-latest
-    # The suite fetches ~300 MB of models on a cold cache and synthesizes real
-    # audio; a warm run is about a minute. This is the "something hung" bound,
-    # not the expected duration.
+    # The suite fetches ~3.4 GB of models on a cold cache and synthesizes real
+    # audio on cpu; measured at 12m20s here with every engine's extra. This is
+    # the "something hung" bound, not the expected duration.
     timeout-minutes: 30
+
+    # Both libraries otherwise cache under `$HOME`, which the step below does not
+    # cache, so the ~34 MB `spacy_ontonotes.zip` that loading the Chatterbox
+    # tokenizer fetches unconditionally was re-downloaded on every run of a job
+    # whose cache exists precisely so a required check does not depend on a
+    # third-party host being up. Pointed under `models` they are cached with
+    # everything else.
+    #
+    # The same two variables the Dockerfile sets, for the same reason and not as
+    # a copy of it: there the second home is `USER elvenspeak`, here it is the
+    # uncached one. Neither file can read the other, so the shared fact is pinned
+    # where it can be: `tests/test_dockerfile.py` asks each library whether these
+    # are the names it actually reads.
+    env:
+      HF_HOME: ${{ github.workspace }}/models/huggingface
+      PKUSEG_HOME: ${{ github.workspace }}/models/pkuseg
+
     steps:
       - uses: actions/checkout@v4
 
@@ -43,12 +60,23 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
-      # [LAW:one-source-of-truth] `tests/conftest.py` decides which models the
-      # suite provisions, so its hash is what decides whether a cached set is
-      # still the right one. Keying on it over-invalidates -- an unrelated edit
-      # to that file re-downloads -- and that is the direction to be wrong in:
-      # the other one serves a stale asset set to a suite that asked for a new
-      # one, and reports it as a pass.
+      # [LAW:one-source-of-truth] The hash covers every file that decides which
+      # models the suite provisions, and that is two files rather than one.
+      # `tests/conftest.py` holds piper's `INSTALLED_VOICE` and kokoro's
+      # `KOKORO_MODEL`, but chatterbox pins its checkpoint set as `_REVISION` in
+      # `elvenspeak/chatterbox.py`, so keying on conftest alone left the pin this
+      # key exists to track outside it.
+      #
+      # That gap does not fail loudly, which is why it is worth the second path:
+      # `actions/cache@v4` never overwrites a key it already saved, so bumping
+      # `_REVISION` alone would leave the key unchanged, the new ~3 GiB fetched
+      # on every run and saved on none. The cache would look present and healthy
+      # while doing nothing, and the only symptom is a slower job.
+      #
+      # Keying on whole files over-invalidates -- an unrelated edit to either
+      # re-downloads -- and that is the direction to be wrong in: the other one
+      # serves a stale asset set to a suite that asked for a new one, and reports
+      # it as a pass.
       #
       # A miss costs time, never correctness: the fixtures fetch what is absent
       # through each engine's own `acquire`, which is the same door the image
@@ -58,7 +86,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: models
-          key: models-${{ hashFiles('tests/conftest.py') }}
+          key: models-${{ hashFiles('tests/conftest.py', 'elvenspeak/chatterbox.py') }}
 
       # One command rather than `uv sync` then `uv run`: a bare `uv run`
       # re-syncs, and would uninstall the extras a preceding sync had just
