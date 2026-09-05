@@ -29,6 +29,11 @@ from elvenspeak.engines import ENGINES
 
 WORKFLOW = Path(__file__).parent.parent / ".gitea" / "workflows" / "publish-image.yaml"
 ENGINE_SOURCE = Path(__file__).parent.parent / "elvenspeak" / "chatterbox.py"
+DEPLOY_INSTRUCTIONS = Path(__file__).parent.parent / "CLAUDE.md"
+
+#: An image name, which is also its service key in home-infra — the two are one
+#: string by construction, which is why one pattern finds both.
+_SERVICE_KEY = re.compile(r"elvenspeak-([a-z]+)")
 
 #: The build matrix's one axis. Matched against the file with its comments
 #: removed — this workflow's comments discuss the engine list at length, and a
@@ -84,6 +89,31 @@ def test_no_engine_is_built_twice():
     """
     engines = matrix_engines()
     assert len(engines) == len(set(engines)), engines
+
+
+def test_the_deploy_instructions_name_every_engine_and_no_others():
+    """[LAW:one-source-of-truth] The registry decides; the instructions follow.
+
+    `CLAUDE.md` tells an agent how many images a publish produces and which
+    service keys move together, by name. It is prose, so it cannot compute the
+    list, and it has now been wrong about it twice: #30 was merged to stop it
+    telling agents to deploy two of three images, and it still said three after
+    chatterbox landed in #33 — while containing a sentence predicting exactly
+    that ("the day a fourth engine is added, this sentence is the thing that went
+    stale"). Predicting the drift is not preventing it. This is what prevents it.
+
+    The direction that matters is the silent one. An engine missing from that
+    list is an image nobody deploys and a key nobody fills, and the deploy looks
+    complete — which is the same failure the matrix check above exists for, one
+    step further down the pipeline, where nothing else is watching.
+
+    Stated as an equivalence so it fails from both sides: a name here that no
+    longer names an engine sends someone looking for an image CI never built.
+    Sets rather than counts, because how many times a name is written is a fact
+    about the prose and none of this test's business.
+    """
+    named = set(_SERVICE_KEY.findall(DEPLOY_INSTRUCTIONS.read_text(encoding="utf-8")))
+    assert named == set(ENGINES)
 
 
 #: The CPU row of `elvenspeak.chatterbox`'s measurement table, which owns both
