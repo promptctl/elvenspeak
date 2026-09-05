@@ -406,6 +406,21 @@ jobs:
           echo "runner: $(uname -s) $(uname -m), $(nproc) cpu"
           echo "user:   $(id -un) (uid $(id -u))"
           df -h / | tail -1
+          # MEASURING THE CEILING, because every candidate fix for the 137 this job
+          # has been dying of is weighed against a number nobody has ever read: the
+          # step printed cpu, user and disk and no memory at all -- the one figure
+          # that explains an OOM kill is the one it did not collect.
+          #
+          # /proc rather than `free`, for the reason the `reachability` job already
+          # gives: procps is not in every job image, and a capacity report that
+          # vanishes with the base image is no report. MemAvailable, not MemTotal,
+          # is what a process may actually have.
+          awk '/^MemTotal:|^MemAvailable:/{printf "%-14s %6d MB\n", $1, int($2/1024)}' /proc/meminfo
+          # The container's own limit, which is below the host's when there is one.
+          # Both cgroup layouts, and "none" is a real answer rather than a failure.
+          for limit in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+            if [ -r "$limit" ]; then echo "cgroup limit:  $(cat "$limit") ($limit)"; fi
+          done
 
       # ffmpeg and espeak-ng are native and no Python metadata can declare them, so an
       # installer cannot bring them and the suite cannot skip past them -- see README,
@@ -444,8 +459,34 @@ jobs:
       # [LAW:one-source-of-truth] The command is the same one the merge gate runs, and
       # `tests/test_merge_gate.py` asserts that it stays the same. Two gates running
       # two different suites would mean "the tests passed" naming two different facts.
+      # INSTRUMENTED THROUGH THE ENVIRONMENT, never through the command. The `run:`
+      # line below is held byte-equal to `.github/workflows/tests.yml`'s by
+      # `tests/test_merge_gate.py`, and its `_NARROWERS` check refuses anything that
+      # shrinks what pytest collects. An instrument that edited the command would be
+      # altering the thing it was brought in to observe -- so the plugin arrives as
+      # PYTEST_ADDOPTS and the suite stays the suite both gates already run.
+      #
+      # `tests/rsscurve.py` writes one row per test and flushes each, so the rows
+      # survive the SIGKILL this exists to explain.
       - name: Run the suite
+        env:
+          PYTEST_ADDOPTS: -p tests.rsscurve
+          RSS_CURVE_OUT: ${{ github.workspace }}/rss-curve.csv
         run: uv run --all-extras --locked pytest -q
+
+      # `always()` because the interesting run is the one that died: on a green run
+      # this is a curve nobody needs, and on exit 137 it is the whole finding.
+      - name: Report where the memory went
+        if: always()
+        run: |
+          set -uo pipefail
+          curve="${{ github.workspace }}/rss-curve.csv"
+          test -f "$curve" || { echo "no curve written -- died before the first test"; exit 0; }
+          echo "rows: $(( $(wc -l < "$curve") - 1 ))"
+          echo "--- every test that raised the high-water mark ---"
+          awk -F, 'NR>1 && $4+0 > mx+50 { printf "%9.1f MiB  (rss %.1f -> %.1f)  %s\n", $4, $2, $3, $1; mx=$4+0 }' "$curve"
+          echo "--- last 15 rows before the end ---"
+          tail -15 "$curve"
 
   publish:
     # Both, and the order of the list is not the order they run: a red suite and an
