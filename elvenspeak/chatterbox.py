@@ -681,6 +681,15 @@ def _releasing_state_dict(owner: type) -> "Iterator[None]":
     the copy at the one moment we can name from outside: as `load_state_dict`
     finishes reading it.
 
+    What that assumes, stated because it is an assumption about somebody else's
+    code: that `from_local` never reads the dict again after handing it over.
+    True of `chatterbox-tts` 0.1.7, read rather than inferred — line 182 copies,
+    183 is `t3.to(device).eval()`, and the name is dead from there to the return.
+    `uv.lock` is what holds the version that was read, so this cannot drift
+    without a deliberate lockfile commit; and the conformance suite drives the
+    real library through here, so a version that broke the premise fails in CI
+    rather than shipping a quietly wrong model.
+
     Measured through this same `_open` rather than around it, it is the whole of
     6.68 GiB becoming 4.69, level with the resident set. Which matters because
     the build runner is 2 cpu and 7.9 GB shared by four concurrent legs and one
