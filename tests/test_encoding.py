@@ -234,7 +234,7 @@ def test_the_server_cannot_reach_a_concrete_engine(root: str):
     assert not _modules_reaching_an_engine(root)
 
 
-@pytest.mark.parametrize("root", ["piper", "kokoro"])
+@pytest.mark.parametrize("root", ["piper", "kokoro", "chatterbox"])
 def test_the_seam_check_can_actually_fail(root: str):
     """Positive control: the detector still detects.
 
