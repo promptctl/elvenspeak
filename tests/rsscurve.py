@@ -12,6 +12,15 @@ Appended and flushed per test rather than assembled at session finish, because
 the run this explains is one that gets killed: a report written at the end would
 be lost in precisely the case it was built for.
 
+That flush is necessary and was not sufficient, which run 22 measured. The OOM
+killer takes the whole job container, so the `if: always()` step that reads this
+file never ran and the log ended mid-suite at 23% with no report -- a file
+flushed inside a container is durable only against the process dying, never
+against the container dying with it. So every rise in the high-water mark is
+also written to the terminal reporter, which pytest holds open from before
+capture and act_runner streams out of the container line by line. A row that has
+already left the box cannot be killed with it.
+
 Loaded only when something passes `-p rsscurve`, so the suite it measures is
 byte-for-byte the suite both gates already run -- `tests/test_merge_gate.py`
 holds the two `run:` lines equal, and an instrument that edited them would be
@@ -64,9 +73,13 @@ def _path():
 
 
 _before = {}
+_peak = 0.0
+_config = None
 
 
 def pytest_configure(config):
+    global _config
+    _config = config
     with open(_path(), "w") as handle:
         handle.write("nodeid,rss_before_mib,rss_after_mib,peak_after_mib\n")
 
@@ -77,6 +90,31 @@ def pytest_runtest_logstart(nodeid, location):
 
 def pytest_runtest_logfinish(nodeid, location):
     before = _before.pop(nodeid, float("nan"))
+    after, peak = _rss_mib(), _peak_mib()
     with open(_path(), "a") as handle:
-        handle.write(f"{nodeid},{before:.1f},{_rss_mib():.1f},{_peak_mib():.1f}\n")
+        handle.write(f"{nodeid},{before:.1f},{after:.1f},{peak:.1f}\n")
         handle.flush()
+    _report_a_rise(nodeid, before, after, peak)
+
+
+def _report_a_rise(nodeid, before, after, peak):
+    """Say so, in the log, whenever this test raised the high-water mark.
+
+    Every test would be 625 lines of noise; `ru_maxrss` only ever rises, so the
+    tests that raise it are the whole finding and there are a handful of them.
+    The 50 MiB floor is what keeps ordinary allocation churn off the list.
+
+    The reporter is asked for here rather than held from `pytest_configure`,
+    because at that point it does not exist yet: a `-p` plugin configures before
+    the terminal plugin registers, so a cached one is a cached `None` -- which is
+    what the first draft cached, and it raised INTERNALERROR on the first test.
+    The plugin manager owns this; keeping a copy meant keeping a wrong one.
+    """
+    global _peak
+    if peak <= _peak + 50:
+        return
+    _peak = peak
+    reporter = _config.pluginmanager.getplugin("terminalreporter")
+    reporter.write_line(
+        f"[rss] peak {peak:9.1f} MiB  (rss {before:.1f} -> {after:.1f})  {nodeid}"
+    )
