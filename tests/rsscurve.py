@@ -21,6 +21,18 @@ also written to the terminal reporter, which pytest holds open from before
 capture and act_runner streams out of the container line by line. A row that has
 already left the box cannot be killed with it.
 
+Rows on their own went blind after the mark stopped rising, which run 23
+measured: the last row was `test_the_engine_declares_nothing_it_cannot_do` at
+5798.2 MiB, and the job then died four minutes and ten seconds later having
+printed nothing at all -- because `ru_maxrss` is monotonic, so no later test can
+report a *rise*, and the killer strikes between one test's `logstart` and its
+`logfinish` rather than at either. A test that dies mid-call is exactly the test
+the report needed to name and the only one it structurally could not. So above
+`_DANGER_MIB` every test is bracketed by a line on the way in and a line on the
+way out: the last `enter` with no `peak` after it names the victim, and the pair
+around a test that survives is what a synthesis costs on top of a loaded model --
+the figure run 23 died without reporting.
+
 Loaded only when something passes `-p rsscurve`, so the suite it measures is
 byte-for-byte the suite both gates already run -- `tests/test_merge_gate.py`
 holds the two `run:` lines equal, and an instrument that edited them would be
@@ -38,6 +50,14 @@ _LINUX = os.uname().sysname == "Linux"
 #: process as using 57 GiB, which a known-answer check caught and a plausible
 #: number would not have.
 _PEAK_SCALE = 1024 if _LINUX else 1024 * 1024
+
+#: Above this the process is close enough to the runner's ceiling that every test
+#: is worth two lines. Read off run 23: everything before `test_chatterbox.py`
+#: ran under 858 MiB and every test that holds a model ran above 5100, so any
+#: floor between those two separates the tests that cannot kill the job from the
+#: tests that do -- and 3000 sits far enough from both that a runner with more or
+#: less memory than that one does not move which side a test falls on.
+_DANGER_MIB = 3000
 
 
 def _peak_mib():
@@ -85,7 +105,21 @@ def pytest_configure(config):
 
 
 def pytest_runtest_logstart(nodeid, location):
-    _before[nodeid] = _rss_mib()
+    rss = _before[nodeid] = _rss_mib()
+    _report_entering_the_danger_zone(rss, nodeid)
+
+
+def _report_entering_the_danger_zone(rss, nodeid):
+    """Name the test on the way in, while there is still a process to name it.
+
+    This is the half `logfinish` cannot cover: the OOM killer lands inside a
+    test, so the row written after that test never exists, and run 23 ended with
+    four minutes of silence naming nobody. The last `enter` line with no `peak`
+    line after it is the victim, and it costs one line per test above the floor.
+    """
+    if rss <= _DANGER_MIB:
+        return
+    _write_line(f"[rss] enter {rss:9.1f} MiB  {nodeid}")
 
 
 def pytest_runtest_logfinish(nodeid, location):
@@ -94,15 +128,21 @@ def pytest_runtest_logfinish(nodeid, location):
     with open(_path(), "a") as handle:
         handle.write(f"{nodeid},{before:.1f},{after:.1f},{peak:.1f}\n")
         handle.flush()
-    _report_a_rise(nodeid, before, after, peak)
+    _report_if_worth_a_line(nodeid, before, after, peak)
 
 
-def _report_a_rise(nodeid, before, after, peak):
-    """Say so, in the log, whenever this test raised the high-water mark.
+def _report_if_worth_a_line(nodeid, before, after, peak):
+    """Say so, in the log, whenever this test is one somebody will want back.
 
-    Every test would be 625 lines of noise; `ru_maxrss` only ever rises, so the
-    tests that raise it are the whole finding and there are a handful of them.
-    The 50 MiB floor is what keeps ordinary allocation churn off the list.
+    Two tests are: the one that raised the high-water mark, and the one that ran
+    near the ceiling. Every test would be 625 lines of noise; `ru_maxrss` only
+    ever rises, so the tests that raise it are a handful and the 50 MiB floor
+    keeps ordinary allocation churn off that list. The second rule exists because
+    the first goes quiet at exactly the wrong moment -- once a load has set the
+    mark at 5798 MiB, a synthesis costing 600 MiB on top of a resident model
+    raises nothing and prints nothing, and that synthesis is what killed run 23.
+    Above `_DANGER_MIB` the `before -> after` pair is the measurement, whether or
+    not the mark moved.
 
     The reporter is asked for here rather than held from `pytest_configure`,
     because at that point it does not exist yet: a `-p` plugin configures before
@@ -111,10 +151,21 @@ def _report_a_rise(nodeid, before, after, peak):
     The plugin manager owns this; keeping a copy meant keeping a wrong one.
     """
     global _peak
-    if peak <= _peak + 50:
+    rose = peak > _peak + 50
+    if rose:
+        _peak = peak
+    if not (rose or after > _DANGER_MIB):
         return
-    _peak = peak
-    reporter = _config.pluginmanager.getplugin("terminalreporter")
-    reporter.write_line(
+    _write_line(
         f"[rss] peak {peak:9.1f} MiB  (rss {before:.1f} -> {after:.1f})  {nodeid}"
     )
+
+
+def _write_line(text):
+    """One spelling of "put this where the container cannot take it with it".
+
+    [LAW:one-source-of-truth] Both reporting rules write through here, so the
+    lazy `getplugin` -- which is the whole of what the first draft got wrong --
+    is resolved in one place rather than once per rule.
+    """
+    _config.pluginmanager.getplugin("terminalreporter").write_line(text)
