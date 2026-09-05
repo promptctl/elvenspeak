@@ -474,8 +474,12 @@ jobs:
           RSS_CURVE_OUT: ${{ github.workspace }}/rss-curve.csv
         run: uv run --all-extras --locked pytest -q
 
-      # `always()` because the interesting run is the one that died: on a green run
-      # this is a curve nobody needs, and on exit 137 it is the whole finding.
+      # `always()` reaches a red suite, and measurably does not reach an OOM kill:
+      # on run 22 the killer took the whole job container and this step never ran,
+      # so the log simply ended at 23% with no report. It is kept for the failure
+      # it does cover -- a suite that goes red and exits -- while the finding this
+      # was built for now leaves the container as it happens, printed by
+      # `tests/rsscurve.py` to the terminal reporter at every rise in the mark.
       - name: Report where the memory went
         if: always()
         run: |
