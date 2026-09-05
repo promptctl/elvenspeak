@@ -35,14 +35,22 @@ disagree with itself across. That the property collapsed into an identity is a
 fact about the interface being right, and it is worth more stated here than it
 would be as a test that cannot fail.
 
-# Piper is not deterministic
+# No real engine here is deterministic
 
-It is a VITS model sampling from a noise distribution, and the same sentence
-three times gave 36352, 37888 and 37376 samples — a spread of about 4%. Every
-comparison below between two syntheses is therefore made across a margin that
-dwarfs it: a text ten times longer, a speed four times apart. A property that
-needed the two calls to agree exactly would be tested against one buffer instead,
-and there is no such property here.
+Piper is a VITS model sampling from a noise distribution, and the same sentence
+three times gave 36352, 37888 and 37376 samples — a spread of about 4%.
+Chatterbox is an autoregressive sampler and is noisier still: six syntheses of
+[`LONG`] in one voice ranged 158400 to 177600 samples, a spread of about 12%.
+Every comparison below between two syntheses is therefore made across a margin
+that dwarfs it: a text ten times longer, a speed four times apart. A property
+that needed the two calls to agree exactly would be tested against one buffer
+instead, and there is no such property here.
+
+That margin must be *declared*, not merely intended. A bare `a < b` between two
+syntheses reads like a comparison across a margin and is none: for an engine
+whose speed is neutralised it is the same request twice, and which call comes
+back longer is the sampler's coin flip. See [`_PACE_CHANGED`], which is the
+first place that mattered.
 """
 
 from __future__ import annotations
@@ -53,6 +61,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 import pytest
 from conftest import (
     declaring,
+    chatterbox_prepared,
     DECLARED_VOICES,
     INSTALLED_VOICE,
     MODELS_DIR,
@@ -72,6 +81,14 @@ LONG = (
     "Compatibility is measurable, and the measurement is this: a client written "
     "against somebody else's API reaches this one by changing a base URL."
 )
+
+#: How much shorter the fast synthesis must be before the pace counts as
+#: changed, as a fraction of the slow one. A measurement, not a taste: an engine
+#: that ignores speed returned fast/slow ratios of 0.892 to 1.023 across six
+#: syntheses, and one that honours a 4x change returns about 0.25. This sits a
+#: factor of three from each, so neither sampling noise nor a real speed change
+#: lands near it.
+_PACE_CHANGED = 0.7
 
 
 #: [LAW:composability] The real engines fetch what they need by opening with
@@ -106,11 +123,39 @@ def kokoro_engine() -> AbstractContextManager[Engine]:
     return nullcontext(kokoro_prepared(MODELS_DIR, allow_download=True).open())
 
 
+def chatterbox_engine() -> AbstractContextManager[Engine]:
+    """The third real engine, and by a wide margin the most expensive subject here.
+
+    It is registered anyway, and the expense is the argument for it rather than
+    against it: every other subject either makes its noise in memory or opens an
+    ONNX session under 150 MB, so until this one arrived the suite had never held
+    an engine to the contract that could not answer instantly. What it adds is a
+    0.5B autoregressive model whose audio takes longer to make than to play, and
+    the properties below — a stable voice list, whole samples, a longer text
+    making more audio — are exactly the ones a slow engine is tempted to fake.
+
+    What it costs, measured: ~3.06 GiB of checkpoints fetched once, a 4.69 GiB
+    resident load with a 6.68 GiB peak, and synthesis at 8-33x real time on
+    `cpu` — so the handful of utterances below are minutes rather than seconds.
+    `conftest.CHATTERBOX_DEVICE` is how a machine with an accelerator says so and
+    gets the same tests several times faster.
+
+    One speaker and one language, so this subject offers a single voice. The
+    voice *product* — that `<speaker>-<language>` is the id and that two ids can
+    be the same person — is this engine's own property rather than the seam's,
+    and `test_chatterbox.py` asserts it from descriptions instead of by
+    synthesizing a second voice nothing here would ask a different question of.
+    """
+    return nullcontext(
+        chatterbox_prepared(MODELS_DIR, allow_download=True).open()
+    )
+
+
 @contextmanager
 def router_engine() -> Iterator[Engine]:
     """The router over a real elvenspeak server, opened as `main.build` opens it.
 
-    The third real engine, and the one whose conformance is least obvious: every
+    The fourth real engine, and the one whose conformance is least obvious: every
     property below has to survive a round trip through HTTP, an encode to PCM and
     a decode back, and — for the timed path — an alignment that was built from
     the backend's durations and has to be turned back into durations here.
@@ -164,6 +209,7 @@ ENGINES = [
     ),
     pytest.param(piper_engine, id="piper"),
     pytest.param(kokoro_engine, id="kokoro"),
+    pytest.param(chatterbox_engine, id="chatterbox"),
     pytest.param(router_engine, id="router"),
 ]
 
@@ -373,10 +419,15 @@ def test_the_pace_varies_exactly_when_speed_is_declared(subject: Engine):
     for the engines that declare nothing would leave exactly that case untested.
     """
     for voice in one_per_claim(subject):
-        varies = samples_of(subject, voice, LONG, speed=2.0) < samples_of(
-            subject, voice, LONG, speed=0.5
+        fast = samples_of(subject, voice, LONG, speed=2.0)
+        slow = samples_of(subject, voice, LONG, speed=0.5)
+        # [LAW:verifiable-goals] Across `_PACE_CHANGED` rather than a bare `<`,
+        # so an engine that ignores speed is judged on a margin its own sampling
+        # noise cannot cross.
+        varies = fast < slow * _PACE_CHANGED
+        assert varies == (Capability.SPEED in voice.capabilities), (
+            f"{voice.id}: {fast} samples at speed 2.0 against {slow} at 0.5"
         )
-        assert varies == (Capability.SPEED in voice.capabilities), voice.id
 
 
 def test_a_declared_measurement_accounts_for_every_sample(measuring):
