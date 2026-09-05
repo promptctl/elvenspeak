@@ -482,6 +482,61 @@ def test_two_voices_spoken_at_once_are_each_answered_in_their_own_voice():
     assert together == alone
 
 
+# ------------------------------------------- not holding the weights twice
+
+
+class _Loading:
+    """A class with a `load_state_dict`, which is all the release wraps.
+
+    Standing in for `T3` because that is the entire contract: something copies a
+    dict and something else has to be able to say when the copy is finished.
+    Recording what arrived is how the test can tell "released after the copy"
+    from "released instead of it" — a wrapper that emptied the dict first would
+    leave the model silently unweighted and every assertion about memory green.
+    """
+
+    def load_state_dict(self, state_dict):
+        self.copied = dict(state_dict)
+        return "what the original returned"
+
+
+def test_the_weights_are_released_once_they_have_been_copied():
+    """The 2 GiB the load used to carry past its last use is dropped at the copy.
+
+    Asserted on the caller's own dict, because that is what upstream holds: the
+    name `from_local` binds stays in scope until the function returns, so
+    emptying the object it names is the only thing that frees the tensors from
+    outside. Both halves are the point — the copy is complete, and the original
+    is gone.
+    """
+    weights = {"speech_head.weight": ["2044.7 MiB of it"]}
+    loading = _Loading()
+
+    with chatterbox._releasing_state_dict(_Loading):
+        returned = loading.load_state_dict(weights)
+
+    assert returned == "what the original returned"
+    assert loading.copied == {"speech_head.weight": ["2044.7 MiB of it"]}
+    assert weights == {}
+
+
+def test_the_class_is_left_as_it_was_found_even_when_the_load_raises():
+    """[LAW:no-shared-mutable-globals] The window closes on the path nobody plans for.
+
+    `T3` is shared by everything that imports it, and a load that raises is the
+    likeliest way this repository ever exercises the failure path — a truncated
+    checkpoint, a revision that moved. Leaking the wrapper past that would leave
+    every later `load_state_dict` in the process silently dropping its argument.
+    """
+    original = _Loading.load_state_dict
+
+    with pytest.raises(ZeroDivisionError):
+        with chatterbox._releasing_state_dict(_Loading):
+            1 / 0
+
+    assert _Loading.load_state_dict is original
+
+
 # ============================================================================
 # The divider the module docstring names. Below it the checkpoints are on disk;
 # what that costs, and why the refusals down here deliberately do not pay it, is

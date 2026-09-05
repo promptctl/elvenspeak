@@ -509,7 +509,9 @@ jobs:
     # before it just built rather than contending for the CPU the build is bound by. The
     # router leg is the cheap one — no ONNX runtime, no baked assets — but it contends
     # for the same daemon. The chatterbox leg is the opposite: its bake loads the model
-    # to clone from it: 4.69 GiB resident and 6.68 GiB peak for one model. That figure
+    # to clone from it: 4.69 GiB resident and a matching 4.69 GiB peak for one model —
+    # matching only because `elvenspeak.chatterbox._releasing_state_dict` holds it so.
+    # That figure
     # is `elvenspeak/chatterbox.py`'s to own — its module docstring holds the table this
     # row is read from, and `tests/test_workflow.py` fails if the two ever disagree,
     # because a comment telling an operator to check free RAM against a stale number is
@@ -520,7 +522,10 @@ jobs:
     # Check this runner's free RAM against those figures before making that push for the
     # first time with chatterbox in the matrix. The symptom of not checking is an OOM kill
     # on whichever leg was unlucky — again a build failure with nothing to do with the
-    # commit that hit it.
+    # commit that hit it. Observed, not theorised: run 5857 (2026-09-05), the first push
+    # of the chatterbox engine, died in `tests` four and a half minutes in at 23% with no
+    # traceback of any kind, and every publish leg skipped behind it. The peak was 6.68
+    # GiB then, on a runner the ops node reports 6925 MiB free on.
     # Enforcing it needs a mechanism act_runner actually reads — the
     # workflow-level `concurrency` group below is the only one proved on this runner, and
     # it scopes across runs rather than within one. Deliberately not replaced with an
