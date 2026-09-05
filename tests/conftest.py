@@ -80,22 +80,49 @@ def pytest_runtest_teardown(item):
     Before this, whether the suite survived depended on whether the allocator
     happened to reuse a dead test's pages for a live test's model -- which run 23
     got (row 8 grew by 171 MiB for a whole model) and which nothing guarantees,
-    on a runner whose available memory moved 450 MB between two consecutive runs.
+    on a runner whose available memory moved 825 MB across four runs.
 
     A wrapper, and the whole of why run 24 still died. A plain hook here is
     registered after the builtin ones and therefore runs *before* them, so it
-    trimmed a heap whose fixtures had not been torn down yet -- and the module
-    fixture that holds a Chatterbox model is finalized in exactly that phase.
-    Run 24 carried its 3410 MiB through every test of `test_conformance.py`,
-    flat at 4675.9 MiB where the floor should have been near 1265, and died in
-    the Kokoro parameters before the Chatterbox ones were even reached. Yielding
-    first puts the trim after the teardown it exists to collect.
+    trimmed a heap whose fixtures had not been torn down yet. Yielding first
+    puts the trim after the teardown it exists to collect.
     """
     try:
         return (yield)
     finally:
-        gc.collect()
-        _trim_the_heap()
+        _reclaim()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_setup(item):
+    """And again once the *previous* module's fixtures have been let go.
+
+    Teardown alone was not enough, which runs 24 and 25 both measured: a
+    module-scoped fixture is finalized during the setup of the first test of the
+    *next* module, so the 3412 MiB Chatterbox model is released here and not at
+    any teardown. Trimming only at teardown meant the release happened, then the
+    new test ran its body and allocated through the hole, and by the time the
+    trim came around the free space was no longer contiguous enough to give
+    back. Run 25 carried that model flat at 4659.9 MiB through every Piper and
+    Kokoro parameter of `test_conformance.py` -- against a 1040.7 MiB baseline
+    the same run had already demonstrated one test earlier -- and the box spent
+    35 minutes thrashing on a test that takes 7 seconds on a workstation before
+    the killer took the container.
+
+    [LAW:one-source-of-truth] Both moments call [`_reclaim`]. Two spellings of
+    "give the memory back" are free to drift into two different ideas of what
+    that means.
+    """
+    try:
+        return (yield)
+    finally:
+        _reclaim()
+
+
+def _reclaim():
+    """Collect what is unreachable, then hand the free pages to the kernel."""
+    gc.collect()
+    _trim_the_heap()
 
 
 #: Every variable a startup answers for — the server's own and the engines' —
