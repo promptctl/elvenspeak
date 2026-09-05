@@ -55,6 +55,7 @@ def _heap_trimmer() -> Callable[[], None]:
 _trim_the_heap = _heap_trimmer()
 
 
+@pytest.hookimpl(wrapper=True)
 def pytest_runtest_teardown(item):
     """Hand a test's memory back to the kernel before the next test starts.
 
@@ -80,9 +81,21 @@ def pytest_runtest_teardown(item):
     happened to reuse a dead test's pages for a live test's model -- which run 23
     got (row 8 grew by 171 MiB for a whole model) and which nothing guarantees,
     on a runner whose available memory moved 450 MB between two consecutive runs.
+
+    A wrapper, and the whole of why run 24 still died. A plain hook here is
+    registered after the builtin ones and therefore runs *before* them, so it
+    trimmed a heap whose fixtures had not been torn down yet -- and the module
+    fixture that holds a Chatterbox model is finalized in exactly that phase.
+    Run 24 carried its 3410 MiB through every test of `test_conformance.py`,
+    flat at 4675.9 MiB where the floor should have been near 1265, and died in
+    the Kokoro parameters before the Chatterbox ones were even reached. Yielding
+    first puts the trim after the teardown it exists to collect.
     """
-    gc.collect()
-    _trim_the_heap()
+    try:
+        return (yield)
+    finally:
+        gc.collect()
+        _trim_the_heap()
 
 
 #: Every variable a startup answers for — the server's own and the engines' —
