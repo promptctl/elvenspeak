@@ -135,8 +135,9 @@ def chatterbox_engine() -> AbstractContextManager[Engine]:
     making more audio — are exactly the ones a slow engine is tempted to fake.
 
     What it costs, measured: ~3.06 GiB of checkpoints fetched once, a 4.69 GiB
-    resident load with a 6.68 GiB peak, and synthesis at 8-33x real time on
-    `cpu` — so the handful of utterances below are minutes rather than seconds.
+    resident load with a matching 4.69 GiB peak, and synthesis at 8-33x real
+    time on `cpu` — so the handful of utterances below are minutes rather than
+    seconds.
     `conftest.CHATTERBOX_DEVICE` is how a machine with an accelerator says so and
     gets the same tests several times faster.
 
