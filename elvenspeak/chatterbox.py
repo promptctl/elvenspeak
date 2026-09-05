@@ -81,9 +81,9 @@ and Kokoro ~0.77 on this class of machine.
     device                          RTF, warm     resident
     RTX 2070 (CUDA, fp32)           0.76 - 1.09   3.2 GiB VRAM + 3.5 GiB host
     Apple M-series GPU (MPS, fp32)  2.33 - 4.30   ~4.8 GiB unified
-    CPU (12 cores, 4 threads)       7.62 - 33.3   4.69 GiB, 6.68 GiB peak
+    CPU (12 cores, 4 threads)       7.62 - 33.3   4.69 GiB, 4.69 GiB peak
 
-Three things follow, and each of them is a decision in the code below.
+These follow, and each of them is a decision in the code below.
 
 CPU IS NOT A FALLBACK. An order of magnitude past useful is not a degraded
 service, it is a different one: "Yes." took 22.7 seconds. So the device is named
@@ -92,6 +92,15 @@ by the deployment and never chosen for it — see [`configure`].
 MORE CORES DO NOT HELP. 12 threads measured RTF 9.96-30.9 against 4 threads'
 7.62-33.3. The bottleneck is an autoregressive sampling loop running at ~4.7
 tokens/s, which is latency, not throughput.
+
+THE PEAK IS HELD DOWN RATHER THAN NATURALLY EQUAL, which is why the row above
+quotes the same figure twice instead of dropping a column. Left alone this load
+peaks 2 GiB above where it settles: `from_local` keeps the T3 weights referenced
+after copying them into an already-allocated T3, so S3Gen's ~1 GiB is allocated
+on top of a spent 2 GiB. [`_releasing_state_dict`] drops them at the copy, and
+that is the whole distance between the 6.68 GiB this used to peak at and the
+figure above — which on the 7.9 GB build runner is the distance between a build
+that publishes and a `tests` job killed with no traceback.
 
 HALVING THE WEIGHTS IS NOT AVAILABLE. bfloat16 would halve the resident set, and
 on CUDA it fails with `mat1 and mat2 must have the same dtype` because the
@@ -111,8 +120,10 @@ this engine short spans, so this is the property that mattered most.
 
 from __future__ import annotations
 
+import gc
 import logging
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -484,7 +495,13 @@ class _Prepared:
             )
 
         _LOGGER.info("opening chatterbox on %s from %s", self.device, checkpoints)
-        model = ChatterboxMultilingualTTS.from_local(checkpoints, self.device)
+        # See [`_releasing_state_dict`]: without it this line peaks 2 GiB above
+        # the resident set it leaves behind, which is more than the build runner
+        # has to give it.
+        from chatterbox.models.t3 import T3
+
+        with _releasing_state_dict(T3):
+            model = ChatterboxMultilingualTTS.from_local(checkpoints, self.device)
 
         # [LAW:no-ambient-temporal-coupling] Taken before the speaker loop, which
         # rebinds `model.conds` on every clone. The operator is free to name
@@ -649,6 +666,67 @@ def _reference(models_dir: Path, speaker: str) -> Path:
     alice", and the refusal would name a file the clone never reads.
     """
     return models_dir / REFERENCES_DIR / f"{speaker}.wav"
+
+
+@contextmanager
+def _releasing_state_dict(owner: type) -> "Iterator[None]":
+    """For the block's length, `owner.load_state_dict` drops each dict it copies.
+
+    The 2 GiB between what this engine peaks at and what it settles to is one
+    local variable outliving its use. `ChatterboxMultilingualTTS.from_local`
+    binds the T3 safetensors — 2044.7 MiB — copies them into an
+    already-allocated T3, and then loads S3Gen's weights while that spent copy is
+    still referenced, because the name holding it stays in scope until the
+    function returns. Nothing in that order is ours to change, so this releases
+    the copy at the one moment we can name from outside: as `load_state_dict`
+    finishes reading it.
+
+    What that assumes, stated because it is an assumption about somebody else's
+    code: that `from_local` never reads the dict again after handing it over.
+    True of `chatterbox-tts` 0.1.7, read rather than inferred — line 182 copies,
+    183 is `t3.to(device).eval()`, and the name is dead from there to the return.
+    `uv.lock` is what holds the version that was read, so this cannot drift
+    without a deliberate lockfile commit; and the conformance suite drives the
+    real library through here, so a version that broke the premise fails in CI
+    rather than shipping a quietly wrong model.
+
+    Measured through this same `_open` rather than around it, it is the whole of
+    6.68 GiB becoming 4.69, level with the resident set. Which matters because
+    the build runner is 2 cpu and 7.9 GB shared by four concurrent legs and one
+    Docker daemon: the suite that peaked at 6.68 was killed there four and a half
+    minutes in, with no traceback at all, and every publish leg skipped behind
+    it — a red build saying nothing whatever about the commit it was asked to
+    prove.
+
+    [LAW:no-shared-mutable-globals] Patching a class writes to state every
+    importer of that class shares, so the window is owned rather than ambient: it
+    is exactly this block, and `finally` closes it on the raising path too. The
+    same two lines at import time would fix this load and bound nothing after it.
+
+    [LAW:composability] `owner` is a parameter rather than the `T3` this exists
+    for. A class with one method is the entire contract, so a test can hand it
+    one and prove the release without the library or 3 GiB of checkpoints — and
+    this module keeps its property that nothing outside `_open` touches
+    `chatterbox`.
+    """
+    original = owner.load_state_dict
+
+    def load_then_release(self, state_dict, *args, **kwargs):
+        loaded = original(self, state_dict, *args, **kwargs)
+        state_dict.clear()
+        # Refcounting frees the tensors at `clear`; this is for the ones upstream
+        # holds in a cycle, and is the shape the 4.69 GiB figure was measured on.
+        gc.collect()
+        return loaded
+
+    owner.load_state_dict = load_then_release
+    try:
+        yield
+    finally:
+        # `original` may have been inherited, in which case this restores it as an
+        # attribute of `owner` instead. Every caller resolves it to the same
+        # function either way, which is the only thing this promises.
+        owner.load_state_dict = original
 
 
 def _cloned(
