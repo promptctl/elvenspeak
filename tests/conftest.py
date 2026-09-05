@@ -14,9 +14,11 @@ capability test drives, and where the real ones' models are kept.
 
 from __future__ import annotations
 
+import ctypes
+import gc
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -31,6 +33,57 @@ from elvenspeak.engine import (
     Timing,
     Voice,
 )
+
+
+def _heap_trimmer() -> Callable[[], None]:
+    """glibc's `malloc_trim`, or the no-op that stands in for it elsewhere.
+
+    Resolved once into a callable rather than asked per test:
+    [LAW:dataflow-not-control-flow] which platform this is, is a value read at
+    import, and the hook below runs the same single line on every machine.
+    """
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+    except OSError:
+        return lambda: None
+    libc.malloc_trim.argtypes = [ctypes.c_size_t]
+    libc.malloc_trim.restype = ctypes.c_int
+    return lambda: libc.malloc_trim(0)
+
+
+#: Bound at import, so the hook is one call rather than a platform test.
+_trim_the_heap = _heap_trimmer()
+
+
+def pytest_runtest_teardown(item):
+    """Hand a test's memory back to the kernel before the next test starts.
+
+    `free` returns a block to glibc's arena, not to the kernel, and the build
+    runner's OOM killer counts the arena. Run 23 measured exactly that gap:
+    `test_the_offered_order_is_the_configured_order` opened two Chatterbox
+    models, dropped both, and finished holding 5134.6 MiB against the 858.1 MiB
+    it was handed -- 4276 MiB resident with nothing alive to account for it. The
+    job died four minutes later at 5305.8 MiB against 5478 MB available, having
+    grown 171 MiB in between. It was not killed by what it was doing; it was
+    killed by what it had already finished doing and not given back.
+
+    [LAW:dataflow-not-control-flow] Every test, unconditionally, rather than the
+    two places a model is dropped today. The set of tests that hold something
+    worth reclaiming is not a fact this hook should have to know, and a release
+    that each test has to remember is one a new test will forget -- which is the
+    shape the suite already had, in the `del` and `gc.collect()` that
+    `test_the_offered_order_is_the_configured_order` performs by hand between its
+    two loads. On a heap with nothing to return this costs microseconds.
+
+    [LAW:no-ambient-temporal-coupling] The reclaim has one owner and one moment.
+    Before this, whether the suite survived depended on whether the allocator
+    happened to reuse a dead test's pages for a live test's model -- which run 23
+    got (row 8 grew by 171 MiB for a whole model) and which nothing guarantees,
+    on a runner whose available memory moved 450 MB between two consecutive runs.
+    """
+    gc.collect()
+    _trim_the_heap()
+
 
 #: Every variable a startup answers for — the server's own and the engines' —
 #: since `Settings.from_env` now splices an engine's parse into its own. One
