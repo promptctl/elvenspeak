@@ -45,10 +45,15 @@ def _heap_trimmer() -> Callable[[], None]:
     """
     try:
         libc = ctypes.CDLL("libc.so.6")
-    except OSError:
+        libc.malloc_trim.argtypes = [ctypes.c_size_t]
+        libc.malloc_trim.restype = ctypes.c_int
+    except (OSError, AttributeError):
+        # Both ways a platform can lack this, rather than only the one this
+        # project runs on: macOS has no `libc.so.6` at all, and a musl system's
+        # glibc shim loads under that name while missing the symbol. The second
+        # would otherwise raise at conftest import and take the whole collection
+        # down instead of degrading to the no-op named above.
         return lambda: None
-    libc.malloc_trim.argtypes = [ctypes.c_size_t]
-    libc.malloc_trim.restype = ctypes.c_int
     return lambda: libc.malloc_trim(0)
 
 
