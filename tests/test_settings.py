@@ -346,6 +346,20 @@ def test_the_concurrency_default_is_the_bound_that_was_already_there():
     assert from_env().concurrent_syntheses == min(32, (os.cpu_count() or 1) + 4)
 
 
+@pytest.mark.parametrize("unset", ["", "   "])
+def test_an_empty_concurrency_reads_as_unset(unset):
+    """The spelling the README documents must not crashloop the service.
+
+    `ELVENSPEAK_CONCURRENT_SYNTHESES=` with nothing after it is how the README
+    lists it and how a Nomad `env { NAME = "" }` arrives. Every other optional
+    variable in that block already tolerates empty as unset; a number that alone
+    refused it would fail a deployment copied from the documentation.
+    """
+    assert from_env(ELVENSPEAK_CONCURRENT_SYNTHESES=unset).concurrent_syntheses == (
+        min(32, (os.cpu_count() or 1) + 4)
+    )
+
+
 def test_a_chosen_concurrency_is_what_arrives():
     assert from_env(ELVENSPEAK_CONCURRENT_SYNTHESES="3").concurrent_syntheses == 3
 

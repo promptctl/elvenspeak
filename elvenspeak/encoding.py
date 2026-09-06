@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterator
-from contextlib import suppress
+from contextlib import AbstractAsyncContextManager, nullcontext, suppress
 
 from .formats import OutputFormat
 
@@ -71,14 +71,36 @@ class EncodingFailed(RuntimeError):
     """
 
 
+#: What a caller holds while each chunk is being made. An `asyncio.Semaphore`
+#: from the API, or [`NOTHING_TO_HOLD`] where the samples already exist.
+_Holding = AbstractAsyncContextManager
+
+#: The identity operation for callers whose chunks cost nothing to produce.
+#: [LAW:dataflow-not-control-flow] `_pump` enters this on every pull exactly as
+#: it enters a real gate, so there is no "is anything bounding this" branch and
+#: no second code path to be wrong.
+NOTHING_TO_HOLD: _Holding = nullcontext()
+
+
 async def encode(pcm: bytes, native_rate: int, fmt: OutputFormat) -> bytes:
     """Converts one complete buffer into `fmt`."""
-    chunks = [part async for part in encode_stream(_once(pcm), native_rate, fmt)]
+    chunks = [
+        part
+        async for part in encode_stream(
+            # Already synthesised: `_once` hands back a buffer that exists, so
+            # pulling it makes nothing and there is nothing to bound.
+            _once(pcm), native_rate, fmt, while_making_a_chunk=NOTHING_TO_HOLD
+        )
+    ]
     return b"".join(chunks)
 
 
 async def encode_stream(
-    pcm_chunks: Iterator[bytes], native_rate: int, fmt: OutputFormat
+    pcm_chunks: Iterator[bytes],
+    native_rate: int,
+    fmt: OutputFormat,
+    *,
+    while_making_a_chunk: _Holding,
 ) -> AsyncIterator[bytes]:
     """Converts samples into `fmt`, emitting encoded bytes as they are ready.
 
@@ -120,7 +142,7 @@ async def encode_stream(
     assert process.stdin is not None and process.stdout is not None
     assert process.stderr is not None
 
-    pump = asyncio.create_task(_pump(process, pcm_chunks))
+    pump = asyncio.create_task(_pump(process, pcm_chunks, while_making_a_chunk))
     errors = asyncio.create_task(process.stderr.read())
     failure: BaseException | None = None
     #: Whether the SIGKILL below came from this function. An exit code cannot
@@ -196,7 +218,9 @@ async def encode_stream(
         )
 
 
-async def _pump(process, pcm_chunks: Iterator[bytes]) -> None:
+async def _pump(
+    process, pcm_chunks: Iterator[bytes], while_making_a_chunk: _Holding
+) -> None:
     """Feeds samples into the encoder without blocking the loop.
 
     One chunk is pulled per await, each on a worker thread, and written before
@@ -206,12 +230,21 @@ async def _pump(process, pcm_chunks: Iterator[bytes]) -> None:
     An exception from the generator propagates out of this task intact rather
     than being flattened into an end-of-input that the encoder cannot tell from
     a finished sentence.
+
+    `while_making_a_chunk` is held across the pull and nothing else, which is the
+    only place a streamed synthesis actually costs anything: between pulls this
+    coroutine is blocked in `drain()` behind ffmpeg behind the client's socket,
+    and a caller that reads slowly is spending the network's time rather than the
+    engine's. Holding it across the write instead would charge a slow reader — or
+    a router proxying somebody else's audio — against a budget measured for
+    models doing work.
     """
     chunks = iter(pcm_chunks)
     done = object()
     try:
         while True:
-            chunk = await asyncio.to_thread(next, chunks, done)
+            async with while_making_a_chunk:
+                chunk = await asyncio.to_thread(next, chunks, done)
             if chunk is done:
                 break
             process.stdin.write(chunk)

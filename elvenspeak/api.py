@@ -49,7 +49,6 @@ import itertools
 import json
 import logging
 from collections.abc import AsyncIterator, Iterator
-from contextlib import AsyncExitStack
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -373,31 +372,6 @@ def _audible(voice: Voice, text: str, chunks: Iterator[bytes]) -> Iterator[bytes
         if chunk:
             return itertools.chain((chunk,), chunks)
     raise Silence(voice, text)
-
-
-async def _until_the_audio_ends(
-    holding: AsyncExitStack, chunks: AsyncIterator[bytes]
-) -> AsyncIterator[bytes]:
-    """Yields `chunks`, and gives the synthesis permit back once they run out.
-
-    The permit cannot simply be held across the handler, because the handler is
-    not where the synthesis happens. `piper.speak` returns an UNSTARTED generator
-    (piper.py:156) and `encoding._pump` pulls it one chunk per await, so on the
-    streaming endpoints the audio — and the memory it costs — is made long after
-    the response object was returned. A gate released when the handler returns
-    would bound the two eager endpoints and leave `/stream`, which is the one
-    openconv actually calls, exactly as unbounded as it was.
-
-    So ownership of the permit moves from the handler to this generator, by the
-    `AsyncExitStack.pop_all` idiom: every failure before the transfer unwinds
-    through the handler's own `async with`, and everything after it is this
-    generator's to release. Starlette closes a response body it will not finish,
-    which reaches the `async with` below as `GeneratorExit` and hands the permit
-    back on a caller that disconnected mid-utterance.
-    """
-    async with holding:
-        async for chunk in chunks:
-            yield chunk
 
 
 def _audible_pcm(voice: Voice, text: str, pcm: bytes) -> bytes:
@@ -803,30 +777,43 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         # or picks a model inside it would otherwise do that on the loop. The
         # samples are still pulled later, by the encoder's pump, so a client that
         # disconnects between request and read costs nothing.
-        # The permit is taken before the engine speaks and released by the
-        # response body, not here — see [`_until_the_audio_ends`]. Until
-        # `pop_all()` runs, this stack owns it, so a refusal from `_audible` or a
-        # raising engine gives it back on the way out.
-        async with AsyncExitStack() as stack:
-            await stack.enter_async_context(speaking_at_once)
+        # Scoped, rather than handed to the response body to hold for the whole
+        # utterance. That was tried, and the reason against it is what a permit
+        # measures: between chunks a stream is blocked in the encoder's `drain`
+        # behind the client's socket, so a slow reader — or a router proxying
+        # someone else's audio — would occupy a slot budgeted for a model doing
+        # work. The remaining chunks are bounded where they are actually made, by
+        # the same gate handed to the pump below.
+        #
+        # It also cannot leak, which the other shape could in principle: a permit
+        # released by the response body is never released if that body is never
+        # started, and `aclose()` on an unstarted async generator runs no code
+        # (measured). No abort was found that actually reaches that state through
+        # uvicorn — four hard mid-`speak` hang-ups returned every permit — so this
+        # is a shape that removes the question rather than a fix for an observed
+        # leak.
+        async with speaking_at_once:
             spoken = await asyncio.to_thread(
                 engine.speak,
                 resolution.voice,
                 body.text,
                 body.prosody(honoured(resolution.voice)),
             )
-        # The first chunk is pulled here, on the thread, and not by the encoder:
-        # it is what proves the engine spoke, and a `StreamingResponse` has
-        # already sent 200 by the time its body raises. The status line is the
-        # only place this answer can still be told, so the checkpoint has to run
-        # before the response object exists.
+            # The first chunk is pulled here, on the thread, and not by the
+            # encoder: it is what proves the engine spoke, and a
+            # `StreamingResponse` has already sent 200 by the time its body
+            # raises. The status line is the only place this answer can still be
+            # told, so the checkpoint has to run before the response object
+            # exists — and inside the permit, because pulling it synthesises.
             audible = await asyncio.to_thread(
                 _audible, resolution.voice, body.text, spoken.audio
             )
-            holding = stack.pop_all()
         return StreamingResponse(
-            _until_the_audio_ends(
-                holding, encoding.encode_stream(audible, spoken.sample_rate, fmt)
+            encoding.encode_stream(
+                audible,
+                spoken.sample_rate,
+                fmt,
+                while_making_a_chunk=speaking_at_once,
             ),
             media_type=fmt.content_type,
             headers=headers(resolution, body),
@@ -882,37 +869,36 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
             # engine's chunks do not say which words they came from. Owning the
             # split is what makes each emitted object's timings meaningful.
             #
-            # The permit is taken inside the generator rather than transferred in
-            # from the handler as `/stream` does, because this endpoint synthesises
-            # nothing before responding: every `speak_timed` below runs while the
-            # body is being streamed. One utterance is one permit for its whole run
-            # of sentences, not one per sentence — a caller that got a slot keeps it
-            # to the end of its own text rather than requeuing between sentences and
-            # interleaving with everyone else's.
+            # One permit per SENTENCE, around the synthesis only. Wrapping the
+            # whole loop would hold a slot through every `encoding.encode` — a
+            # full ffmpeg spawn each — and through every yield back to a
+            # client-paced socket, so one long body on one slow reader would
+            # occupy a synthesis slot for the length of the document. That is
+            # the same thing `/convert` refuses two endpoints up.
             elapsed = 0.0
-            async with speaking_at_once:
-                for sentence in text.split_sentences(body.text):
+            for sentence in text.split_sentences(body.text):
+                async with speaking_at_once:
                     spoken = await asyncio.to_thread(
                         engine.speak_timed, resolution.voice, sentence, prosody
                     )
-                    pcm = _audible_pcm(resolution.voice, sentence, spoken.pcm)
-                    audio = await encoding.encode(pcm, spoken.sample_rate, fmt)
-                    aligned = align_mod.align(sentence, spoken, elapsed)
-                    # [LAW:one-source-of-truth] The next sentence starts where this
-                    # alignment says this one ended. Deriving it instead from
-                    # `len(pcm)/2/rate` would be a second, independent answer to "how
-                    # long was this" — computed from the audio while the alignment is
-                    # computed from summed phoneme durations — and the two drift the
-                    # moment any sample is unattributed, silently sliding every later
-                    # sentence against its own audio.
-                    # Unguarded: `align` returns empty lists only for empty text, and
-                    # `split_sentences` strips and filters, so no empty sentence
-                    # reaches here. A guard would not protect anything — it would
-                    # carry the previous sentence's `elapsed` forward and lay this
-                    # one over audio already accounted for, which is the drift the
-                    # line above was rewritten to stop.
-                    elapsed = aligned.ends[-1]
-                    yield json.dumps(_timestamped(audio, aligned)).encode() + b"\n"
+                pcm = _audible_pcm(resolution.voice, sentence, spoken.pcm)
+                audio = await encoding.encode(pcm, spoken.sample_rate, fmt)
+                aligned = align_mod.align(sentence, spoken, elapsed)
+                # [LAW:one-source-of-truth] The next sentence starts where this
+                # alignment says this one ended. Deriving it instead from
+                # `len(pcm)/2/rate` would be a second, independent answer to "how
+                # long was this" — computed from the audio while the alignment is
+                # computed from summed phoneme durations — and the two drift the
+                # moment any sample is unattributed, silently sliding every later
+                # sentence against its own audio.
+                # Unguarded: `align` returns empty lists only for empty text, and
+                # `split_sentences` strips and filters, so no empty sentence
+                # reaches here. A guard would not protect anything — it would
+                # carry the previous sentence's `elapsed` forward and lay this
+                # one over audio already accounted for, which is the drift the
+                # line above was rewritten to stop.
+                elapsed = aligned.ends[-1]
+                yield json.dumps(_timestamped(audio, aligned)).encode() + b"\n"
 
         return StreamingResponse(
             stream(),

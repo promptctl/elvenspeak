@@ -121,9 +121,16 @@ class Settings:
     api_key: str | None
     host: str
     port: int
-    #: How many syntheses this process will run at once. Requests beyond it wait
+    #: How much synthesis this process does at once. Callers beyond it wait
     #: rather than being refused, so a burst is slower than the limit rather than
     #: fatal to it.
+    #:
+    #: Bounds synthesis WORK, not requests in flight. On the streaming endpoints
+    #: a permit is held while a chunk is being made and released while the caller
+    #: reads: between chunks that request is blocked behind its own socket, and
+    #: charging it a slot there would bill a slow reader — or the router, which
+    #: proxies audio it never synthesised — against a budget measured for models
+    #: doing work. The number of open streams stays unbounded, as it was.
     #:
     #: THIS NUMBER ALREADY EXISTED; it was just nobody's. Every synthesis
     #: dispatches through `asyncio.to_thread`, whose default executor is
@@ -132,7 +139,10 @@ class Settings:
     #: COUNT. On the 4-core gpu node that is 8, and an eight-way burst is what
     #: OOM-killed elvenspeak-piper at a 2048 MiB limit (piper-memory-9rc). The
     #: default below is that same number, named: nothing changes behaviour until
-    #: a deployment chooses, and choosing is now possible.
+    #: a deployment chooses, and choosing is now possible. That equality is why
+    #: the bound is over work rather than over requests — a per-request bound
+    #: would have capped in-flight streams, which nothing capped before, making a
+    #: real capacity change out of a default nobody set.
     #:
     #: Measured for piper on that node, `MemoryStats.Usage` per concurrent
     #: synthesis -- pick from this rather than from taste:
@@ -183,9 +193,15 @@ class Settings:
 
         # Parsed like PORT and for the same reason: an operator with two bad
         # numbers should read both on the first run, not one per restart.
-        concurrency_text = env.get(CONCURRENT_SYNTHESES)
+        # Stripped, and empty read as unset, like every other optional variable
+        # in this block: `ELVENSPEAK_API_KEY` via `or None`, the fallback voice
+        # via `.strip() or ...`, the withheld list by filtering on truthiness.
+        # The README documents this one as `NAME=` with nothing after it, and a
+        # Nomad `env { NAME = "" }` is the same shape, so treating empty as a
+        # malformed number would crashloop a service on the documented spelling.
+        concurrency_text = (env.get(CONCURRENT_SYNTHESES) or "").strip()
         concurrent_syntheses = _default_concurrency()
-        if concurrency_text is not None:
+        if concurrency_text:
             try:
                 concurrent_syntheses = int(concurrency_text)
             except ValueError:
