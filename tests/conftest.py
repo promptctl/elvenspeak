@@ -165,10 +165,16 @@ _drop_endpoint_memos = _endpoint_memos()
 def reclaim():
     """Let go of what the last test finished with, then hand back its pages.
 
-    Ordered, and the order is the whole point: dropping the memos is what makes
-    a finished app unreachable, `gc.collect` is what frees it, and the trim is
-    what returns the pages to the kernel. Collecting before the drop collects
-    nothing, which is precisely the three cycles this cost.
+    Three steps because no two of them free anything. The memos pin a finished
+    app, so a collect alone reaches nothing; the app is cyclic, so the drop alone
+    leaves it for a collector that has not run. Only the pair makes it garbage,
+    and only then has the trim anything to return.
+
+    The order is not load-bearing and no test holds it -- both orders end the
+    call with the engine freed, since whichever step runs second is the one that
+    frees. What cost three cycles was the missing drop, not a sequence;
+    [`_endpoint_memos`] has that story, and this docstring used to claim the
+    ordering was the whole point of the function.
     """
     for drop in _drop_endpoint_memos:
         drop()
