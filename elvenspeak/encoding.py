@@ -36,8 +36,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Iterator
-from contextlib import AbstractAsyncContextManager, nullcontext, suppress
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import suppress
 
 from .formats import OutputFormat
 
@@ -71,15 +71,29 @@ class EncodingFailed(RuntimeError):
     """
 
 
-#: What a caller holds while each chunk is being made. An `asyncio.Semaphore`
-#: from the API, or [`NOTHING_TO_HOLD`] where the samples already exist.
-_Holding = AbstractAsyncContextManager
+#: How one chunk gets pulled: a callable handed the synchronous pull, which runs
+#: it off the loop and may bound how many such pulls run at once.
+#:
+#: A runner rather than a context manager to hold across the pull, and the
+#: difference is the point. A worker thread that has already started cannot be
+#: cancelled, so an `async with` around the await releases the moment the
+#: awaiting coroutine is cancelled while the engine keeps running in the slot it
+#: just gave up — letting a burst of hang-ups start more syntheses than the bound
+#: allows. Only whoever submits the work can tie the release to the work actually
+#: ending, so the caller passes the whole operation rather than a fence around it.
+#:
+#: [LAW:dataflow-not-control-flow] The variability is a value describing the
+#: operation. `_pump` calls it identically whether anything is bounding or not.
+Pull = Callable[[Callable[[], object]], Awaitable[object]]
 
-#: The identity operation for callers whose chunks cost nothing to produce.
-#: [LAW:dataflow-not-control-flow] `_pump` enters this on every pull exactly as
-#: it enters a real gate, so there is no "is anything bounding this" branch and
-#: no second code path to be wrong.
-NOTHING_TO_HOLD: _Holding = nullcontext()
+
+async def unbounded_pull(work: Callable[[], object]) -> object:
+    """Pulls a chunk off the loop with nothing bounding it.
+
+    For callers whose samples already exist, where pulling makes nothing and
+    there is nothing to bound.
+    """
+    return await asyncio.to_thread(work)
 
 
 async def encode(pcm: bytes, native_rate: int, fmt: OutputFormat) -> bytes:
@@ -89,7 +103,7 @@ async def encode(pcm: bytes, native_rate: int, fmt: OutputFormat) -> bytes:
         async for part in encode_stream(
             # Already synthesised: `_once` hands back a buffer that exists, so
             # pulling it makes nothing and there is nothing to bound.
-            _once(pcm), native_rate, fmt, while_making_a_chunk=NOTHING_TO_HOLD
+            _once(pcm), native_rate, fmt, pull_a_chunk=unbounded_pull
         )
     ]
     return b"".join(chunks)
@@ -100,7 +114,7 @@ async def encode_stream(
     native_rate: int,
     fmt: OutputFormat,
     *,
-    while_making_a_chunk: _Holding,
+    pull_a_chunk: Pull,
 ) -> AsyncIterator[bytes]:
     """Converts samples into `fmt`, emitting encoded bytes as they are ready.
 
@@ -142,7 +156,7 @@ async def encode_stream(
     assert process.stdin is not None and process.stdout is not None
     assert process.stderr is not None
 
-    pump = asyncio.create_task(_pump(process, pcm_chunks, while_making_a_chunk))
+    pump = asyncio.create_task(_pump(process, pcm_chunks, pull_a_chunk))
     errors = asyncio.create_task(process.stderr.read())
     failure: BaseException | None = None
     #: Whether the SIGKILL below came from this function. An exit code cannot
@@ -218,9 +232,7 @@ async def encode_stream(
         )
 
 
-async def _pump(
-    process, pcm_chunks: Iterator[bytes], while_making_a_chunk: _Holding
-) -> None:
+async def _pump(process, pcm_chunks: Iterator[bytes], pull_a_chunk: Pull) -> None:
     """Feeds samples into the encoder without blocking the loop.
 
     One chunk is pulled per await, each on a worker thread, and written before
@@ -231,20 +243,18 @@ async def _pump(
     than being flattened into an end-of-input that the encoder cannot tell from
     a finished sentence.
 
-    `while_making_a_chunk` is held across the pull and nothing else, which is the
-    only place a streamed synthesis actually costs anything: between pulls this
-    coroutine is blocked in `drain()` behind ffmpeg behind the client's socket,
-    and a caller that reads slowly is spending the network's time rather than the
-    engine's. Holding it across the write instead would charge a slow reader — or
-    a router proxying somebody else's audio — against a budget measured for
-    models doing work.
+    `pull_a_chunk` runs the pull and nothing else, which is the only place a
+    streamed synthesis actually costs anything: between pulls this coroutine is
+    blocked in `drain()` behind ffmpeg behind the client's socket, and a caller
+    that reads slowly is spending the network's time rather than the engine's.
+    Bounding the write too would charge a slow reader — or a router proxying
+    somebody else's audio — against a budget measured for models doing work.
     """
     chunks = iter(pcm_chunks)
     done = object()
     try:
         while True:
-            async with while_making_a_chunk:
-                chunk = await asyncio.to_thread(next, chunks, done)
+            chunk = await pull_a_chunk(lambda: next(chunks, done))
             if chunk is done:
                 break
             process.stdin.write(chunk)

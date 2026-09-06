@@ -263,7 +263,10 @@ ELVENSPEAK_CONCURRENT_SYNTHESES=   # how much synthesis happens at once. Extra
                                    # bounds synthesis WORK, not open streams: a
                                    # caller reading slowly holds no slot, so this
                                    # does not throttle the router, which proxies
-                                   # audio it never synthesised.
+                                   # audio it never synthesised. It only ever
+                                   # NARROWS: threads still come from asyncio's
+                                   # default pool, so a value above
+                                   # min(32, cpu_count+4) has no effect.
                                    # Default: min(32, cpu_count + 4) — which is
                                    # what asyncio's default thread pool already
                                    # imposed, so the default changes nothing. Set

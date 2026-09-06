@@ -16,10 +16,10 @@ import pytest
 from conftest import ENGINE_LIBRARIES
 
 from elvenspeak.encoding import (
-    NOTHING_TO_HOLD,
     EncodingFailed,
     encode,
     encode_stream,
+    unbounded_pull,
 )
 from elvenspeak.formats import OutputFormat
 
@@ -106,7 +106,7 @@ async def encode_stream_to_bytes(chunks):
                 chunks,
                 NATIVE_RATE,
                 OutputFormat.parse("pcm_22050"),
-                while_making_a_chunk=NOTHING_TO_HOLD,
+                pull_a_chunk=unbounded_pull,
             )
         ]
     )
