@@ -261,9 +261,12 @@ ELVENSPEAK_WITHHOLD=               # comma-separated capabilities to switch off:
 ELVENSPEAK_CONCURRENT_SYNTHESES=   # how much synthesis happens at once. Extra
                                    # callers wait rather than being refused. It
                                    # bounds synthesis WORK, not open streams: a
-                                   # caller reading slowly holds no slot, so this
-                                   # does not throttle the router, which proxies
-                                   # audio it never synthesised. It only ever
+                                   # caller reading slowly holds no slot. On a
+                                   # router deployment it still gates the reads
+                                   # from backends -- nothing special-cases the
+                                   # router -- so set it there for the fan-out
+                                   # that process needs, not for a model's
+                                   # memory. It only ever
                                    # NARROWS: threads still come from asyncio's
                                    # default pool, so a value above
                                    # min(32, cpu_count+4) has no effect.
