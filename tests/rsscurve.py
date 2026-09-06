@@ -111,6 +111,15 @@ def pytest_configure(config):
         )
 
 
+#: Nodeids that printed an `enter`, so that every one of them also prints a
+#: `peak`. The victim-naming rule reads an `enter` with no `peak` after it as the
+#: test the killer took, and the teardown reclaim this branch added makes a test
+#: able to finish below the floor it started above -- which would close the run
+#: with an unpaired `enter` on a test that survived, and send the reader to
+#: diagnose an OOM that never happened. An unpaired `enter` has to mean a death.
+_entered = set()
+
+
 def pytest_runtest_logstart(nodeid, location):
     rss = _before[nodeid] = _rss_mib()
     _report_entering_the_danger_zone(rss, nodeid)
@@ -126,6 +135,7 @@ def _report_entering_the_danger_zone(rss, nodeid):
     """
     if rss <= _DANGER_MIB:
         return
+    _entered.add(nodeid)
     _write_line(f"[rss] enter {rss:9.1f} MiB  {nodeid}")
 
 
@@ -168,7 +178,9 @@ def _report_if_worth_a_line(nodeid, before, after, peak):
     rose = peak > _peak + 50
     if rose:
         _peak = peak
-    if not (rose or after > _DANGER_MIB):
+    entered = nodeid in _entered
+    _entered.discard(nodeid)
+    if not (rose or after > _DANGER_MIB or entered):
         return
     _write_line(
         f"[rss] peak {peak:9.1f} MiB  (rss {before:.1f} -> {after:.1f})"

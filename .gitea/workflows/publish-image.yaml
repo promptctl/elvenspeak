@@ -434,7 +434,18 @@ jobs:
           # reader the opposite way from "nothing is capping this". [LAW:no-silent-failure]
           found=
           for limit in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
-            if [ -r "$limit" ]; then echo "cgroup limit:  $(cat "$limit") ($limit)"; found=yes; fi
+            if [ -r "$limit" ]; then
+              # MiB, so it reads against the two figures above it rather than
+              # asking whoever is explaining a 137 to divide by 1048576 in their
+              # head. cgroup v2 writes the literal `max` when uncapped, so the
+              # non-numeric case is printed as it stands rather than converted.
+              value=$(cat "$limit")
+              case "$value" in
+                *[!0-9]*) echo "cgroup limit:  $value ($limit)" ;;
+                *)        echo "cgroup limit:  $((value / 1048576)) MiB ($limit)" ;;
+              esac
+              found=yes
+            fi
           done
           [ -n "$found" ] || echo "cgroup limit:  none -- neither cgroup layout is readable"
 

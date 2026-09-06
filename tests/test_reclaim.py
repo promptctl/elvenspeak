@@ -180,14 +180,28 @@ def test_holds_both(held_for_the_module, held_for_the_test):
 """
 
 #: A second test in a second module, so there is a setup that follows a teardown
-#: -- the moment the setup hook is answerable for, and a body to close its window.
+#: -- the moment the setup hook is answerable for. Its fixture is what closes the
+#: window, and it has to be a fixture rather than the body: fixtures are built
+#: inside the builtin setup, so a reclaim landing after one is a reclaim that
+#: waited for setup to finish. A window closed at the *body* cannot tell a
+#: wrapper from a plain hookimpl, because a plain one is registered after the
+#: builtins and so fires before them -- still inside the window, but before
+#: anything it was meant to collect existed.
 _PROBE_SECOND = """\
+import pytest
+
+
 def _note(what):
     with open({log!r}, "a") as handle:
         handle.write(what + "\\n")
 
 
-def test_lets_the_previous_module_go():
+@pytest.fixture
+def built_during_setup():
+    _note("second-setup-done")
+
+
+def test_lets_the_previous_module_go(built_during_setup):
     _note("second-body")
 """
 
@@ -217,6 +231,13 @@ def test_a_reclaim_follows_every_release_rather_than_preceding_it(tmp_path):
     )
     (tmp_path / "test_first.py").write_text(_PROBE_FIRST.format(log=str(log)))
     (tmp_path / "test_second.py").write_text(_PROBE_SECOND.format(log=str(log)))
+
+    # [LAW:no-ambient-temporal-coupling] This file sorts after `test_chatterbox.py`
+    # and `test_conformance.py`, so the fork below happens at the run's high-water
+    # mark, in the job whose documented failure is the OOM killer. Handing the
+    # pages back first costs microseconds and keeps the test that measures the fix
+    # from being the one that trips the thing it measures.
+    reclaim()
 
     run = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(tmp_path)],
@@ -252,9 +273,9 @@ def test_a_reclaim_follows_every_release_rather_than_preceding_it(tmp_path):
         f"exists to collect, on a heap still holding everything. Run 24: {order}"
     )
 
-    assert "reclaim" in window("start:test_lets_the_previous_module_go", "second-body"), (
-        "a test was set up and reached its body without a reclaim -- the setup "
-        "hook is gone or no longer wraps, so whatever the previous module let go "
-        "of is never handed back and this test allocates on top of it. This is "
-        f"the second hook, which runs 24 and 25 both needed: {order}"
+    assert "reclaim" in window("second-setup-done", "second-body"), (
+        "a test finished being set up and reached its body without a reclaim -- "
+        "the setup hook is gone, or has stopped wrapping and now fires before "
+        "the builtin setup rather than after it, which collects nothing that "
+        f"setup itself released. Order: {order}"
     )

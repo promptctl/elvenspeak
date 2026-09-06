@@ -70,7 +70,7 @@ def pytest_runtest_teardown(item):
     `test_the_offered_order_is_the_configured_order` opened two Chatterbox
     models, dropped both, and finished holding 5134.6 MiB against the 858.1 MiB
     it was handed -- 4276 MiB resident with nothing alive to account for it. The
-    job died four minutes later at 5305.8 MiB against 5478 MB available, having
+    job died four minutes later at 5305.8 MiB against 5478 MiB available, having
     grown 171 MiB in between. It was not killed by what it was doing; it was
     killed by what it had already finished doing and not given back.
 
@@ -86,7 +86,7 @@ def pytest_runtest_teardown(item):
     Before this, whether the suite survived depended on whether the allocator
     happened to reuse a dead test's pages for a live test's model -- which run 23
     got (row 8 grew by 171 MiB for a whole model) and which nothing guarantees,
-    on a runner whose available memory moved 825 MB across four runs.
+    on a runner whose available memory moved 825 MiB across four runs.
 
     A wrapper, and it has to be. A plain hook here is registered after the
     builtin ones and therefore runs *before* them, so it would trim a heap whose
