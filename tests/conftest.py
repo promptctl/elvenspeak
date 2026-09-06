@@ -23,6 +23,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
+from fastapi.dependencies import models as _fastapi_dependencies
 
 from elvenspeak import chatterbox, router
 from elvenspeak.engine import (
@@ -90,7 +91,7 @@ def pytest_runtest_teardown(item):
     try:
         return (yield)
     finally:
-        _reclaim()
+        reclaim()
 
 
 @pytest.hookimpl(wrapper=True)
@@ -109,18 +110,59 @@ def pytest_runtest_setup(item):
     35 minutes thrashing on a test that takes 7 seconds on a workstation before
     the killer took the container.
 
-    [LAW:one-source-of-truth] Both moments call [`_reclaim`]. Two spellings of
+    [LAW:one-source-of-truth] Both moments call [`reclaim`]. Two spellings of
     "give the memory back" are free to drift into two different ideas of what
     that means.
     """
     try:
         return (yield)
     finally:
-        _reclaim()
+        reclaim()
 
 
-def _reclaim():
-    """Collect what is unreachable, then hand the free pages to the kernel."""
+def _endpoint_memos() -> tuple[Callable[[], None], ...]:
+    """FastAPI's memos keyed on the endpoint callable, resolved once at import.
+
+    `fastapi.dependencies.models` answers "is this callable a coroutine, a
+    generator, an async generator" out of caches 4096 entries deep, keyed on the
+    callable itself. Every handler [`elvenspeak.api.create_app`] builds is a
+    closure over the engine it serves, so an app the suite has finished with
+    stays reachable from those caches — and the engine it closed over, and that
+    engine's 3412 MiB model, with it.
+
+    That is why runs 24, 25 and 26 trimmed and nothing moved: the model was not
+    free memory glibc was declining to return, it was memory Python could still
+    reach, and no allocator call can hand back a live object. `live=2` on run 27
+    is what finally distinguished the two.
+
+    Found by asking for the attribute rather than by naming the three functions:
+    they are private names in a third-party module, and a rename there should
+    cost a recomputation rather than the whole reclaim. `tests/test_reclaim.py`
+    asserts the property this is here for, so a FastAPI that moved these caches
+    somewhere else fails a test instead of quietly reintroducing the OOM.
+    """
+    return tuple(
+        value.cache_clear
+        for value in vars(_fastapi_dependencies).values()
+        if callable(getattr(value, "cache_clear", None))
+    )
+
+
+#: Bound at import for the same reason [`_trim_the_heap`] is: which memos exist
+#: is a fact about the installed FastAPI, read once, not per test.
+_drop_endpoint_memos = _endpoint_memos()
+
+
+def reclaim():
+    """Let go of what the last test finished with, then hand back its pages.
+
+    Ordered, and the order is the whole point: dropping the memos is what makes
+    a finished app unreachable, `gc.collect` is what frees it, and the trim is
+    what returns the pages to the kernel. Collecting before the drop collects
+    nothing, which is precisely the three cycles this cost.
+    """
+    for drop in _drop_endpoint_memos:
+        drop()
     gc.collect()
     _trim_the_heap()
 
