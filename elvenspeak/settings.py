@@ -36,12 +36,31 @@ import os
 import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import models
 from .engine import Capability
 from .provisioning import ConfigError, Prepared, Registry
 from .voices import Fallback, Substitution
+
+#: The variable [`Settings.concurrent_syntheses`] is read from. Named here so the
+#: one other place that has to know it — `tests/conftest.py`'s clearing list —
+#: reads it rather than spelling it again ([LAW:one-source-of-truth]); a second
+#: spelling stops clearing the real variable the day this one changes.
+CONCURRENT_SYNTHESES = "ELVENSPEAK_CONCURRENT_SYNTHESES"
+
+
+def _default_concurrency() -> int:
+    """The bound `asyncio.to_thread` already imposes, read rather than restated.
+
+    [LAW:one-source-of-truth] CPython computes its default executor's width as
+    `min(32, (os.cpu_count() or 1) + 4)`, and that is the ceiling every synthesis
+    in this process runs under today. Spelling the same formula here keeps the
+    named default equal to the unnamed one it replaces, so turning this setting
+    on changes nothing until an operator changes the number.
+    """
+    return min(32, (os.cpu_count() or 1) + 4)
+
 
 #: Settings that named a capability in one engine's dialect, and what replaced
 #: them. Refused rather than ignored: an operator who set one meant to change an
@@ -102,6 +121,35 @@ class Settings:
     api_key: str | None
     host: str
     port: int
+    #: How many syntheses this process will run at once. Requests beyond it wait
+    #: rather than being refused, so a burst is slower than the limit rather than
+    #: fatal to it.
+    #:
+    #: THIS NUMBER ALREADY EXISTED; it was just nobody's. Every synthesis
+    #: dispatches through `asyncio.to_thread`, whose default executor is
+    #: `min(32, os.cpu_count() + 4)` wide -- so the ceiling on concurrent
+    #: synthesis, and therefore on memory, was a function of the node's CORE
+    #: COUNT. On the 4-core gpu node that is 8, and an eight-way burst is what
+    #: OOM-killed elvenspeak-piper at a 2048 MiB limit (piper-memory-9rc). The
+    #: default below is that same number, named: nothing changes behaviour until
+    #: a deployment chooses, and choosing is now possible.
+    #:
+    #: Measured for piper on that node, `MemoryStats.Usage` per concurrent
+    #: synthesis -- pick from this rather than from taste:
+    #:
+    #:     idle, five voices loaded   ~1140 MiB
+    #:     2 concurrent                1164 MiB   the jobspec's design target
+    #:     4 concurrent                1335 MiB
+    #:     8 concurrent                1773 MiB   and it died at 2048
+    #:
+    #: A CPU-derived default for a memory bound is the wrong unit on purpose: it
+    #: preserves today's behaviour exactly, and the right unit is the deployment's
+    #: own memory limit, which this process cannot know. Set it where that limit
+    #: is set.
+    #: [LAW:one-source-of-truth] The default is the same callable [`from_env`]
+    #: uses, not a second spelling of the formula: a constructed `Settings` and a
+    #: parsed one must not disagree about what "unset" means.
+    concurrent_syntheses: int = field(default_factory=_default_concurrency)
 
     @staticmethod
     def from_env(
@@ -132,6 +180,27 @@ class Settings:
             # message.
             if not 1 <= port <= 65535:
                 problems.append(f"PORT={port} is outside 1-65535")
+
+        # Parsed like PORT and for the same reason: an operator with two bad
+        # numbers should read both on the first run, not one per restart.
+        concurrency_text = env.get(CONCURRENT_SYNTHESES)
+        concurrent_syntheses = _default_concurrency()
+        if concurrency_text is not None:
+            try:
+                concurrent_syntheses = int(concurrency_text)
+            except ValueError:
+                problems.append(
+                    f"{CONCURRENT_SYNTHESES}={concurrency_text!r} is not a number"
+                )
+            else:
+                # Zero is refused rather than read as "no limit". A gate that is
+                # sometimes absent is a second mode nothing else here has, and the
+                # deployment that wants no practical bound can say so with a
+                # number ([LAW:no-mode-explosion]).
+                if concurrent_syntheses < 1:
+                    problems.append(
+                        f"{CONCURRENT_SYNTHESES}={concurrent_syntheses} is not at least 1"
+                    )
 
         problems += [
             f"{name} is no longer read; {advice}"
@@ -168,6 +237,7 @@ class Settings:
             api_key=env.get("ELVENSPEAK_API_KEY") or None,
             host=env.get("HOST", "0.0.0.0"),
             port=port,
+            concurrent_syntheses=concurrent_syntheses,
         )
 
 @contextmanager

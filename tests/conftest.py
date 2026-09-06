@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 from fastapi.dependencies import models as _fastapi_dependencies
 
-from elvenspeak import chatterbox, router
+from elvenspeak import chatterbox, router, settings as settings_mod
 from elvenspeak.engine import (
     Capability,
     Prosody,
@@ -214,6 +214,7 @@ _ENVIRONMENT = (
     # and Kokoro's are literals here because those modules expose no constant to
     # read; this one does, and a second spelling of it would stop clearing the
     # real variable the day it changed ([LAW:one-source-of-truth]).
+    settings_mod.CONCURRENT_SYNTHESES,
     router.CONSUL_URL,
     router.BACKEND_API_KEY,
     chatterbox.MODELS_DIR,

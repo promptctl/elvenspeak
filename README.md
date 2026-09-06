@@ -258,6 +258,16 @@ ELVENSPEAK_WITHHOLD=               # comma-separated capabilities to switch off:
                                    # timestamps, speed. Naming one the engine
                                    # never had is fine; a name that is not a
                                    # capability refuses to start.
+ELVENSPEAK_CONCURRENT_SYNTHESES=   # how many utterances are synthesised at once.
+                                   # Extra callers wait rather than being refused.
+                                   # Default: min(32, cpu_count + 4) — which is
+                                   # what asyncio's default thread pool already
+                                   # imposed, so the default changes nothing. Set
+                                   # it from the deployment's MEMORY limit, not
+                                   # its cores: piper measured ~1140 MiB idle,
+                                   # 1164 at 2 concurrent, 1335 at 4, 1773 at 8,
+                                   # and was OOM-killed by an eight-way burst
+                                   # against a 2048 MiB limit.
 PORT=5001
 HOST=0.0.0.0
 
