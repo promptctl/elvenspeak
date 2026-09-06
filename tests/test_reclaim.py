@@ -19,6 +19,8 @@ import sys
 import weakref
 from pathlib import Path
 
+import pytest
+
 from conftest import (
     DECLARED_VOICES,
     DeclaredEngine,
@@ -34,15 +36,53 @@ from elvenspeak.settings import Settings
 from elvenspeak.voices import Substitution
 
 
-def _served_then_dropped() -> weakref.ref:
+def _acyclic(engine) -> None:
+    """Leaves the engine as every engine in this repo is built today.
+
+    Checked rather than assumed, at the two places a cycle would come from: no
+    engine module uses `lru_cache`, `cached_property` or a `partial` over a bound
+    method, and `ChatterboxEngine.__init__` stores a model, a dict, a float and a
+    `Lock`. A bare `torch.nn.Module` is acyclic too -- measured, it dies to
+    refcounting with the collector switched off.
+    """
+
+
+def _cyclic(engine) -> None:
+    """Gives the engine a reference to itself, which is the case that decides.
+
+    Deliberately not justified as "what a real model looks like", because that
+    is not established: the graph inside a loaded 3.4 GiB checkpoint was never
+    measured, and the two things that were both came back acyclic. It is here as
+    the shape `reclaim` must survive whatever today's engines happen to be --
+    one dependency bump away, and the property below is the only thing standing
+    between that and a silently reordered reclaim.
+    """
+    engine.own_graph = engine
+
+
+#: The two object-graph shapes an engine can reach `reclaim` in.
+#: [LAW:dataflow-not-control-flow] The variability is a value the same code path
+#: applies, not a branch: `_acyclic` is the identity operation, so the fixture
+#: below builds and serves one engine one way in both cases.
+_GRAPHS = [
+    pytest.param(_acyclic, id="acyclic"),
+    pytest.param(_cyclic, id="cyclic"),
+]
+
+
+def _served_then_dropped(shape) -> weakref.ref:
     """Serves an engine through a real app, and returns only a weak handle to it.
 
     Everything strong is local to this frame, so returning is what drops both the
     app and the engine — no `del`, and nothing for a later reader to preserve by
     accident. The reference that outlives the call is deliberately one that
     cannot itself keep the engine alive.
+
+    `shape` runs on the engine before it is served, so the engine reaches
+    `reclaim` in one of the two graph shapes [`_GRAPHS`] names.
     """
     engine = DeclaredEngine(declaring(frozenset(Capability), DECLARED_VOICES))
+    shape(engine)
     create_app(
         Settings(
             engine=DeclaredPrepared(),
@@ -59,7 +99,8 @@ def _served_then_dropped() -> weakref.ref:
     return weakref.ref(engine)
 
 
-def test_an_app_the_suite_has_finished_with_stops_holding_its_engine():
+@pytest.mark.parametrize("shape", _GRAPHS)
+def test_an_app_the_suite_has_finished_with_stops_holding_its_engine(shape):
     """[LAW:no-ambient-temporal-coupling] The reclaim owns this, or nothing does.
 
     `create_app` builds each handler as a closure over the engine it serves, and
@@ -79,8 +120,16 @@ def test_an_app_the_suite_has_finished_with_stops_holding_its_engine():
     an allocator and a platform, and it is what made the real cause ambiguous for
     three runs. Whether the engine is reachable is the same answer on every
     machine, which is why this one runs on a workstation in milliseconds.
+
+    Run over both graph shapes because the `cyclic` one is the only thing that
+    can see the order inside `reclaim`. A drop makes a cyclic object garbage
+    without freeing it, so a reclaim that collected before dropping would leave
+    that engine for the next call -- and against the acyclic stand-in alone,
+    which is all this test used to serve, that reordering passed. It now fails
+    here, which is the point: the sequence is held by a test rather than by the
+    paragraph in `conftest.reclaim` that describes it.
     """
-    held = _served_then_dropped()
+    held = _served_then_dropped(shape)
 
     reclaim()
 

@@ -165,16 +165,22 @@ _drop_endpoint_memos = _endpoint_memos()
 def reclaim():
     """Let go of what the last test finished with, then hand back its pages.
 
-    Three steps because no two of them free anything. The memos pin a finished
-    app, so a collect alone reaches nothing; the app is cyclic, so the drop alone
-    leaves it for a collector that has not run. Only the pair makes it garbage,
-    and only then has the trim anything to return.
+    Three steps, and no one of them frees anything alone. The memos pin a
+    finished app, so a collect reaches nothing while they still hold it; the app
+    is cyclic, so dropping them only turns it into garbage; and only once that
+    garbage is actually collected has the trim anything to return.
 
-    The order is not load-bearing and no test holds it -- both orders end the
-    call with the engine freed, since whichever step runs second is the one that
-    frees. What cost three cycles was the missing drop, not a sequence;
-    [`_endpoint_memos`] has that story, and this docstring used to claim the
-    ordering was the whole point of the function.
+    So the order is load-bearing in one direction: the collect has to follow the
+    drop. Reversed, the drop runs last and leaves a cyclic engine sitting until
+    the *next* reclaim, with this call's trim handing back nothing -- and on a
+    3412 MiB model that one-test lag is exactly what the runner's OOM killer
+    counts. `tests/test_reclaim.py` holds this in its `cyclic` case. Nothing held
+    it before: the stand-in engine is acyclic, and against an acyclic engine both
+    orders free within the call, because the leading collect reaps the app's own
+    cycle and the drop is then releasing the last reference.
+
+    What cost three cycles was the missing drop rather than the sequence;
+    [`_endpoint_memos`] has that story.
     """
     for drop in _drop_endpoint_memos:
         drop()
