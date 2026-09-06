@@ -502,12 +502,12 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     # through [`_synthesising`] against this, and nothing else does.
     #
     # It narrows; it cannot widen. `asyncio.to_thread` still dispatches onto the
-    # shared default executor, so the real ceiling is
-    # `min(concurrent_syntheses, cpu_count + 4, 32)` and a value set above the
-    # executor's width simply has no effect. Said here because the alternative —
-    # sizing an executor to match — buys a second knob to answer for a direction
-    # nobody on this ticket wants ([LAW:no-mode-explosion]); every measurement
-    # behind this feature is about lowering the number.
+    # shared default executor, so the real ceiling is the lower of this setting
+    # and that executor's width ([`elvenspeak.settings._default_concurrency`]),
+    # and a value set above that width has no effect. Said here because the
+    # alternative — sizing an executor to match — buys a second knob to answer
+    # for a direction nobody on this ticket wants ([LAW:no-mode-explosion]);
+    # every measurement behind this feature is about lowering the number.
     #
     # Waiting, not refusing. The burst that OOM-killed elvenspeak-piper was four
     # times its design target (piper-memory-9rc); turning that into a queue makes
@@ -893,12 +893,12 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
             speaking_at_once,
             lambda: engine.speak(resolution.voice, body.text, prosody),
         )
-            # The first chunk is pulled here, on the thread, and not by the
-            # encoder: it is what proves the engine spoke, and a
-            # `StreamingResponse` has already sent 200 by the time its body
-            # raises. The status line is the only place this answer can still be
-            # told, so the checkpoint has to run before the response object
-            # exists — and inside the permit, because pulling it synthesises.
+        # The first chunk is pulled here, on the thread, and not by the
+        # encoder: it is what proves the engine spoke, and a
+        # `StreamingResponse` has already sent 200 by the time its body
+        # raises. The status line is the only place this answer can still be
+        # told, so the checkpoint has to run before the response object
+        # exists — and inside the permit, because pulling it synthesises.
         audible = await _synthesising(
             speaking_at_once, lambda: _audible(resolution.voice, body.text, spoken.audio)
         )
