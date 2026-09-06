@@ -13,7 +13,11 @@ what pins the engine is the closure its handlers were built from, not its weight
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import weakref
+from pathlib import Path
 
 from conftest import (
     DECLARED_VOICES,
@@ -84,4 +88,153 @@ def test_an_app_the_suite_has_finished_with_stops_holding_its_engine():
         "an app the suite dropped is still holding its engine — if FastAPI moved "
         "the caches `conftest._endpoint_memos` drops, the build runner is about "
         "to be OOM-killed carrying a model no test is using"
+    )
+
+
+#: The conftest whose hooks are under test, and the root that makes it importable.
+_CONFTEST = Path(__file__).with_name("conftest.py")
+_ROOT = Path(__file__).parents[1]
+
+#: Loaded by path under a name of its own, so the throwaway suite drives the real
+#: hooks rather than a copy of them: a `hookimpl` marker lives on the function
+#: object, so re-exporting the functions carries wrapper-vs-plain across with
+#: them, which is the whole property being measured.
+#:
+#: `logstart` and `logfinish` are this probe's own instrumentation, not part of
+#: what is under test. They are here because "a reclaim happened later" is not
+#: the claim -- every phase reclaims, so an unbounded search finds a reclaim
+#: belonging to the next phase and passes through the bug. These two bracket
+#: each test, which is what makes the windows below closed.
+_PROBE_CONFTEST = """\
+import importlib.util
+import sys
+
+_spec = importlib.util.spec_from_file_location("reclaim_hooks_under_test", {conftest!r})
+_module = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = _module
+_spec.loader.exec_module(_module)
+
+pytest_runtest_setup = _module.pytest_runtest_setup
+pytest_runtest_teardown = _module.pytest_runtest_teardown
+
+_reclaim = _module.reclaim
+
+
+def _note(what):
+    with open({log!r}, "a") as handle:
+        handle.write(what + "\\n")
+
+
+def _recorded():
+    _note("reclaim")
+    _reclaim()
+
+
+_module.reclaim = _recorded
+
+
+def pytest_runtest_logstart(nodeid, location):
+    _note("start:" + nodeid.rsplit("::", 1)[-1])
+
+
+def pytest_runtest_logfinish(nodeid, location):
+    _note("finish:" + nodeid.rsplit("::", 1)[-1])
+"""
+
+#: Two scopes, because a test releases more than one kind of thing: pytest tears
+#: the module scope down inside the teardown of the module's last test, once it
+#: knows the next test is elsewhere, so both land in the same window here.
+_PROBE_FIRST = """\
+import pytest
+
+
+def _note(what):
+    with open({log!r}, "a") as handle:
+        handle.write(what + "\\n")
+
+
+@pytest.fixture(scope="module")
+def held_for_the_module():
+    yield object()
+    _note("module-let-go")
+
+
+@pytest.fixture
+def held_for_the_test():
+    yield object()
+    _note("test-let-go")
+
+
+def test_holds_both(held_for_the_module, held_for_the_test):
+    pass
+"""
+
+#: A second test in a second module, so there is a setup that follows a teardown
+#: -- the moment the setup hook is answerable for, and a body to close its window.
+_PROBE_SECOND = """\
+def _note(what):
+    with open({log!r}, "a") as handle:
+        handle.write(what + "\\n")
+
+
+def test_lets_the_previous_module_go():
+    _note("second-body")
+"""
+
+
+def test_a_reclaim_follows_every_release_rather_than_preceding_it(tmp_path):
+    """[LAW:behavior-not-structure] The hooks' ordering, measured by running them.
+
+    `test_an_app_the_suite_has_finished_with_stops_holding_its_engine` calls
+    `reclaim` directly, so it says nothing about *when* the suite calls it -- and
+    when is the part that cost three CI rounds. Run 24 died with the fix already
+    written: a plain `pytest_runtest_teardown` in a conftest is registered after
+    the builtin hooks and so runs *before* them, trimming a heap whose fixtures
+    had not been torn down yet. Both that and the second hook at setup are
+    recorded in `conftest`'s docstrings, where nothing enforces them, and a
+    `wrapper=True` quietly dropped to a plain hookimpl reintroduces the OOM while
+    every other test in this file still passes.
+
+    Each assertion is a *closed* window -- release to the next phase boundary,
+    not "somewhere later". Every phase reclaims, so an open-ended search finds
+    the next phase's reclaim and passes through the very bug this is here for.
+    That is not hypothetical: the first draft of this test asserted exactly that
+    and survived having the teardown hook flattened to a plain one.
+    """
+    log = tmp_path / "order"
+    (tmp_path / "conftest.py").write_text(
+        _PROBE_CONFTEST.format(conftest=str(_CONFTEST), log=str(log))
+    )
+    (tmp_path / "test_first.py").write_text(_PROBE_FIRST.format(log=str(log)))
+    (tmp_path / "test_second.py").write_text(_PROBE_SECOND.format(log=str(log)))
+
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(tmp_path)],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(_ROOT)},
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 0, f"the probe suite itself failed:\n{run.stdout}\n{run.stderr}"
+
+    order = log.read_text().split()
+
+    def window(opens, closes):
+        assert opens in order and closes in order, (
+            f"the probe never reached {opens!r}..{closes!r}, so it measured nothing: {order}"
+        )
+        return order[order.index(opens) : order.index(closes)]
+
+    assert "reclaim" in window("test-let-go", "finish:test_holds_both"), (
+        "a test's fixtures were let go and its own teardown ended without a "
+        "reclaim -- the teardown hook has stopped being a `wrapper=True` "
+        "hookimpl that yields first, so it now runs before the teardown it "
+        f"exists to collect, on a heap still holding everything. Run 24: {order}"
+    )
+
+    assert "reclaim" in window("start:test_lets_the_previous_module_go", "second-body"), (
+        "a test was set up and reached its body without a reclaim -- the setup "
+        "hook is gone or no longer wraps, so whatever the previous module let go "
+        "of is never handed back and this test allocates on top of it. This is "
+        f"the second hook, which runs 24 and 25 both needed: {order}"
     )
