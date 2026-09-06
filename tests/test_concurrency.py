@@ -268,12 +268,17 @@ def test_no_more_syntheses_run_at_once_than_the_setting_allows(at_once, endpoint
 def test_a_caller_who_hangs_up_mid_utterance_gives_its_permit_back():
     """The leak that would be worse than the bug: permits that never come back.
 
-    `/stream`'s permit outlives its handler by design, which puts its release in
-    the response body rather than in a `finally` the handler owns. If that release
-    did not happen when a caller disconnects early, every abandoned request would
-    retire one permit permanently and the service would wedge after exactly
-    `concurrent_syntheses` of them — a slower, more total outage than the OOM this
-    bound exists to prevent, and one that needs no burst to trigger.
+    Every permit `/stream` takes — the initial `speak`, the `_audible` pull, and
+    each chunk the pump asks for — is acquired and released inside one
+    [`api._synthesising`] call, by the worker thread's own `finally`. Nothing is
+    held by the response body: what this exercises is that the release still runs
+    when the pump that asked for a chunk is cancelled mid-stream, because the
+    thread finishes and hands the permit back whether or not anyone is still
+    waiting for what it made. If that release did not happen when a caller
+    disconnects early, every abandoned request would retire one permit
+    permanently and the service would wedge after exactly `concurrent_syntheses`
+    of them — a slower, more total outage than the OOM this bound exists to
+    prevent, and one that needs no burst to trigger.
 
     Bounded at one permit so a single hang-up is the whole supply: with the leak,
     the call after it never gets a slot and this test fails by timing out rather
