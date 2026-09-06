@@ -387,6 +387,33 @@ def test_the_sentence_loop_really_cycles_its_permit():
     )
 
 
+async def _free_permits(gate: asyncio.Semaphore) -> int:
+    """How many permits `gate` will hand out right now, counted by taking them.
+
+    [LAW:behavior-not-structure] Rather than reading `asyncio.Semaphore._value`,
+    which is CPython's private representation of this fact and not the fact. The
+    law does not stop applying because the structure belongs to the standard
+    library — and the counter is the wrong observation on its own terms anyway:
+    the property under test is what the gate will hand out, and taking them is
+    what answers that.
+
+    Every permit taken is given straight back, so the probe leaves the gate as it
+    found it. A release arriving from a worker thread mid-count is not lost: the
+    count only ever understates by one, and the assertions below are written
+    against a settled gate.
+    """
+    taken = 0
+    while True:
+        try:
+            await asyncio.wait_for(gate.acquire(), timeout=0.05)
+        except (TimeoutError, asyncio.TimeoutError):
+            break
+        taken += 1
+    for _ in range(taken):
+        gate.release()
+    return taken
+
+
 @pytest.mark.parametrize(
     "occupy_the_pool",
     # The two states a cancellation can find the submitted work in, and they fail
@@ -435,10 +462,10 @@ def test_a_cancelled_synthesis_gives_its_permit_back_exactly_once(occupy_the_poo
         # Read before the work can have finished: a permit back this early means
         # it was handed on while the engine was still holding it.
         await asyncio.sleep(0.02)
-        released_early = gate._value == 2 and not finished.is_set()
+        released_early = await _free_permits(gate) == 2 and not finished.is_set()
 
         await asyncio.sleep(2.0)
-        return gate._value, released_early
+        return await _free_permits(gate), released_early
 
     permits, released_early = asyncio.run(run())
 
