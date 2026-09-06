@@ -1,4 +1,4 @@
-"""How many syntheses this process runs at once, asserted through the real surface.
+"""How much synthesis this process does at once, asserted through the real surface.
 
 [LAW:verifiable-goals] The bound exists because elvenspeak-piper was OOM-killed
 at a 2048 MiB limit during an eight-way burst (piper-memory-9rc), and the failure
@@ -94,8 +94,13 @@ class WatchedEngine:
     engine does not use.
     """
 
-    def __init__(self, overlap: Overlap) -> None:
+    def __init__(self, overlap: Overlap, speak_seconds: float = 0.0) -> None:
         self._overlap = overlap
+        #: How long `speak` itself blocks before returning its generator. Zero is
+        #: piper's shape; a real delay is what lets a caller hang up while the
+        #: engine is still inside `speak`, which is where nearly all of a
+        #: streaming request's wall time goes and which no other test here covers.
+        self._speak_seconds = speak_seconds
         # TIMESTAMPS deliberately not declared: this stand-in has no
         # `speak_timed`, and an engine that declares what it cannot do is the
         # dishonesty `DeclaredEngine`'s docstring exists to refuse. It also keeps
@@ -106,13 +111,19 @@ class WatchedEngine:
         return self._voices
 
     def speak(self, voice: Voice, text: str, prosody: Prosody) -> Speech:
+        time.sleep(self._speak_seconds)
         return Speech(sample_rate=_RATE, audio=self._audio())
 
     def _audio(self) -> Iterator[bytes]:
-        with self._overlap.one_more():
-            for _ in range(_CHUNKS):
+        # Counted around each CHUNK, not around the generator, because making a
+        # chunk is what the bound is over. A counter wrapping the whole generator
+        # would measure in-flight requests instead — a different property, and
+        # one this service deliberately does not bound: a stream parked between
+        # pulls is waiting on its client's socket, not on the engine.
+        for _ in range(_CHUNKS):
+            with self._overlap.one_more():
                 time.sleep(_CHUNK_SECONDS)
-                yield _SAMPLES
+            yield _SAMPLES
 
 
 def _settings(at_once: int) -> Settings:
@@ -243,4 +254,49 @@ def test_a_caller_who_hangs_up_mid_utterance_gives_its_permit_back():
     assert drained > 0, (
         "the call after a hang-up got no audio — the abandoned request's permit "
         "was never given back"
+    )
+
+
+def test_a_caller_who_hangs_up_inside_speak_gives_its_permit_back():
+    """A hang-up inside `speak` must not retire the slot it was holding.
+
+    The window is the one that matters: `speak` is where nearly all of a
+    streaming request's wall time goes, and a voice UI barging in over the agent
+    cancels exactly there. The test above hangs up after the first chunk; this
+    one hangs up before any chunk exists.
+
+    HONEST ABOUT WHAT THIS DOES NOT PROVE. It is a property guard, not a
+    regression test for an observed bug. The permit-holding shape this file was
+    written against — handing the permit to the response body — was measured
+    under four hard mid-`speak` hang-ups and returned every permit, and this test
+    passes against that shape too. It is kept because the property is worth
+    holding whatever the server does underneath, not because it discriminates the
+    two designs; the thing that rules the leak out is the scoped `async with` in
+    `convert_stream`, which has no permit to outlive anything.
+
+    One permit, so a single hang-up is the entire supply: were a slot retired,
+    the call after it would never get one and this would fail by timing out.
+    """
+    overlap = Overlap()
+    app = create_app(_settings(1), WatchedEngine(overlap, speak_seconds=1.0))
+
+    with fleet.serving(app) as base:
+        voice = DECLARED_VOICES[0].id
+        url = f"{base}/v1/text-to-speech/{voice}/stream"
+        body = {"text": "one two three four"}
+
+        # Gives up long before `speak` returns, so the server is cancelled with
+        # no response body ever started.
+        with httpx.Client(timeout=0.25) as impatient:
+            with pytest.raises(httpx.TimeoutException):
+                impatient.post(url, json=body)
+
+        with httpx.Client(timeout=30.0) as client, client.stream(
+            "POST", url, json=body
+        ) as second:
+            drained = sum(len(chunk) for chunk in second.iter_bytes())
+
+    assert drained > 0, (
+        "the call after a hang-up inside `speak` got no audio — the cancelled "
+        "request's permit was never given back"
     )

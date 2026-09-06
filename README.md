@@ -258,8 +258,12 @@ ELVENSPEAK_WITHHOLD=               # comma-separated capabilities to switch off:
                                    # timestamps, speed. Naming one the engine
                                    # never had is fine; a name that is not a
                                    # capability refuses to start.
-ELVENSPEAK_CONCURRENT_SYNTHESES=   # how many utterances are synthesised at once.
-                                   # Extra callers wait rather than being refused.
+ELVENSPEAK_CONCURRENT_SYNTHESES=   # how much synthesis happens at once. Extra
+                                   # callers wait rather than being refused. It
+                                   # bounds synthesis WORK, not open streams: a
+                                   # caller reading slowly holds no slot, so this
+                                   # does not throttle the router, which proxies
+                                   # audio it never synthesised.
                                    # Default: min(32, cpu_count + 4) — which is
                                    # what asyncio's default thread pool already
                                    # imposed, so the default changes nothing. Set
