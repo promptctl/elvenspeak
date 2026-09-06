@@ -377,6 +377,13 @@ jobs:
   tests:
     runs-on: ubuntu-latest
 
+    # [LAW:one-source-of-truth] Where the curve is written, named once. It was
+    # spelled twice -- once for the plugin, once for the step that reads it back --
+    # and a rename of either would have printed "no curve written" for a run that
+    # wrote one, hiding the mismatch instead of reporting it.
+    env:
+      RSS_CURVE_OUT: ${{ github.workspace }}/rss-curve.csv
+
     # The suite fetches ~3.4 GB of models on a cold cache and synthesizes real audio on
     # cpu; the same suite measures 12m20s on GitHub's runner. This is the "something
     # hung" bound, not the expected duration, and it is longer than GitHub's 30 because
@@ -406,6 +413,41 @@ jobs:
           echo "runner: $(uname -s) $(uname -m), $(nproc) cpu"
           echo "user:   $(id -un) (uid $(id -u))"
           df -h / | tail -1
+          # MEASURING THE CEILING, because every candidate fix for the 137 this job
+          # has been dying of is weighed against a number nobody has ever read: the
+          # step printed cpu, user and disk and no memory at all -- the one figure
+          # that explains an OOM kill is the one it did not collect.
+          #
+          # /proc rather than `free`, for the reason the `reachability` job already
+          # gives: procps is not in every job image, and a capacity report that
+          # vanishes with the base image is no report. MemAvailable, not MemTotal,
+          # is what a process may actually have.
+          # MiB, and labelled MiB: /proc/meminfo is KiB, so int($2/1024) is mebibytes,
+          # and calling them MB understates by 4.9% -- hundreds of MB at this scale.
+          # It also has to read against `tests/rsscurve.py`, which reports MiB, since
+          # comparing the two is the entire point of collecting this.
+          awk '/^MemTotal:|^MemAvailable:/{printf "%-14s %6d MiB\n", $1, int($2/1024)}' /proc/meminfo
+          # The container's own limit, which is below the host's when there is one.
+          # Both cgroup layouts, and "none" is a real answer rather than a failure --
+          # said out loud, because this step exists to explain a 137 and a line that
+          # is simply absent reads as "died before getting here", which points the
+          # reader the opposite way from "nothing is capping this". [LAW:no-silent-failure]
+          found=
+          for limit in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+            if [ -r "$limit" ]; then
+              # MiB, so it reads against the two figures above it rather than
+              # asking whoever is explaining a 137 to divide by 1048576 in their
+              # head. cgroup v2 writes the literal `max` when uncapped, so the
+              # non-numeric case is printed as it stands rather than converted.
+              value=$(cat "$limit")
+              case "$value" in
+                *[!0-9]*) echo "cgroup limit:  $value ($limit)" ;;
+                *)        echo "cgroup limit:  $((value / 1048576)) MiB ($limit)" ;;
+              esac
+              found=yes
+            fi
+          done
+          [ -n "$found" ] || echo "cgroup limit:  none -- neither cgroup layout is readable"
 
       # ffmpeg and espeak-ng are native and no Python metadata can declare them, so an
       # installer cannot bring them and the suite cannot skip past them -- see README,
@@ -444,8 +486,41 @@ jobs:
       # [LAW:one-source-of-truth] The command is the same one the merge gate runs, and
       # `tests/test_merge_gate.py` asserts that it stays the same. Two gates running
       # two different suites would mean "the tests passed" naming two different facts.
+      # INSTRUMENTED THROUGH THE ENVIRONMENT, never through the command. The `run:`
+      # line below is held byte-equal to `.github/workflows/tests.yml`'s by
+      # `tests/test_merge_gate.py`, and its `_NARROWERS` check refuses anything that
+      # shrinks what pytest collects. An instrument that edited the command would be
+      # altering the thing it was brought in to observe -- so the plugin arrives as
+      # PYTEST_ADDOPTS and the suite stays the suite both gates already run.
+      #
+      # `tests/rsscurve.py` writes one row per test and flushes each, so the rows
+      # survive the SIGKILL this exists to explain.
       - name: Run the suite
+        env:
+          PYTEST_ADDOPTS: -p tests.rsscurve
         run: uv run --all-extras --locked pytest -q
+
+      # `always()` reaches a red suite, and measurably does not reach an OOM kill:
+      # on run 22 the killer took the whole job container and this step never ran,
+      # so the log simply ended at 23% with no report.
+      #
+      # The tail, and no analysis. This used to re-derive "every test that raised
+      # the high-water mark" with an awk that split the CSV on commas -- a second
+      # implementation of a rule `tests/rsscurve.py` already applies live, and a
+      # wrong one: `[en,es,-read3]` is a real nodeid, so `$4` read a fragment of
+      # the id rather than the peak and mis-set the running baseline for every
+      # row after it. The live reporter owns that list ([LAW:one-source-of-truth]);
+      # what only the file can offer is the rows that outlived the kill.
+      - name: Report where the memory went
+        if: always()
+        run: |
+          set -euo pipefail
+          # The one absence that is an answer rather than a failure -- everything
+          # else here is loud, which is what `-e` is back for ([LAW:no-silent-failure]).
+          test -f "$RSS_CURVE_OUT" || { echo "no curve written -- died before the first test"; exit 0; }
+          echo "rows: $(( $(wc -l < "$RSS_CURVE_OUT") - 1 ))"
+          echo "--- last 15 rows before the end ---"
+          tail -15 "$RSS_CURVE_OUT"
 
   publish:
     # Both, and the order of the list is not the order they run: a red suite and an

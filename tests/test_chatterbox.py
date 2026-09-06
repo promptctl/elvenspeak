@@ -46,7 +46,6 @@ with 7.9 GB — and the refusals hold none, answerable from a table and a stat.
 
 from __future__ import annotations
 
-import gc
 import re
 import threading
 import time
@@ -56,6 +55,7 @@ from conftest import (
     SERVES,
     chatterbox_prepared,
     declared,
+    reclaim,
     serves,
 )
 
@@ -565,12 +565,19 @@ def test_the_offered_order_is_the_configured_order(chatterbox_installed):
     resident against a build runner with 7.9 GB. It takes `chatterbox_installed`
     rather than `engine` for that reason — the module fixture would still be
     holding the first while this opened the second.
+
+    [LAW:one-source-of-truth] Released through `reclaim`, which is what "one at a
+    time" always needed and a bare collect never did: collecting makes the first
+    model unreachable, but its pages go back to glibc's arena, and the arena is
+    what the OOM killer counts. Runs 24 through 28 each measured this test peaking
+    near 6.6 GiB with both models resident -- the suite's high-water mark is set
+    here and nowhere else, and it is the test every killed run died inside.
     """
     ordered = chatterbox_prepared(languages=("en", "es")).open()
     assert [voice.id for voice in ordered.voices()] == ["builtin-en", "builtin-es"]
 
     del ordered
-    gc.collect()
+    reclaim()
 
     reversed_order = chatterbox_prepared(languages=("es", "en")).open()
     assert [voice.id for voice in reversed_order.voices()] == [
