@@ -5,8 +5,11 @@ This exists because `tests` is being SIGKILLed on the act_runner with no
 traceback, and a whole-process figure cannot say which test raised the mark.
 `ru_maxrss` is monotonic within a process -- it only ever rises -- so the test
 whose `peak_after` exceeds its predecessor's is, exactly, the one that raised it.
-`rss_before` is the baseline that test was handed, so `peak_after - rss_before`
-is the transient it needed on top of what it inherited.
+`rss_before` is read at `logstart`, which pytest fires before the setup-side
+reclaim, so it is what the test was *entered* with rather than what it was
+handed: `peak_after - rss_before` brackets that test's transient rather than
+isolating it. It is read there because only `logstart` can name a victim the
+killer takes mid-test, and that is worth more here than a cleaner subtraction.
 
 Appended and flushed per test rather than assembled at session finish, because
 the run this explains is one that gets killed: a report written at the end would

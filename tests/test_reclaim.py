@@ -95,6 +95,16 @@ def test_an_app_the_suite_has_finished_with_stops_holding_its_engine():
 _CONFTEST = Path(__file__).with_name("conftest.py")
 _ROOT = Path(__file__).parents[1]
 
+#: [LAW:no-shared-mutable-globals] The outer run's instrumentation, which the
+#: nested one must not inherit. The `tests` job exports both: `PYTEST_ADDOPTS`
+#: would load `tests.rsscurve` in the child too -- `_ROOT` is on its PYTHONPATH
+#: and `tests` needs no `__init__.py` to import from there -- and that plugin's
+#: `pytest_configure` reopens `RSS_CURVE_OUT` with mode "w". Measured: the child
+#: truncates the parent's curve and leaves its own two throwaway nodeids in it,
+#: destroying the row the outer run had already written. This file sorts late,
+#: so an OOM would be explained by a file describing a different suite.
+_NOT_INHERITED = ("PYTEST_ADDOPTS", "RSS_CURVE_OUT")
+
 #: Loaded by path under a name of its own, so the throwaway suite drives the real
 #: hooks rather than a copy of them: a `hookimpl` marker lives on the function
 #: object, so re-exporting the functions carries wrapper-vs-plain across with
@@ -211,7 +221,10 @@ def test_a_reclaim_follows_every_release_rather_than_preceding_it(tmp_path):
     run = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(tmp_path)],
         cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(_ROOT)},
+        env={
+            **{k: v for k, v in os.environ.items() if k not in _NOT_INHERITED},
+            "PYTHONPATH": str(_ROOT),
+        },
         capture_output=True,
         text=True,
     )
