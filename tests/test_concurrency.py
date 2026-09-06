@@ -520,7 +520,15 @@ def test_a_synthesis_that_fails_after_its_caller_left_still_says_so(caplog):
     # here reported it — the test would have been green against the very bug it
     # exists to catch. Verified: it was.
     ours = [r for r in caplog.records if r.name == "elvenspeak.api"]
-    assert any("engine blew up after the caller left" in r.getMessage() for r in ours), (
+    # The exception rides in `exc_info`, not in the message, and that is the
+    # point of the report: retrieving a task's exception is what suppresses
+    # asyncio's own collection-time traceback, so a log line without the stack
+    # would leave an operator worse off than the silence it replaced.
+    assert any(
+        r.exc_info and "engine blew up after the caller left" in str(r.exc_info[1])
+        for r in ours
+    ), (
         "an engine failure that landed after its caller hung up was never "
-        f"reported by elvenspeak.api — its records: {[r.getMessage() for r in ours]}"
+        f"reported by elvenspeak.api with its traceback — records: "
+        f"{[(r.getMessage(), bool(r.exc_info)) for r in ours]}"
     )

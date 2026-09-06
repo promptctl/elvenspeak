@@ -344,17 +344,14 @@ def test_the_concurrency_default_is_the_bound_that_was_already_there():
     while claiming to change nothing.
 
     MEASURED, NOT RESTATED, and that is the whole design of this test. It used to
-    assert against a second copy of CPython's formula, spelled with
-    `os.cpu_count()` — which is wrong on the pinned interpreter, since 3.13 moved
-    `ThreadPoolExecutor` onto the cgroup-aware `os.process_cpu_count()`. The two
-    agree on every unconstrained machine, including every machine this suite runs
-    on, and diverge under a CPU quota, which is the only kind of host this
-    service is deployed to. So the copy was invisible here and wrong in
-    production, and a check written against the same copy could never say so.
+    assert against a second copy of CPython's formula, spelled `os.cpu_count()` —
+    which is not the formula 3.13's `ThreadPoolExecutor` uses. A copy cannot
+    detect its own drift, so the check written to enforce the invariant was the
+    one thing structurally unable to see it break.
 
-    Saturating the executor and counting how many run at once asks the question
-    of the thing itself, so the next time CPython changes this formula a test
-    fails instead of a container quietly getting the wrong ceiling.
+    Saturating the executor and counting asks the question of the thing itself,
+    so the next time CPython changes this a test fails rather than a deployment
+    quietly getting a ceiling nobody chose.
     """
 
     async def widest() -> int:
@@ -367,12 +364,19 @@ def test_the_concurrency_default_is_the_bound_that_was_already_there():
             with counting:
                 running += 1
                 peak = max(peak, running)
-            time.sleep(0.15)
+            # Long enough that every worker the executor will create is still
+            # inside this sleep when the last of the first batch is dispatched.
+            # `_adjust_thread_count` reuses an idle thread rather than spawning
+            # another, so a sleep short enough for the first worker to finish
+            # early would undercount the width and fail this test with a message
+            # about the default — on a loaded runner, which this suite has
+            # already met once at load average 104.
+            time.sleep(0.5)
             with counting:
                 running -= 1
 
         # Comfortably more than any width `min(32, ...)` can produce, submitted
-        # at once so the executor is saturated rather than sampled.
+        # in one loop iteration so the executor is saturated rather than sampled.
         await asyncio.gather(*(asyncio.to_thread(occupy) for _ in range(80)))
         return peak
 

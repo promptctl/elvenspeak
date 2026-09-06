@@ -444,13 +444,23 @@ async def _synthesising(gate: asyncio.Semaphore, work: Callable[[], _Spoken]) ->
         raise
 
 
-def _complain_if_it_failed(speaking: "asyncio.Future[object]") -> None:
-    """Reads an abandoned synthesis's outcome, so a failure is not lost with it."""
+def _complain_if_it_failed(speaking: "asyncio.Future[_Spoken]") -> None:
+    """Reads an abandoned synthesis's outcome, so a failure is not lost with it.
+
+    `exc_info`, and it is the whole value of this callback. Asking a task for its
+    exception marks the traceback retrieved, which is what stops asyncio printing
+    it at collection time — so a bare `%r` here does not ADD a report, it swaps a
+    full stack through `to_thread` into `work()` into the engine for a single
+    line naming no frame. Measured both ways; the first version of this function
+    left an operator strictly worse off than the silence it replaced.
+    """
     if speaking.cancelled():
         return
     failure = speaking.exception()
     if failure is not None:
-        _LOGGER.error("synthesis failed after its caller hung up: %r", failure)
+        _LOGGER.error(
+            "synthesis failed after its caller hung up", exc_info=failure
+        )
 
 
 def _audible_pcm(voice: Voice, text: str, pcm: bytes) -> bytes:
