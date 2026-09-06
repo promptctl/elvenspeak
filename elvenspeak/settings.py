@@ -54,12 +54,21 @@ def _default_concurrency() -> int:
     """The bound `asyncio.to_thread` already imposes, read rather than restated.
 
     [LAW:one-source-of-truth] CPython computes its default executor's width as
-    `min(32, (os.cpu_count() or 1) + 4)`, and that is the ceiling every synthesis
-    in this process runs under today. Spelling the same formula here keeps the
-    named default equal to the unnamed one it replaces, so turning this setting
-    on changes nothing until an operator changes the number.
+    `min(32, (os.process_cpu_count() or 1) + 4)`, and that is the ceiling every
+    synthesis in this process runs under today. Spelling the same formula here
+    keeps the named default equal to the unnamed one it replaces, so turning this
+    setting on changes nothing until an operator changes the number.
+
+    PROCESS cpu count, not `os.cpu_count`, and the difference is the whole point
+    of the default. 3.13 moved `ThreadPoolExecutor` onto the cgroup-aware count,
+    and the two answers are identical on any unconstrained machine — including
+    every machine this suite runs on — while diverging under a CPU quota, which
+    is the only kind of host this service is deployed to. A copy of the wrong
+    formula would therefore have been invisible here and wrong in production.
+    `tests/test_settings.py` no longer checks this against a second copy of the
+    formula for that reason: it measures what the executor actually does.
     """
-    return min(32, (os.cpu_count() or 1) + 4)
+    return min(32, (os.process_cpu_count() or 1) + 4)
 
 
 #: Settings that named a capability in one engine's dialect, and what replaced

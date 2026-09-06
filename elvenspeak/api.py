@@ -50,6 +50,7 @@ import json
 import logging
 from functools import partial
 from collections.abc import AsyncIterator, Callable, Iterator
+from typing import TypeVar
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -65,6 +66,13 @@ from .formats import (
     UnknownOutputFormat,
 )
 from .settings import Settings
+
+#: What one synthesis hands back. Named only so [`_synthesising`] can promise the
+#: caller the same type its own callable returns: `object` there would make every
+#: `spoken.sample_rate` and every tuple unpack downstream a static error, and
+#: would accept a callable of the wrong shape until runtime
+#: ([LAW:types-are-the-program]).
+_Spoken = TypeVar("_Spoken")
 
 _LOGGER = logging.getLogger("elvenspeak.api")
 
@@ -375,7 +383,7 @@ def _audible(voice: Voice, text: str, chunks: Iterator[bytes]) -> Iterator[bytes
     raise Silence(voice, text)
 
 
-async def _synthesising(gate: asyncio.Semaphore, work: Callable[[], object]) -> object:
+async def _synthesising(gate: asyncio.Semaphore, work: Callable[[], _Spoken]) -> _Spoken:
     """Runs `work` off the loop, holding a permit until that THREAD has finished.
 
     Not `async with gate:` around the await, and the difference is the whole
@@ -404,7 +412,7 @@ async def _synthesising(gate: asyncio.Semaphore, work: Callable[[], object]) -> 
     loop = asyncio.get_running_loop()
     await gate.acquire()
 
-    def _and_then_release() -> object:
+    def _and_then_release() -> _Spoken:
         try:
             return work()
         finally:
@@ -420,7 +428,29 @@ async def _synthesising(gate: asyncio.Semaphore, work: Callable[[], object]) -> 
                 # clean stop.
                 pass
 
-    return await asyncio.shield(asyncio.to_thread(_and_then_release))
+    speaking = asyncio.ensure_future(asyncio.to_thread(_and_then_release))
+    try:
+        return await asyncio.shield(speaking)
+    except asyncio.CancelledError:
+        # [LAW:no-silent-failure] The shield unregisters its inner callback the
+        # moment the outer await is cancelled, so nothing ever reads what the
+        # engine did next. The permit still comes back — that is the `finally` —
+        # but an engine that then FAILS has its exception discarded, resurfacing
+        # whenever the task is collected as a bare "Task exception was never
+        # retrieved" with nothing tying it to a request. Measured. The caller has
+        # gone either way; what this buys is an operator learning that synthesis
+        # broke, rather than the failure being swallowed by a hang-up.
+        speaking.add_done_callback(_complain_if_it_failed)
+        raise
+
+
+def _complain_if_it_failed(speaking: "asyncio.Future[object]") -> None:
+    """Reads an abandoned synthesis's outcome, so a failure is not lost with it."""
+    if speaking.cancelled():
+        return
+    failure = speaking.exception()
+    if failure is not None:
+        _LOGGER.error("synthesis failed after its caller hung up: %r", failure)
 
 
 def _audible_pcm(voice: Voice, text: str, pcm: bytes) -> bytes:
@@ -473,7 +503,14 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     # times its design target (piper-memory-9rc); turning that into a queue makes
     # it slow, and turning it into a 503 would make a caller's retry the next
     # burst.
-    speaking_at_once = asyncio.Semaphore(settings.concurrent_syntheses)
+    #
+    # [LAW:no-silent-failure] BOUNDED, so a release that does not answer an
+    # acquire raises rather than quietly widening the ceiling. This branch has
+    # already shipped two release bugs — one freeing the slot while the engine
+    # was still in it, one losing the permit entirely — and a plain `Semaphore`
+    # would answer the third by RAISING the limit, which is the single failure
+    # this feature cannot tolerate and the one nothing here could observe.
+    speaking_at_once = asyncio.BoundedSemaphore(settings.concurrent_syntheses)
 
     # Which `model_id` values reach this deployment at all, derived once from the
     # voices on offer rather than from this deployment's own engine name.
