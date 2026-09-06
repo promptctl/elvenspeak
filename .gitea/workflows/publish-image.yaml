@@ -377,6 +377,13 @@ jobs:
   tests:
     runs-on: ubuntu-latest
 
+    # [LAW:one-source-of-truth] Where the curve is written, named once. It was
+    # spelled twice -- once for the plugin, once for the step that reads it back --
+    # and a rename of either would have printed "no curve written" for a run that
+    # wrote one, hiding the mismatch instead of reporting it.
+    env:
+      RSS_CURVE_OUT: ${{ github.workspace }}/rss-curve.csv
+
     # The suite fetches ~3.4 GB of models on a cold cache and synthesizes real audio on
     # cpu; the same suite measures 12m20s on GitHub's runner. This is the "something
     # hung" bound, not the expected duration, and it is longer than GitHub's 30 because
@@ -471,26 +478,29 @@ jobs:
       - name: Run the suite
         env:
           PYTEST_ADDOPTS: -p tests.rsscurve
-          RSS_CURVE_OUT: ${{ github.workspace }}/rss-curve.csv
         run: uv run --all-extras --locked pytest -q
 
       # `always()` reaches a red suite, and measurably does not reach an OOM kill:
       # on run 22 the killer took the whole job container and this step never ran,
-      # so the log simply ended at 23% with no report. It is kept for the failure
-      # it does cover -- a suite that goes red and exits -- while the finding this
-      # was built for now leaves the container as it happens, printed by
-      # `tests/rsscurve.py` to the terminal reporter at every rise in the mark.
+      # so the log simply ended at 23% with no report.
+      #
+      # The tail, and no analysis. This used to re-derive "every test that raised
+      # the high-water mark" with an awk that split the CSV on commas -- a second
+      # implementation of a rule `tests/rsscurve.py` already applies live, and a
+      # wrong one: `[en,es,-read3]` is a real nodeid, so `$4` read a fragment of
+      # the id rather than the peak and mis-set the running baseline for every
+      # row after it. The live reporter owns that list ([LAW:one-source-of-truth]);
+      # what only the file can offer is the rows that outlived the kill.
       - name: Report where the memory went
         if: always()
         run: |
-          set -uo pipefail
-          curve="${{ github.workspace }}/rss-curve.csv"
-          test -f "$curve" || { echo "no curve written -- died before the first test"; exit 0; }
-          echo "rows: $(( $(wc -l < "$curve") - 1 ))"
-          echo "--- every test that raised the high-water mark ---"
-          awk -F, 'NR>1 && $4+0 > mx+50 { printf "%9.1f MiB  (rss %.1f -> %.1f)  %s\n", $4, $2, $3, $1; mx=$4+0 }' "$curve"
+          set -euo pipefail
+          # The one absence that is an answer rather than a failure -- everything
+          # else here is loud, which is what `-e` is back for ([LAW:no-silent-failure]).
+          test -f "$RSS_CURVE_OUT" || { echo "no curve written -- died before the first test"; exit 0; }
+          echo "rows: $(( $(wc -l < "$RSS_CURVE_OUT") - 1 ))"
           echo "--- last 15 rows before the end ---"
-          tail -15 "$curve"
+          tail -15 "$RSS_CURVE_OUT"
 
   publish:
     # Both, and the order of the list is not the order they run: a red suite and an

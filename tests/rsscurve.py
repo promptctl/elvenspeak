@@ -33,12 +33,13 @@ way out: the last `enter` with no `peak` after it names the victim, and the pair
 around a test that survives is what a synthesis costs on top of a loaded model --
 the figure run 23 died without reporting.
 
-Loaded only when something passes `-p rsscurve`, so the suite it measures is
+Loaded only when something passes `-p tests.rsscurve`, so the suite it measures is
 byte-for-byte the suite both gates already run -- `tests/test_merge_gate.py`
 holds the two `run:` lines equal, and an instrument that edited them would be
 changing the thing it was brought in to observe.
 """
 
+import csv
 import gc
 import os
 import resource
@@ -101,8 +102,10 @@ _config = None
 def pytest_configure(config):
     global _config
     _config = config
-    with open(_path(), "w") as handle:
-        handle.write("nodeid,rss_before_mib,rss_after_mib,peak_after_mib\n")
+    with open(_path(), "w", newline="") as handle:
+        csv.writer(handle).writerow(
+            ("nodeid", "rss_before_mib", "rss_after_mib", "peak_after_mib")
+        )
 
 
 def pytest_runtest_logstart(nodeid, location):
@@ -126,8 +129,15 @@ def _report_entering_the_danger_zone(rss, nodeid):
 def pytest_runtest_logfinish(nodeid, location):
     before = _before.pop(nodeid, float("nan"))
     after, peak = _rss_mib(), _peak_mib()
-    with open(_path(), "a") as handle:
-        handle.write(f"{nodeid},{before:.1f},{after:.1f},{peak:.1f}\n")
+    # [LAW:one-source-of-truth] Quoted by `csv`, because a nodeid is not a field
+    # this file gets to assume the shape of: `[en,es,-read3]` is a real id in
+    # `test_chatterbox.py`, and joining on commas shifted every number after it
+    # for whoever read the row back. The flush stays -- rows outliving the SIGKILL
+    # is the whole reason this file is written a row at a time.
+    with open(_path(), "a", newline="") as handle:
+        csv.writer(handle).writerow(
+            (nodeid, f"{before:.1f}", f"{after:.1f}", f"{peak:.1f}")
+        )
         handle.flush()
     _report_if_worth_a_line(nodeid, before, after, peak)
 
