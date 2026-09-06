@@ -227,6 +227,13 @@ def test_a_reclaim_follows_every_release_rather_than_preceding_it(tmp_path):
         },
         capture_output=True,
         text=True,
+        # Bounded, because an unbounded hang here is indistinguishable from the
+        # OOM this file exists to make legible: it would surface as the whole
+        # `tests` job hitting its "something hung" bound, naming nothing. The
+        # nested run measures 0.38s on a workstation; 120 is room for a 2-cpu
+        # runner sharing one daemon with three other jobs, and still two minutes
+        # rather than twelve. [LAW:no-silent-failure]
+        timeout=120,
     )
     assert run.returncode == 0, f"the probe suite itself failed:\n{run.stdout}\n{run.stderr}"
 
