@@ -390,6 +390,16 @@ async def _synthesising(gate: asyncio.Semaphore, work: Callable[[], object]) -> 
     So the release rides with the work. Whoever submits it is the only one who
     can see it end, and `call_soon_threadsafe` is how a worker thread hands that
     fact back to the loop it was submitted from.
+
+    SHIELDED, and that is not decoration. Putting the release inside the
+    submitted callable makes it conditional on the callable running at all, and
+    cancelling an `asyncio.to_thread` whose future is still PENDING in the shared
+    executor cancels it outright: the work never runs, its `finally` never fires,
+    and the permit is gone for the life of the process. Measured -- a gate of two
+    came back one and stayed there. That is strictly worse than the race it was
+    meant to fix, trading transient over-subscription for monotonic starvation.
+    The shield keeps the submitted future uncancellable, so the work always runs
+    and always releases, whichever state the cancellation finds it in.
     """
     loop = asyncio.get_running_loop()
     await gate.acquire()
@@ -398,9 +408,19 @@ async def _synthesising(gate: asyncio.Semaphore, work: Callable[[], object]) -> 
         try:
             return work()
         finally:
-            loop.call_soon_threadsafe(gate.release)
+            try:
+                loop.call_soon_threadsafe(gate.release)
+            except RuntimeError:
+                # The loop closed while this thread was still running, which is
+                # process shutdown: the default executor's workers are joined by
+                # an `atexit` handler that runs after uvicorn has closed the
+                # loop. There is nothing left to release into and nobody left to
+                # tell, and letting it raise here would replace `work()`'s own
+                # result or exception with a bare thread traceback on every
+                # clean stop.
+                pass
 
-    return await asyncio.to_thread(_and_then_release)
+    return await asyncio.shield(asyncio.to_thread(_and_then_release))
 
 
 def _audible_pcm(voice: Voice, text: str, pcm: bytes) -> bytes:

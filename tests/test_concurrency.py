@@ -26,18 +26,19 @@ asks for two things at once.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 
 import fleet
 import httpx
 import pytest
 from conftest import DECLARED_VOICES, DeclaredPrepared, declaring
 
-from elvenspeak import create_app
+from elvenspeak import api, create_app
 from elvenspeak.engine import (
     Capability,
     Prosody,
@@ -48,10 +49,21 @@ from elvenspeak.engine import (
 )
 from elvenspeak.engines import ENGINES
 from elvenspeak.settings import Settings
+from elvenspeak.text import split_sentences
 
 #: Enough callers to exceed every bound under test, so the ceiling is what the
 #: setting says rather than what the test could muster.
 _CALLERS = 6
+
+#: Four sentences, and the punctuation is load-bearing. `text.split_sentences`
+#: cuts on sentence-final punctuation followed by whitespace, so a body without
+#: any -- "one two three four", which this file used -- comes back as ONE
+#: sentence, and `/stream/with-timestamps`'s per-sentence loop then takes and
+#: gives back its permit exactly once. That is the single-acquire shape the other
+#: endpoints already cover, so the coverage this file claimed for the repeated
+#: shape was not being exercised at all. `test_the_sentence_loop_really_cycles`
+#: holds this to more than one synthesis per request so it cannot quietly revert.
+_TEXT = "One. Two. Three. Four."
 
 #: A synthesis long enough that overlapping ones actually overlap in wall time.
 #: Split into chunks because a single sleeping chunk would sit entirely inside
@@ -78,11 +90,15 @@ class Overlap:
         self._lock = threading.Lock()
         self._now = 0
         self.most = 0
+        #: How many times the engine was entered at all. Distinct from `most`,
+        #: and the thing that says whether a per-request loop really looped.
+        self.entries = 0
 
     @contextmanager
     def one_more(self) -> Iterator[None]:
         with self._lock:
             self._now += 1
+            self.entries += 1
             self.most = max(self.most, self._now)
         try:
             yield
@@ -197,7 +213,7 @@ def _most_overlap(at_once: int, endpoint: str) -> Overlap:
             with httpx.Client(timeout=30.0) as client, client.stream(
                 "POST",
                 f"{base}/v1/text-to-speech/{voice}{endpoint}",
-                json={"text": "one two three four"},
+                json={"text": _TEXT},
             ) as response:
                 for _chunk in response.iter_bytes():
                     pass
@@ -268,7 +284,7 @@ def test_a_caller_who_hangs_up_mid_utterance_gives_its_permit_back():
     with fleet.serving(app) as base:
         voice = DECLARED_VOICES[0].id
         url = f"{base}/v1/text-to-speech/{voice}/stream"
-        body = {"text": "one two three four"}
+        body = {"text": _TEXT}
 
         # Reads one chunk and walks away. Leaving the `stream` block closes the
         # connection under a response that is still being produced, which is what
@@ -304,8 +320,9 @@ def test_a_caller_who_hangs_up_inside_speak_gives_its_permit_back():
     under four hard mid-`speak` hang-ups and returned every permit, and this test
     passes against that shape too. It is kept because the property is worth
     holding whatever the server does underneath, not because it discriminates the
-    two designs; the thing that rules the leak out is the scoped `async with` in
-    `convert_stream`, which has no permit to outlive anything.
+    two designs; what rules the leak out is `api._synthesising`, which releases
+    from the worker thread's own `finally` and shields the submitted future so
+    that finally always runs — there is no permit left to outlive anything.
 
     One permit, so a single hang-up is the entire supply: were a slot retired,
     the call after it would never get one and this would fail by timing out.
@@ -316,7 +333,7 @@ def test_a_caller_who_hangs_up_inside_speak_gives_its_permit_back():
     with fleet.serving(app) as base:
         voice = DECLARED_VOICES[0].id
         url = f"{base}/v1/text-to-speech/{voice}/stream"
-        body = {"text": "one two three four"}
+        body = {"text": _TEXT}
 
         # Gives up long before `speak` returns, so the server is cancelled with
         # no response body ever started.
@@ -332,4 +349,104 @@ def test_a_caller_who_hangs_up_inside_speak_gives_its_permit_back():
     assert drained > 0, (
         "the call after a hang-up inside `speak` got no audio — the cancelled "
         "request's permit was never given back"
+    )
+
+
+def test_the_sentence_loop_really_cycles_its_permit():
+    """The per-sentence coverage above must actually exercise several sentences.
+
+    `/stream/with-timestamps` is in `_SPEAKING_ENDPOINTS` for one reason: it is
+    the only endpoint that takes and gives back the same permit repeatedly inside
+    a single request. That is a property of the REQUEST BODY, not of the
+    endpoint — with a body carrying no sentence-final punctuation the loop runs
+    once and the whole point is lost, which is what happened when this coverage
+    was first added.
+
+    So the shape is asserted rather than assumed: one caller, and the engine has
+    to have been entered once per sentence.
+    """
+    overlap = Overlap()
+    app = create_app(_settings(2), WatchedEngine(overlap))
+
+    with fleet.serving(app) as base:
+        voice = DECLARED_VOICES[0].id
+        with httpx.Client(timeout=30.0) as client, client.stream(
+            "POST",
+            f"{base}/v1/text-to-speech/{voice}/stream/with-timestamps",
+            json={"text": _TEXT},
+        ) as response:
+            for _chunk in response.iter_bytes():
+                pass
+
+    sentences = len(split_sentences(_TEXT))
+    assert sentences > 1, f"_TEXT is not multiple sentences: {_TEXT!r}"
+    assert overlap.entries == sentences, (
+        f"one request entered the engine {overlap.entries} times for {sentences} "
+        "sentences — the per-sentence permit cycle this endpoint is here to cover "
+        "is not being exercised"
+    )
+
+
+@pytest.mark.parametrize(
+    "occupy_the_pool",
+    # The two states a cancellation can find the submitted work in, and they fail
+    # in opposite directions if the release is wired wrong: RUNNING releases too
+    # early (the slot is handed on while the engine is still in it), PENDING
+    # never releases at all (the work is cancelled outright, so a `finally`
+    # inside it never runs). One mechanism has to answer both.
+    [pytest.param(False, id="cancelled-while-running"),
+     pytest.param(True, id="cancelled-while-pending")],
+)
+def test_a_cancelled_synthesis_gives_its_permit_back_exactly_once(occupy_the_pool):
+    """[LAW:no-silent-failure] A permit that is never returned is an outage on a timer.
+
+    Driven directly rather than through the server because the PENDING case needs
+    the executor saturated, which a test cannot arrange through HTTP but can
+    arrange exactly here with a one-worker pool. Measured before it was believed:
+    with the release inside the submitted callable and nothing shielding it, a
+    gate of two came back one and stayed there for the life of the loop.
+
+    That is the worse of the two failure directions. Over-subscription is
+    transient and self-heals; a lost permit is monotonic, so a service leaks its
+    way to a gate of zero and stops synthesising while looking perfectly healthy.
+    """
+
+    async def run() -> tuple[int, bool]:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        gate = asyncio.Semaphore(2)
+        finished = threading.Event()
+
+        def work() -> str:
+            time.sleep(0.4)
+            finished.set()
+            return "spoken"
+
+        if occupy_the_pool:
+            asyncio.create_task(asyncio.to_thread(lambda: time.sleep(0.6)))
+            await asyncio.sleep(0.05)
+
+        task = asyncio.create_task(api._synthesising(gate, work))
+        await asyncio.sleep(0.15)
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+        # Read before the work can have finished: a permit back this early means
+        # it was handed on while the engine was still holding it.
+        await asyncio.sleep(0.02)
+        released_early = gate._value == 2 and not finished.is_set()
+
+        await asyncio.sleep(2.0)
+        return gate._value, released_early
+
+    permits, released_early = asyncio.run(run())
+
+    assert not released_early, (
+        "the permit came back before the synthesis it was guarding had finished — "
+        "a cancelled caller handed its slot to the next one mid-utterance"
+    )
+    assert permits == 2, (
+        f"{permits} of 2 permits came back after a cancelled synthesis — the rest "
+        "are gone for the life of the process, and the gate shrinks toward zero"
     )

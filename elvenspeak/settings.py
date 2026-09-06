@@ -128,9 +128,14 @@ class Settings:
     #: Bounds synthesis WORK, not requests in flight. On the streaming endpoints
     #: a permit is held while a chunk is being made and released while the caller
     #: reads: between chunks that request is blocked behind its own socket, and
-    #: charging it a slot there would bill a slow reader — or the router, which
-    #: proxies audio it never synthesised — against a budget measured for models
-    #: doing work. The number of open streams stays unbounded, as it was.
+    #: charging it a slot there would bill a slow reader against a budget
+    #: measured for models doing work. The number of open streams stays
+    #: unbounded, as it was.
+    #:
+    #: Nothing special-cases the router. `Remote.speak` is an ordinary engine, so
+    #: a router deployment gates its own reads from backends by this same number
+    #: — which is worth setting there for the fan-out that process needs rather
+    #: than for a model's memory, since it synthesises nothing itself.
     #:
     #: THIS NUMBER ALREADY EXISTED; it was just nobody's. Every synthesis
     #: dispatches through `asyncio.to_thread`, whose default executor is
