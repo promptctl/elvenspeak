@@ -38,7 +38,14 @@ import pytest
 from conftest import DECLARED_VOICES, DeclaredPrepared, declaring
 
 from elvenspeak import create_app
-from elvenspeak.engine import Capability, Prosody, Speech, Voice
+from elvenspeak.engine import (
+    Capability,
+    Prosody,
+    Speech,
+    TimedSpeech,
+    Timing,
+    Voice,
+)
 from elvenspeak.engines import ENGINES
 from elvenspeak.settings import Settings
 
@@ -101,18 +108,34 @@ class WatchedEngine:
         #: engine is still inside `speak`, which is where nearly all of a
         #: streaming request's wall time goes and which no other test here covers.
         self._speak_seconds = speak_seconds
-        # TIMESTAMPS deliberately not declared: this stand-in has no
-        # `speak_timed`, and an engine that declares what it cannot do is the
-        # dishonesty `DeclaredEngine`'s docstring exists to refuse. It also keeps
-        # the endpoints below to the two that need only `speak`.
-        self._voices = declaring(frozenset({Capability.SPEED}), DECLARED_VOICES)
+        self._voices = declaring(frozenset(Capability), DECLARED_VOICES)
 
     def voices(self) -> tuple[Voice, ...]:
         return self._voices
 
     def speak(self, voice: Voice, text: str, prosody: Prosody) -> Speech:
-        time.sleep(self._speak_seconds)
+        # Counted too, because this is engine work like any other -- and it is
+        # the work a hang-up orphans, since a thread already running cannot be
+        # cancelled. At the default `speak_seconds` of zero this is instant and
+        # contributes nothing to the overlap the other tests measure.
+        with self._overlap.one_more():
+            time.sleep(self._speak_seconds)
         return Speech(sample_rate=_RATE, audio=self._audio())
+
+    def speak_timed(self, voice: Voice, text: str, prosody: Prosody) -> TimedSpeech:
+        """The whole utterance at once, counted as the one piece of work it is.
+
+        Eager, like every real `speak_timed`: there is no generator to pull
+        later, so the permit around this call covers all of it.
+        """
+        with self._overlap.one_more():
+            time.sleep(self._speak_seconds + _CHUNKS * _CHUNK_SECONDS)
+        samples = len(_SAMPLES) // 2
+        return TimedSpeech(
+            pcm=_SAMPLES,
+            sample_rate=_RATE,
+            timings=(Timing(samples=samples, separates_words=False),),
+        )
 
     def _audio(self) -> Iterator[bytes]:
         # Counted around each CHUNK, not around the generator, because making a
@@ -140,13 +163,23 @@ def _settings(at_once: int) -> Settings:
     )
 
 
-#: The two endpoints that need only `speak`, and they are gated differently on
-#: purpose — which is why both are driven rather than one standing for the pair.
-#: `/convert` drains the engine inside its own thread, so its permit is an
-#: ordinary `async with` in the handler. `/stream` returns before the audio
-#: exists, so its permit is handed to the response body. A single test over
-#: either one alone would leave the other's shape unmeasured.
-_SPEAKING_ENDPOINTS = ["", "/stream"]
+#: Every endpoint that makes audio, because each gates a structurally different
+#: shape and one cannot stand for another.
+#:
+#:   ""                        drains the engine inside one thread
+#:   "/stream"                 returns before the audio exists; the rest is
+#:                             pulled chunk by chunk by the encoder's pump
+#:   "/with-timestamps"        one eager `speak_timed`
+#:   "/stream/with-timestamps" one `speak_timed` PER SENTENCE, with a whole
+#:                             ffmpeg spawn and a client-paced yield between
+#:                             acquisitions -- the only shape here that takes and
+#:                             gives back the same permit repeatedly inside one
+#:                             request
+#:
+#: The last of those was untested while the other two were, which is exactly
+#: where a bound is worth doubting: a permit reacquired before the previous
+#: sentence's synthesis had really finished would look identical from outside.
+_SPEAKING_ENDPOINTS = ["", "/stream", "/with-timestamps", "/stream/with-timestamps"]
 
 
 def _most_overlap(at_once: int, endpoint: str) -> Overlap:
