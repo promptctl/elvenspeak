@@ -422,7 +422,11 @@ jobs:
           # gives: procps is not in every job image, and a capacity report that
           # vanishes with the base image is no report. MemAvailable, not MemTotal,
           # is what a process may actually have.
-          awk '/^MemTotal:|^MemAvailable:/{printf "%-14s %6d MB\n", $1, int($2/1024)}' /proc/meminfo
+          # MiB, and labelled MiB: /proc/meminfo is KiB, so int($2/1024) is mebibytes,
+          # and calling them MB understates by 4.9% -- hundreds of MB at this scale.
+          # It also has to read against `tests/rsscurve.py`, which reports MiB, since
+          # comparing the two is the entire point of collecting this.
+          awk '/^MemTotal:|^MemAvailable:/{printf "%-14s %6d MiB\n", $1, int($2/1024)}' /proc/meminfo
           # The container's own limit, which is below the host's when there is one.
           # Both cgroup layouts, and "none" is a real answer rather than a failure --
           # said out loud, because this step exists to explain a 137 and a line that
