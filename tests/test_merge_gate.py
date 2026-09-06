@@ -92,9 +92,73 @@ def yaml_without_prose(workflow: Path) -> str:
     )
 
 
-def pytest_arguments(workflow: Path) -> list[str]:
-    """What each pytest invocation in `workflow` passes to pytest."""
+#: The other channel pytest reads its arguments from. `PYTEST_ADDOPTS` is
+#: prepended to pytest's own argv before any of it is parsed, so a `-k` set here
+#: narrows a run exactly as far as a `-k` on the command does -- while sitting on
+#: a line the `run:` reader above never looks at.
+#:
+#: Not hypothetical, and that is why this exists: the publish gate sets it. The
+#: RSS instrument arrives as `-p tests.rsscurve` specifically so the command
+#: stays byte-equal to the merge gate's, which means the one gate no human reads
+#: before an image reaches the cluster is also the one with a live env channel
+#: into its own argv. `_NARROWERS` has to cover both or it covers the easier one.
+_ADDOPTS = re.compile(r"^\s*PYTEST_ADDOPTS:\s*(.*)$", re.MULTILINE)
+
+
+def pytest_command_arguments(workflow: Path) -> list[str]:
+    """What each pytest invocation in `workflow` passes to pytest on the command."""
     return _PYTEST.findall(yaml_without_prose(workflow))
+
+
+def pytest_addopts(workflow: Path) -> list[str]:
+    """What `workflow` puts in `PYTEST_ADDOPTS`, spelled as argv reads it.
+
+    Space-prefixed so the values arrive in the same frame the command channel
+    hands over. `_PYTEST` starts capturing after the word `pytest`, so every
+    command argument reaches `_NARROWERS` with the separator still on it and the
+    entries are written to match -- `" -k"`, not `"-k"`. An env value starts at
+    its own column zero, so `-k chatterbox` returned bare would miss every one of
+    those entries and read as clean.
+
+    Counted against the raw text first, because this reader has no positive
+    control the way [`pytest_command_arguments`] has one: a gate that sets no
+    `PYTEST_ADDOPTS` is legitimate -- the merge gate sets none -- so an empty
+    result is a real answer here and cannot double as the signal that the pattern
+    stopped matching. Comparing the two makes the difference loud at zero
+    occurrences as well as at one.
+
+    [LAW:parse-dont-validate] A block scalar is refused for the same reason
+    rather than returned for the caller to search: `PYTEST_ADDOPTS: |` captures
+    the indicator and leaves the arguments themselves on continuation lines this
+    pattern cannot see. Both are the reader going blind while still answering,
+    which is the one failure this whole file exists to refuse -- so both fail by
+    name, the way [`required_jobs`] fails on a `needs:` it cannot read.
+    """
+    yaml = yaml_without_prose(workflow)
+    found = _ADDOPTS.findall(yaml)
+    assert len(found) == yaml.count("PYTEST_ADDOPTS"), (
+        f"this check reads {len(found)} of the {yaml.count('PYTEST_ADDOPTS')} "
+        f"PYTEST_ADDOPTS lines in {workflow.name} — the pattern has stopped matching a "
+        "line that is really there, and the narrowing check below now runs over less "
+        "than the gate passes pytest"
+    )
+    for value in found:
+        assert not value.lstrip().startswith(("|", ">")), (
+            f"{workflow.name} sets PYTEST_ADDOPTS as a block scalar ({value.strip()!r}) — "
+            "its arguments are on continuation lines this check cannot read, so a "
+            "narrowed publish gate would pass it"
+        )
+    return [f" {value.strip()}" for value in found]
+
+
+def pytest_arguments(workflow: Path) -> list[str]:
+    """Everything pytest is passed in `workflow`, by whichever channel carries it.
+
+    The union, because the laws below are laws about the run pytest actually
+    performs, and pytest does not care which of the two channels an argument
+    arrived on.
+    """
+    return pytest_command_arguments(workflow) + pytest_addopts(workflow)
 
 
 @pytest.mark.parametrize("workflow", GATES)
@@ -106,7 +170,7 @@ def test_the_gate_still_runs_the_suite(workflow):
     green, and meaning nothing. A workflow that stopped running the suite reads
     identically from here, which is the point: neither is allowed to be silent.
     """
-    assert pytest_arguments(workflow), (
+    assert pytest_command_arguments(workflow), (
         f"no pytest invocation in {workflow.name} — either the workflow stopped "
         "running the suite, or this regex stopped finding it"
     )
