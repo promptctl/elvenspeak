@@ -89,6 +89,11 @@ class EncodingFailed(RuntimeError):
 #:
 #: [LAW:dataflow-not-control-flow] The variability is a value describing the
 #: operation. `_pump` calls it identically whether anything is bounding or not.
+#:
+#: SUBSCRIPTED at every use — `Pull[object]`, never a bare `Pull`. A bare generic
+#: alias binds its parameter to `Any`, which would accept any callable returning
+#: any awaitable and make `_pump`'s chunk `Any` too: weaker than the concrete
+#: shape this replaced, in a change whose whole point was not flattening types.
 Pull = Callable[[Callable[[], _Pulled]], Awaitable[_Pulled]]
 
 
@@ -119,7 +124,7 @@ async def encode_stream(
     native_rate: int,
     fmt: OutputFormat,
     *,
-    pull_a_chunk: Pull,
+    pull_a_chunk: Pull[object],
 ) -> AsyncIterator[bytes]:
     """Converts samples into `fmt`, emitting encoded bytes as they are ready.
 
@@ -237,7 +242,9 @@ async def encode_stream(
         )
 
 
-async def _pump(process, pcm_chunks: Iterator[bytes], pull_a_chunk: Pull) -> None:
+async def _pump(
+    process, pcm_chunks: Iterator[bytes], pull_a_chunk: Pull[object]
+) -> None:
     """Feeds samples into the encoder without blocking the loop.
 
     One chunk is pulled per await, each on a worker thread, and written before

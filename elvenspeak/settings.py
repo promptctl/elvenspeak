@@ -59,14 +59,29 @@ def _default_concurrency() -> int:
     keeps the named default equal to the unnamed one it replaces, so turning this
     setting on changes nothing until an operator changes the number.
 
-    PROCESS cpu count, not `os.cpu_count`, and the difference is the whole point
-    of the default. 3.13 moved `ThreadPoolExecutor` onto the cgroup-aware count,
-    and the two answers are identical on any unconstrained machine — including
-    every machine this suite runs on — while diverging under a CPU quota, which
-    is the only kind of host this service is deployed to. A copy of the wrong
-    formula would therefore have been invisible here and wrong in production.
-    `tests/test_settings.py` no longer checks this against a second copy of the
-    formula for that reason: it measures what the executor actually does.
+    PROCESS cpu count, not `os.cpu_count`, because 3.13 moved
+    `ThreadPoolExecutor` onto it and this default is worth nothing if it is not
+    the number the executor actually uses.
+
+    AND IT DOES NOT MEAN WHAT IT SOUNDS LIKE. `os.process_cpu_count` follows CPU
+    AFFINITY — `sched_getaffinity` on Linux, plus the `PYTHON_CPU_COUNT`
+    override — and CPython does not read cgroup `cpu.max` at all. A CPU QUOTA
+    does not lower it: `docker --cpus=2` on a 32-core host still answers 32, and
+    so does a Nomad `resources.cpu`. Only pinning does — `--cpuset-cpus`, or
+    Nomad `resources.cores`.
+
+    Which is the opposite of reassuring, and is why it is written down. This
+    default does NOT shrink to fit a quota-limited container, so on the
+    deployment this feature exists for it stays as wide as the host and the
+    operator has to choose the number. An earlier version of this docstring
+    called the count "cgroup-aware" and said it diverges under a quota; a reader
+    who believed that would conclude the ceiling self-adjusts and skip the
+    setting, which is exactly the eight-way burst that OOM-killed
+    elvenspeak-piper.
+
+    `tests/test_settings.py` measures the executor's real width rather than
+    checking this against a second copy of the formula — a copy cannot detect its
+    own drift, which is how the `os.cpu_count` spelling survived here.
     """
     return min(32, (os.process_cpu_count() or 1) + 4)
 
