@@ -424,10 +424,15 @@ jobs:
           # is what a process may actually have.
           awk '/^MemTotal:|^MemAvailable:/{printf "%-14s %6d MB\n", $1, int($2/1024)}' /proc/meminfo
           # The container's own limit, which is below the host's when there is one.
-          # Both cgroup layouts, and "none" is a real answer rather than a failure.
+          # Both cgroup layouts, and "none" is a real answer rather than a failure --
+          # said out loud, because this step exists to explain a 137 and a line that
+          # is simply absent reads as "died before getting here", which points the
+          # reader the opposite way from "nothing is capping this". [LAW:no-silent-failure]
+          found=
           for limit in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
-            if [ -r "$limit" ]; then echo "cgroup limit:  $(cat "$limit") ($limit)"; fi
+            if [ -r "$limit" ]; then echo "cgroup limit:  $(cat "$limit") ($limit)"; found=yes; fi
           done
+          [ -n "$found" ] || echo "cgroup limit:  none -- neither cgroup layout is readable"
 
       # ffmpeg and espeak-ng are native and no Python metadata can declare them, so an
       # installer cannot bring them and the suite cannot skip past them -- see README,

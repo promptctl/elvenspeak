@@ -88,10 +88,11 @@ def pytest_runtest_teardown(item):
     got (row 8 grew by 171 MiB for a whole model) and which nothing guarantees,
     on a runner whose available memory moved 825 MB across four runs.
 
-    A wrapper, and the whole of why run 24 still died. A plain hook here is
-    registered after the builtin ones and therefore runs *before* them, so it
-    trimmed a heap whose fixtures had not been torn down yet. Yielding first
-    puts the trim after the teardown it exists to collect.
+    A wrapper, and it has to be. A plain hook here is registered after the
+    builtin ones and therefore runs *before* them, so it would trim a heap whose
+    fixtures had not been torn down yet; yielding first puts the trim after the
+    teardown it exists to collect. `tests/test_reclaim.py` runs the hooks and
+    asserts that ordering, so it is enforced rather than described.
     """
     try:
         return (yield)
@@ -101,19 +102,22 @@ def pytest_runtest_teardown(item):
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_setup(item):
-    """And again once the *previous* module's fixtures have been let go.
+    """And again before a body runs, for whatever setup itself let go.
 
-    Teardown alone was not enough, which runs 24 and 25 both measured: a
-    module-scoped fixture is finalized during the setup of the first test of the
-    *next* module, so the 3412 MiB Chatterbox model is released here and not at
-    any teardown. Trimming only at teardown meant the release happened, then the
-    new test ran its body and allocated through the hole, and by the time the
-    trim came around the free space was no longer contiguous enough to give
-    back. Run 25 carried that model flat at 4659.9 MiB through every Piper and
-    Kokoro parameter of `test_conformance.py` -- against a 1040.7 MiB baseline
-    the same run had already demonstrated one test earlier -- and the box spent
-    35 minutes thrashing on a test that takes 7 seconds on a workstation before
-    the killer took the container.
+    Kept on a weaker justification than this docstring used to give, so the
+    weaker one is written down. It claimed a module-scoped fixture is finalized
+    during the setup of the first test of the *next* module. It is not: the
+    builtin teardown calls `SetupState.teardown_exact(nextitem)`, so a scope the
+    next test does not share is released inside the *previous* test's teardown,
+    which the hook above already covers. `tests/test_reclaim.py` prints that
+    order rather than assuming it. It also cited runs 24 and 25 as measuring the
+    need for this hook, which they cannot have: both were dying of the retention
+    [`_endpoint_memos`] describes, which no trim at any moment could return.
+
+    What is left is anything released during setup itself, at microseconds on a
+    heap with nothing to hand back. An unnecessary reclaim is harmless and a
+    missing one is a 137 forty minutes in, so it stays until something measures
+    it needless rather than argues it.
 
     [LAW:one-source-of-truth] Both moments call [`reclaim`]. Two spellings of
     "give the memory back" are free to drift into two different ideas of what
