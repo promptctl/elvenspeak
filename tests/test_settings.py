@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import os
+
 import pytest
 from conftest import _ENVIRONMENT, DeclaredPrepared, serves
 
@@ -307,6 +309,45 @@ def test_non_numeric_port_is_refused():
     with pytest.raises(ConfigError) as raised:
         from_env(PORT="eighty")
     assert "not a number" in str(raised.value)
+
+
+@pytest.mark.parametrize("at_once", ["0", "-1"])
+def test_a_concurrency_below_one_is_refused(at_once):
+    """Zero is not "no limit" here, and refusing it is what keeps that true.
+
+    A gate that disappears at zero would be a second mode of the whole synthesis
+    path — bounded and unbounded — reachable by one character in an environment
+    file, and the unbounded one is the shape that OOM-killed elvenspeak-piper
+    (piper-memory-9rc). A deployment that wants no practical bound says so with a
+    number ([LAW:no-mode-explosion]).
+    """
+    with pytest.raises(ConfigError) as raised:
+        from_env(ELVENSPEAK_CONCURRENT_SYNTHESES=at_once)
+    assert "at least 1" in str(raised.value)
+
+
+def test_a_non_numeric_concurrency_is_refused():
+    with pytest.raises(ConfigError) as raised:
+        from_env(ELVENSPEAK_CONCURRENT_SYNTHESES="lots")
+    assert "not a number" in str(raised.value)
+
+
+def test_the_concurrency_default_is_the_bound_that_was_already_there():
+    """[LAW:one-source-of-truth] Naming the ceiling must not move it.
+
+    Every synthesis dispatches through `asyncio.to_thread`, whose default
+    executor is `min(32, os.cpu_count() + 4)` wide — so that was already the
+    limit on concurrent synthesis, set by the node's core count rather than by
+    anyone's decision. The default here is that same number, so switching this
+    setting on changes no deployment's behaviour until someone chooses a
+    different one. A default that differed would be a silent capacity change
+    riding in on a bug fix.
+    """
+    assert from_env().concurrent_syntheses == min(32, (os.cpu_count() or 1) + 4)
+
+
+def test_a_chosen_concurrency_is_what_arrives():
+    assert from_env(ELVENSPEAK_CONCURRENT_SYNTHESES="3").concurrent_syntheses == 3
 
 
 def test_a_bad_environment_exits_two_naming_every_problem(monkeypatch, capsys):
