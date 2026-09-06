@@ -38,8 +38,13 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import suppress
+from typing import TypeVar
 
 from .formats import OutputFormat
+
+#: What one pull hands back, preserved through the runner rather than flattened
+#: to `object` ([LAW:types-are-the-program]).
+_Pulled = TypeVar("_Pulled")
 
 _LOGGER = logging.getLogger("elvenspeak.encoding")
 
@@ -84,10 +89,10 @@ class EncodingFailed(RuntimeError):
 #:
 #: [LAW:dataflow-not-control-flow] The variability is a value describing the
 #: operation. `_pump` calls it identically whether anything is bounding or not.
-Pull = Callable[[Callable[[], object]], Awaitable[object]]
+Pull = Callable[[Callable[[], _Pulled]], Awaitable[_Pulled]]
 
 
-async def unbounded_pull(work: Callable[[], object]) -> object:
+async def unbounded_pull(work: Callable[[], _Pulled]) -> _Pulled:
     """Pulls a chunk off the loop with nothing bounding it.
 
     For callers whose samples already exist, where pulling makes nothing and

@@ -16,7 +16,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import os
+import asyncio
+import threading
+import time
 
 import pytest
 from conftest import _ENVIRONMENT, DeclaredPrepared, serves
@@ -335,15 +337,46 @@ def test_a_non_numeric_concurrency_is_refused():
 def test_the_concurrency_default_is_the_bound_that_was_already_there():
     """[LAW:one-source-of-truth] Naming the ceiling must not move it.
 
-    Every synthesis dispatches through `asyncio.to_thread`, whose default
-    executor is `min(32, os.cpu_count() + 4)` wide — so that was already the
-    limit on concurrent synthesis, set by the node's core count rather than by
-    anyone's decision. The default here is that same number, so switching this
-    setting on changes no deployment's behaviour until someone chooses a
-    different one. A default that differed would be a silent capacity change
-    riding in on a bug fix.
+    Every synthesis dispatches through `asyncio.to_thread`, so the default
+    executor's width was already the limit on concurrent synthesis — set by the
+    host rather than by anyone's decision. The default here has to be that same
+    number, or switching this setting on silently changes a deployment's capacity
+    while claiming to change nothing.
+
+    MEASURED, NOT RESTATED, and that is the whole design of this test. It used to
+    assert against a second copy of CPython's formula, spelled with
+    `os.cpu_count()` — which is wrong on the pinned interpreter, since 3.13 moved
+    `ThreadPoolExecutor` onto the cgroup-aware `os.process_cpu_count()`. The two
+    agree on every unconstrained machine, including every machine this suite runs
+    on, and diverge under a CPU quota, which is the only kind of host this
+    service is deployed to. So the copy was invisible here and wrong in
+    production, and a check written against the same copy could never say so.
+
+    Saturating the executor and counting how many run at once asks the question
+    of the thing itself, so the next time CPython changes this formula a test
+    fails instead of a container quietly getting the wrong ceiling.
     """
-    assert from_env().concurrent_syntheses == min(32, (os.cpu_count() or 1) + 4)
+
+    async def widest() -> int:
+        peak = 0
+        running = 0
+        counting = threading.Lock()
+
+        def occupy() -> None:
+            nonlocal peak, running
+            with counting:
+                running += 1
+                peak = max(peak, running)
+            time.sleep(0.15)
+            with counting:
+                running -= 1
+
+        # Comfortably more than any width `min(32, ...)` can produce, submitted
+        # at once so the executor is saturated rather than sampled.
+        await asyncio.gather(*(asyncio.to_thread(occupy) for _ in range(80)))
+        return peak
+
+    assert from_env().concurrent_syntheses == asyncio.run(widest())
 
 
 @pytest.mark.parametrize("unset", ["", "   "])
@@ -355,8 +388,9 @@ def test_an_empty_concurrency_reads_as_unset(unset):
     variable in that block already tolerates empty as unset; a number that alone
     refused it would fail a deployment copied from the documentation.
     """
-    assert from_env(ELVENSPEAK_CONCURRENT_SYNTHESES=unset).concurrent_syntheses == (
-        min(32, (os.cpu_count() or 1) + 4)
+    assert (
+        from_env(ELVENSPEAK_CONCURRENT_SYNTHESES=unset).concurrent_syntheses
+        == from_env().concurrent_syntheses
     )
 
 

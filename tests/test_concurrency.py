@@ -27,6 +27,7 @@ asks for two things at once.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from collections.abc import Iterator
@@ -476,4 +477,50 @@ def test_a_cancelled_synthesis_gives_its_permit_back_exactly_once(occupy_the_poo
     assert permits == 2, (
         f"{permits} of 2 permits came back after a cancelled synthesis — the rest "
         "are gone for the life of the process, and the gate shrinks toward zero"
+    )
+
+
+def test_a_synthesis_that_fails_after_its_caller_left_still_says_so(caplog):
+    """[LAW:no-silent-failure] A hang-up must not be a way to lose an engine failure.
+
+    `asyncio.shield` unregisters its inner callback the moment the outer await is
+    cancelled, so nothing reads what the shielded work did next. The permit still
+    comes back — that is the `finally` — but an engine that then RAISES has its
+    exception discarded, resurfacing whenever the task is collected as a bare
+    "Task exception was never retrieved" with nothing tying it to a request.
+    Measured; the loop's exception handler saw exactly that message and nothing
+    else.
+
+    The caller is gone either way. What has to survive is the operator learning
+    that synthesis broke, which is the difference between a fault that gets fixed
+    and one that is only ever seen as a graph.
+    """
+
+    async def run() -> None:
+        gate = asyncio.BoundedSemaphore(1)
+
+        def work() -> str:
+            time.sleep(0.3)
+            raise RuntimeError("engine blew up after the caller left")
+
+        task = asyncio.create_task(api._synthesising(gate, work))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        # Long enough for the orphaned thread to finish and be read.
+        await asyncio.sleep(1.0)
+
+    with caplog.at_level(logging.ERROR, logger="elvenspeak.api"):
+        asyncio.run(run())
+
+    # Filtered to this service's own logger, and that is not fussiness. Asyncio's
+    # GC-time "Task exception was never retrieved" carries the whole traceback,
+    # so an unfiltered search for the message text passes whether or not anything
+    # here reported it — the test would have been green against the very bug it
+    # exists to catch. Verified: it was.
+    ours = [r for r in caplog.records if r.name == "elvenspeak.api"]
+    assert any("engine blew up after the caller left" in r.getMessage() for r in ours), (
+        "an engine failure that landed after its caller hung up was never "
+        f"reported by elvenspeak.api — its records: {[r.getMessage() for r in ours]}"
     )
