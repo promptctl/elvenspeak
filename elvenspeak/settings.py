@@ -162,8 +162,8 @@ class Settings:
     #: than for a model's memory, since it synthesises nothing itself.
     #:
     #: THIS NUMBER ALREADY EXISTED; it was just nobody's. Every synthesis
-    #: dispatches through `asyncio.to_thread`, whose default executor is
-    #: `min(32, os.cpu_count() + 4)` wide -- so the ceiling on concurrent
+    #: dispatches through `asyncio.to_thread`, whose default executor is exactly
+    #: [`_default_concurrency`] wide -- so the ceiling on concurrent
     #: synthesis, and therefore on memory, was a function of the node's CORE
     #: COUNT. On the 4-core gpu node that is 8, and an eight-way burst is what
     #: OOM-killed elvenspeak-piper at a 2048 MiB limit (piper-memory-9rc). The
