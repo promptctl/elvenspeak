@@ -38,7 +38,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-from . import models
+from . import memory, models
 from .engine import Capability
 from .provisioning import ConfigError, Prepared, Registry
 from .voices import Fallback, Substitution
@@ -48,6 +48,21 @@ from .voices import Fallback, Substitution
 #: reads it rather than spelling it again ([LAW:one-source-of-truth]); a second
 #: spelling stops clearing the real variable the day this one changes.
 CONCURRENT_SYNTHESES = "ELVENSPEAK_CONCURRENT_SYNTHESES"
+
+#: What piper really cost per concurrent synthesis on the gpu node, as
+#: `(concurrent, MiB)` — `MemoryStats.Usage`, which is the figure Nomad reports,
+#: since cgroup v2 leaves RSS at 0. The first row is idle with five voices loaded.
+#:
+#: Data rather than prose because an operator picks a ceiling off it, and it used
+#: to be written out longhand everywhere it was needed ([LAW:one-source-of-truth]).
+#: Now the field comment below points at it and [`_curve`] renders it for the
+#: refusal, so README.md holds the only remaining literal copy of the figures —
+#: which is why `tests/test_settings.py` holds that copy equal to this one, in
+#: both directions.
+#:
+#: The last row is the one that matters: 8 concurrent is what the 4-core node's
+#: CPU-derived default produced, and it died against a 2048 MiB limit.
+MEASURED_PIPER = ((0, 1140), (2, 1164), (4, 1335), (8, 1773))
 
 
 def _default_concurrency() -> int:
@@ -173,22 +188,37 @@ class Settings:
     #: would have capped in-flight streams, which nothing capped before, making a
     #: real capacity change out of a default nobody set.
     #:
-    #: Measured for piper on that node, `MemoryStats.Usage` per concurrent
-    #: synthesis -- pick from this rather than from taste:
-    #:
-    #:     idle, five voices loaded   ~1140 MiB
-    #:     2 concurrent                1164 MiB   the jobspec's design target
-    #:     4 concurrent                1335 MiB
-    #:     8 concurrent                1773 MiB   and it died at 2048
+    #: [`MEASURED_PIPER`] is what it really cost on that node -- pick from that
+    #: rather than from taste. The figures are not written out here: a table
+    #: copied to each place that needs it is one chance per copy to update all
+    #: but one of them.
     #:
     #: A CPU-derived default for a memory bound is the wrong unit on purpose: it
-    #: preserves today's behaviour exactly, and the right unit is the deployment's
-    #: own memory limit, which this process cannot know. Set it where that limit
-    #: is set.
+    #: preserves today's behaviour exactly. The right unit is the deployment's own
+    #: memory limit — which this process CAN know, and reads
+    #: ([`elvenspeak.memory`]). It still does not pick a number from it: how much
+    #: a synthesis costs is engine-, voice- and text-dependent, so arithmetic over
+    #: that limit would look principled and be a guess. What it does instead is
+    #: refuse to start when it is confined and nobody chose, below.
+    #:
+    #: This comment used to end "which this process cannot know. Set it where that
+    #: limit is set." That was false, and it was load-bearing: it is the sentence
+    #: that justified leaving the number to a jobspec nobody edited, through four
+    #: OOM kills.
     #: [LAW:one-source-of-truth] The default is the same callable [`from_env`]
     #: uses, not a second spelling of the formula: a constructed `Settings` and a
     #: parsed one must not disagree about what "unset" means.
     concurrent_syntheses: int = field(default_factory=_default_concurrency)
+    #: Whether a deployment chose [`concurrent_syntheses`], as against inheriting
+    #: it from the host's core count.
+    #:
+    #: Provenance, not a second copy of the value, and it cannot be recovered from
+    #: the number: an operator is perfectly entitled to choose exactly what the
+    #: default would have been, and [`unsized`] must not mistake that deployment
+    #: for one that chose nothing. Defaults to False so that a `Settings` built in
+    #: code — every test that constructs one directly — is treated as having
+    #: chosen nothing, which is the conservative reading.
+    concurrency_chosen: bool = False
 
     @staticmethod
     def from_env(
@@ -230,6 +260,7 @@ class Settings:
         # malformed number would crashloop a service on the documented spelling.
         concurrency_text = (env.get(CONCURRENT_SYNTHESES) or "").strip()
         concurrent_syntheses = _default_concurrency()
+        concurrency_chosen = bool(concurrency_text)
         if concurrency_text:
             try:
                 concurrent_syntheses = int(concurrency_text)
@@ -283,7 +314,61 @@ class Settings:
             host=env.get("HOST", "0.0.0.0"),
             port=port,
             concurrent_syntheses=concurrent_syntheses,
+            concurrency_chosen=concurrency_chosen,
         )
+
+
+def _curve() -> str:
+    """[`MEASURED_PIPER`] as one line an operator can pick a number off."""
+    return ", ".join(
+        f"{'idle' if at == 0 else f'{at} concurrent'} {mib}" for at, mib in MEASURED_PIPER
+    )
+
+
+def unsized(
+    settings: "Settings", confinement: memory.Limit | None = None
+) -> str | None:
+    """Why this deployment must not serve, when that is the case.
+
+    One question: is this process confined to a memory limit while its synthesis
+    ceiling was left to the host's core count? That pairing is the configuration
+    that OOM-killed elvenspeak-piper four times, and it is indistinguishable from
+    a working one until the burst arrives — the default is derived from CORES, so
+    on the 4-core gpu node it was 8, and 8 is what died against 2048 MiB.
+
+    REFUSES RATHER THAN CHOOSING. Picking a ceiling from the limit would be
+    arithmetic over a per-synthesis cost that varies by engine, voice and text:
+    principled-looking, and invented. Clamping is the same guess one step
+    quieter — it boots, it works, and the operator's intent was overruled in a log
+    line nobody tails. This project refuses rather than guesses everywhere else it
+    meets this shape: `ROUTER_CONSUL_URL` is never defaulted, an unrecognised
+    withheld capability is refused rather than skipped, and the engines will not
+    hunt for a working espeak library.
+
+    NARROW ON PURPOSE. An unconfined process is untouched, which is every
+    development machine and every `docker run` without `--memory`. Only a
+    deployment that set a memory limit and then left the width to the host's core
+    count is refused.
+
+    Called from the composition root rather than from [`Settings.from_env`],
+    because the parse is shared with `python -m elvenspeak.bake` and that step
+    synthesizes nothing. A refusal on the shared parse would fail image builds
+    under a memory-limited builder — and since nothing in CI runs a container,
+    the first evidence would be a publish that spent a dated tag on an image that
+    cannot boot.
+    """
+    limit = memory.limit() if confinement is None else confinement
+    if settings.concurrency_chosen or not isinstance(limit, int):
+        return None
+    return (
+        f"{CONCURRENT_SYNTHESES} is unset and this process is limited to "
+        f"{limit // 1048576} MiB. The default is derived from CPU cores "
+        f"({settings.concurrent_syntheses} here), not from memory, so it does not "
+        f"shrink to fit that limit -- an eight-way burst against 2048 MiB is what "
+        f"OOM-killed elvenspeak-piper. Choose from measured cost -- piper on that "
+        f"node, MiB resident: {_curve()}"
+    )
+
 
 @contextmanager
 def reported_or_exit() -> Iterator[None]:
