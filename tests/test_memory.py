@@ -436,13 +436,20 @@ def test_a_resolved_cgroup_whose_files_are_all_missing_is_reported(
     proc.write_text("0::/nomad.slice/elvenspeak.scope\n")
     monkeypatch.setattr(memory, "PROC_SELF_CGROUP", proc)
     monkeypatch.setattr(memory, "LIMIT_FILES", (tmp_path / "absent-root",))
+    # `_own` builds absolute paths from a mount root hardcoded inside it, so
+    # without this the assertion would really stat /sys/fs/cgroup/nomad.slice on
+    # whatever machine runs the suite -- and on this project's own Nomad
+    # infrastructure that path can exist. Sealed, because what is under test is
+    # what `limit` REPORTS, not how the paths were derived.
+    monkeypatch.setattr(memory, "_own", lambda _: (tmp_path / "absent-leaf",))
 
     with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
         assert memory.limit() is memory.Unconfined.UNCONFINED
 
     assert any(r.levelno == logging.WARNING for r in caplog.records), (
         "a process that positively reported being in a non-root cgroup, whose "
-        "limit files were all missing, was called unconfined without comment"
+        "limit files could none of them be read, was called unconfined without "
+        "comment"
     )
 
 
@@ -455,3 +462,33 @@ def test_a_machine_with_no_cgroups_at_all_stays_quiet(tmp_path, monkeypatch, cap
         assert memory.limit() is memory.Unconfined.UNCONFINED
 
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_cgroup_that_exists_and_says_max_is_not_reported_as_missing(
+    tmp_path, monkeypatch, caplog
+):
+    """Unconfined and correctly detected must not read as unconfined and unfindable.
+
+    A Nomad task in its own scope with no memory stanza: its files are present,
+    they are read, and each says `max`. That is a working deployment, and warning
+    at it teaches the next operator to skim the line -- which is precisely the line
+    that matters in the one case it was written for.
+
+    The discriminator is whether anything was READ, not whether anything was
+    FOUND, and this is the sub-case that tells the two apart.
+    """
+    proc = tmp_path / "cgroup"
+    proc.write_text("0::/nomad.slice/elvenspeak.scope\n")
+    monkeypatch.setattr(memory, "PROC_SELF_CGROUP", proc)
+    monkeypatch.setattr(memory, "LIMIT_FILES", (tmp_path / "absent-root",))
+    leaf = tmp_path / "leaf"
+    leaf.write_text("max")
+    monkeypatch.setattr(memory, "_own", lambda _: (leaf,))
+
+    with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
+        assert memory.limit() is memory.Unconfined.UNCONFINED
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], (
+        "a cgroup whose limit files were present and legitimately said `max` was "
+        "reported as one whose files could not be found"
+    )

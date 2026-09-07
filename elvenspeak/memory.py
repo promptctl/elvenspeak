@@ -209,6 +209,10 @@ def limit(files: Iterable[Path] | None = None) -> Limit:
     """
     resolved = files is None
     consulted = tuple(_candidates() if resolved else files)
+    # Whether any candidate was READ, which is not the same question as whether one
+    # yielded a number: a file that exists and says `max` answers "unconfined"
+    # truthfully, and must not be reported as a file that could not be found.
+    read_any = False
     tightest: Limit = Unconfined.UNCONFINED
     for path in consulted:
         try:
@@ -224,6 +228,7 @@ def limit(files: Iterable[Path] | None = None) -> Limit:
                 error,
             )
             continue
+        read_any = True
         found = _parsed(text)
         if not isinstance(found, int):
             continue
@@ -234,15 +239,21 @@ def limit(files: Iterable[Path] | None = None) -> Limit:
         # ancestor, and an operator reading four numbers still has to be told
         # which of them the kernel will hold this process to.
         _LOGGER.info("memory limit: %d bytes is the tightest that binds", tightest)
-    elif resolved and consulted != LIMIT_FILES:
+    elif resolved and consulted != LIMIT_FILES and not read_any:
         # [LAW:no-silent-failure] Only on the resolved path, because that is where
         # the evidence comes from: `/proc/self/cgroup` positively stated this
-        # process is in a non-root cgroup, and not one of that cgroup's limit
-        # files exists. Two pieces of evidence -- confined, and unfindable -- and
+        # process is in a non-root cgroup, and NOT ONE of that cgroup's limit files
+        # could be read. Two pieces of evidence -- confined, and unfindable -- and
         # the honest report of them is not "nothing caps this process". It happens
         # when /sys/fs/cgroup is not mounted in this mount namespace, or is mounted
         # somewhere these paths do not name, and the cost of saying nothing is the
         # OOM this module exists to prevent.
+        #
+        # Gated on nothing having been read, not on nothing having been found. A
+        # task with no memory stanza reads its files fine and each says `max`: that
+        # is unconfined, correctly detected, and warning at it would cry wolf on a
+        # working deployment -- after which the next operator skims past the line
+        # in the one case it was written for.
         _LOGGER.warning(
             "this process is in a non-root cgroup but none of its limit files "
             "exist (%s), so it is being treated as unconfined; if it is not, "
