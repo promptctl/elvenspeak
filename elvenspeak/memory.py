@@ -243,7 +243,13 @@ def limit(files: Iterable[Path] | None = None) -> Limit:
         # [LAW:no-silent-failure] Only on the resolved path, because that is where
         # the evidence comes from: `/proc/self/cgroup` positively stated this
         # process is in a non-root cgroup, and NOT ONE of that cgroup's limit files
-        # could be read. Two pieces of evidence -- confined, and unfindable -- and
+        # could be read. It says "could not be read" rather than "does not exist"
+        # because `read_any` is false for absence AND for a failed read, and a
+        # candidate that exists but raises has already logged the real errno just
+        # above -- claiming absence here would contradict that line, and of the two
+        # the false one is the one that sounds conclusive.
+        #
+        # Two pieces of evidence -- confined, and unreadable -- and
         # the honest report of them is not "nothing caps this process". It happens
         # when /sys/fs/cgroup is not mounted in this mount namespace, or is mounted
         # somewhere these paths do not name, and the cost of saying nothing is the
@@ -256,8 +262,8 @@ def limit(files: Iterable[Path] | None = None) -> Limit:
         # in the one case it was written for.
         _LOGGER.warning(
             "this process is in a non-root cgroup but none of its limit files "
-            "exist (%s), so it is being treated as unconfined; if it is not, "
-            "nothing here will refuse a synthesis ceiling too wide for it",
+            "could be read (%s), so it is being treated as unconfined; if it is "
+            "not, nothing here will refuse a synthesis ceiling too wide for it",
             ", ".join(str(path) for path in consulted),
         )
     else:

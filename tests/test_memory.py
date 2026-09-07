@@ -422,15 +422,18 @@ def test_a_dead_cgroups_deleted_suffix_is_not_part_of_its_name():
     )
 
 
-def test_a_resolved_cgroup_whose_files_are_all_missing_is_reported(
+def test_a_resolved_cgroup_whose_files_cannot_be_read_is_reported(
     tmp_path, monkeypatch, caplog
 ):
     """[LAW:no-silent-failure] Confined, and unfindable, is not "nothing caps me".
 
     `/proc/self/cgroup` says this process is in a non-root cgroup and not one of
-    that cgroup's limit files exists -- which happens when /sys/fs/cgroup is not
-    mounted in this mount namespace, or is mounted where these paths do not name.
-    Two pieces of evidence, and answering "unconfined" quietly discards both.
+    that cgroup's limit files could be read -- which happens when /sys/fs/cgroup is
+    not mounted in this mount namespace, or is mounted where these paths do not
+    name. Two pieces of evidence, and answering "unconfined" quietly discards both.
+
+    This is the absent half; the test below is the present-but-unreadable half,
+    which reaches the same aggregate line by a different route.
     """
     proc = tmp_path / "cgroup"
     proc.write_text("0::/nomad.slice/elvenspeak.scope\n")
@@ -491,4 +494,37 @@ def test_a_cgroup_that_exists_and_says_max_is_not_reported_as_missing(
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING], (
         "a cgroup whose limit files were present and legitimately said `max` was "
         "reported as one whose files could not be found"
+    )
+
+
+def test_the_aggregate_warning_does_not_claim_a_present_file_is_absent(
+    tmp_path, monkeypatch, caplog
+):
+    """Two warnings about one file must not contradict each other.
+
+    A candidate that exists and raises has already logged the real errno. If the
+    aggregate line then asserts the file does not exist, an operator reads an
+    accurate warning immediately followed by a false one -- and of the two it is
+    the false one that sounds conclusive.
+
+    A directory rather than a `chmod 000` file, for the reason
+    `tests/test_voices.py` gives: the gitea runner is root, and root reads a
+    mode-000 file happily.
+    """
+    proc = tmp_path / "cgroup"
+    proc.write_text("0::/nomad.slice/elvenspeak.scope\n")
+    monkeypatch.setattr(memory, "PROC_SELF_CGROUP", proc)
+    monkeypatch.setattr(memory, "LIMIT_FILES", (tmp_path / "absent-root",))
+    present = tmp_path / "present"
+    present.mkdir()
+    monkeypatch.setattr(memory, "_own", lambda _: (present,))
+
+    with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
+        assert memory.limit() is memory.Unconfined.UNCONFINED
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 2, "expected the per-file warning and the aggregate"
+    assert "exist" not in caplog.text, (
+        "the aggregate warning claims the limit files do not exist, contradicting "
+        "the per-file warning that just reported this one existing and failing"
     )
