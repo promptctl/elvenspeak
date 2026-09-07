@@ -53,7 +53,10 @@ divergence, how an image's config is spelled, is a pure function per runtime.
 Standard library only, deliberately. This runs on a CI runner before anything is
 installed and on a laptop with no virtualenv activated; `python3 smoke.py` has
 to be the whole invocation, so nothing here may import from `elvenspeak` or from
-any dependency of it.
+any dependency of it. Importing nothing buys nothing if the *syntax* outruns the
+`python3` already on the machine — that dies at parse time, before any of the
+failure messages below can be reached — so the floor is pinned and checked by
+`tests/test_smoke.py` rather than promised here.
 """
 
 from __future__ import annotations
@@ -152,22 +155,21 @@ def _shell_healthcheck(test: Sequence[str] | None) -> str:
     worth more than a command reassembled with the argument boundaries guessed
     ([LAW:parse-dont-validate], [LAW:no-silent-failure]).
     """
-    match list(test or ()):
-        case ["CMD-SHELL", command]:
-            return command
-        case [] | ["NONE"]:
-            # `HEALTHCHECK NONE` and no HEALTHCHECK at all are different things to
-            # write and the same thing to be told: there is no declared health for
-            # this image, so there is no second question to ask of it.
-            raise SmokeFailure(
-                "the image declares no HEALTHCHECK, so there is nothing to assert — "
-                "an image whose health nobody defined cannot be proven healthy"
-            )
-        case other:
-            raise SmokeFailure(
-                f"the image's HEALTHCHECK is {other!r}, and only the shell form "
-                "(CMD-SHELL) can be run faithfully here"
-            )
+    declared = list(test or ())
+    if len(declared) == 2 and declared[0] == "CMD-SHELL":
+        return declared[1]
+    if declared in ([], ["NONE"]):
+        # `HEALTHCHECK NONE` and no HEALTHCHECK at all are different things to
+        # write and the same thing to be told: there is no declared health for
+        # this image, so there is no second question to ask of it.
+        raise SmokeFailure(
+            "the image declares no HEALTHCHECK, so there is nothing to assert — "
+            "an image whose health nobody defined cannot be proven healthy"
+        )
+    raise SmokeFailure(
+        f"the image's HEALTHCHECK is {declared!r}, and only the shell form "
+        "(CMD-SHELL) can be run faithfully here"
+    )
 
 
 def _docker_image_config(stdout: str) -> ImageConfig:

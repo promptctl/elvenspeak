@@ -19,7 +19,9 @@ _same_way` describes a single image in both spellings and requires one answer.
 
 from __future__ import annotations
 
+import ast
 import json
+import pathlib
 import subprocess
 
 import pytest
@@ -227,6 +229,34 @@ def test_no_runtime_at_all_is_refused_naming_every_candidate(monkeypatch):
     with pytest.raises(SmokeFailure, match="none installed"):
         select_runtime(None)
 
+
+
+#: The oldest interpreter `python3 smoke.py <image>` must survive. Held here
+#: rather than in a docstring because a version nobody re-checks is a claim, and
+#: this one is checkable: 3.8 is what Ubuntu 20.04 answers `python3` with, and a
+#: runner that old is exactly the one nobody would think to try before pushing.
+OLDEST_PYTHON = (3, 8)
+
+
+def test_the_smoke_script_parses_on_an_interpreter_nobody_installed():
+    """The premise of the whole file, machine-checked instead of asserted.
+
+    `smoke.py` argues in its own docstring that it imports nothing outside the
+    standard library so that it runs on a bare CI runner and an unactivated
+    laptop — which buys nothing if the *syntax* is newer than the `python3`
+    already there. A version cliff is the one portability break that cannot
+    report itself: the file dies at parse time, so none of its careful failure
+    messages ever get to run, and the operator sees a `SyntaxError` in a file
+    they were told needed no setup.
+
+    `feature_version` reproduces that judgement without the interpreter being
+    installed, which matters because the machines that would catch it honestly
+    are the ones nobody develops on. It is not a tautology: run against the
+    commit that introduced this file, it fails on the `match` statement in
+    `_shell_healthcheck`.
+    """
+    source = (pathlib.Path(__file__).parent.parent / "smoke.py").read_text()
+    ast.parse(source, "smoke.py", feature_version=OLDEST_PYTHON)
 
 
 def test_a_wedged_runtime_call_becomes_a_result_cleanup_can_print(monkeypatch):
