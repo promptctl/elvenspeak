@@ -228,9 +228,34 @@ def test_the_processes_own_cgroup_is_asked_before_the_root(tmp_path, monkeypatch
 
 
 def test_no_proc_self_cgroup_falls_back_to_the_roots(tmp_path, monkeypatch):
-    """macOS, and anywhere else without procfs: there is no subtree to resolve."""
+    """macOS, and anywhere else without procfs: there is no subtree to resolve.
+
+    Called with no argument, so the function reads the module attribute -- the
+    path `limit()` itself takes. This assertion alone cannot prove the attribute
+    was consulted, since ANY unreadable source yields the roots; the test below is
+    what pins that, and the two are only meaningful together.
+    """
     monkeypatch.setattr(memory, "PROC_SELF_CGROUP", tmp_path / "absent")
-    assert memory._candidates(tmp_path / "absent") == memory.LIMIT_FILES
+    assert memory._candidates() == memory.LIMIT_FILES
+
+
+def test_the_default_source_is_the_module_attribute_and_is_really_read(
+    tmp_path, monkeypatch
+):
+    """The load-bearing half: a patched attribute that CHANGES the answer.
+
+    Pointing the attribute at an absent file proves nothing on its own -- every
+    unreadable source falls back to the roots, so that assertion holds whatever
+    the function actually read. Pointing it at a file whose contents can only come
+    from being parsed is what makes the patch bite.
+    """
+    proc = tmp_path / "cgroup"
+    proc.write_text("0::/nomad.slice/elvenspeak.scope\n")
+    monkeypatch.setattr(memory, "PROC_SELF_CGROUP", proc)
+
+    assert memory._candidates()[0] == Path(
+        "/sys/fs/cgroup/nomad.slice/elvenspeak.scope/memory.max"
+    )
 
 
 def test_a_malformed_line_is_skipped_rather_than_guessed_at():
