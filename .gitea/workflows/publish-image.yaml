@@ -1026,22 +1026,32 @@ jobs:
 
           # WHAT EACH ENGINE NEEDS BEFORE IT CAN ANSWER AT ALL, as one table.
           #
-          # The first run of this step gave every engine an empty environment and two
-          # legs went red for it -- not because the images were broken but because a
-          # setting with no default was missing, which is a red that says nothing about
-          # the commit. Observed on gitea run 38: chatterbox printed
-          # `CHATTERBOX_DEVICE=(unset) is not one of cuda, mps, cpu` and the router
-          # `ROUTER_CONSUL_URL is required`, each from inside its own container.
-          #
-          # `cpu` because this runner has no accelerator, and the smoke only boots the
-          # image -- nothing here synthesizes, so the 8-33x real time that makes cpu the
-          # wrong choice for a deployment costs nothing at this gate.
+          # The first run of this step gave every engine an empty environment, and two
+          # legs went red for it on gitea run 38 -- not broken images, but settings with
+          # no default, which is a red that says nothing about the commit. Each printed
+          # its own refusal from inside its own container.
           #
           # A table and not a branch: every engine runs the same commands below and only
-          # these values differ, so an engine absent from it is one that needs nothing
-          # rather than one that is treated differently. [LAW:dataflow-not-control-flow]
+          # these values differ. Every engine that needs anything is named, so the `*)`
+          # arm means "needs nothing" rather than "not looked into".
+          # [LAW:dataflow-not-control-flow]
           case "$ENGINE" in
+            # `cpu` because this runner has no accelerator, and nothing here synthesizes
+            # -- the 8-33x real time that makes cpu the wrong choice for a deployment
+            # costs nothing at this gate.
             chatterbox) boot=(--env CHATTERBOX_DEVICE=cpu) ;;
+
+            # Named, and given nothing, because what this leg needs is not an env var.
+            # Pointing ROUTER_CONSUL_URL at a reachable stub would not turn it green: a
+            # fleet with nothing in it is not refused (`elvenspeak/router.py`), so the
+            # router boots, has no voices, and answers /health 503 by design while
+            # `smoke.py` waits for 200 -- trading a 43-second config error for a
+            # 180-second timeout. It needs a stub Consul with a backend registered in it,
+            # which is a second container and therefore piper-build-b4h.4. THIS LEG IS
+            # RED ON EVERY PUBLISH UNTIL THAT LANDS, and the fleet's four service-version
+            # keys cannot move together while it is.
+            router)     boot=() ;;
+
             *)          boot=() ;;
           esac
 
