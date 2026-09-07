@@ -462,10 +462,20 @@ registry untouched and `:latest` unmoved. The step order is the guarantee, and
 `tests/test_workflow.py` fails if a later edit ever puts the push first.
 
 The CI run is unconfined: it passes no `--memory`, and therefore no
-`ELVENSPEAK_CONCURRENT_SYNTHESES` either. Running it confined would prove the
-shape the fleet actually deploys, but the ceiling has to be a measured per-engine
-number rather than a guess — a guessed ceiling turns a build red for a reason
-that has nothing to do with the commit — and those numbers do not exist yet.
+`ELVENSPEAK_CONCURRENT_SYNTHESES` either. It does pass what an engine needs
+before it can answer at all *where CI can supply it*: `CHATTERBOX_DEVICE=cpu` for
+chatterbox, which has no default because cpu runs that model at 8-33x real time.
+Nothing is synthesized at this gate, so cpu costs nothing here. Running it
+confined would prove the shape the fleet actually deploys, but the ceiling has to
+be a measured per-engine number rather than a guess — a guessed ceiling turns a
+build red for a reason that has nothing to do with the commit — and those numbers
+do not exist yet.
+
+The router is the exception, and its leg is red on every publish. It needs a stub
+Consul with a backend registered in it — not merely a `ROUTER_CONSUL_URL`, since a
+router that discovers an empty fleet is not refused: it serves `/health` 503 by
+design while the smoke waits for 200. That second container is
+`piper-build-b4h.4`.
 
 ### Pointing openconv at it
 
