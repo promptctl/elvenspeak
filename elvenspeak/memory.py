@@ -82,7 +82,10 @@ def _own(text: str) -> tuple[Path, ...]:
             continue
         # The leaf, then each ancestor up to but excluding the mount itself, which
         # LIMIT_FILES already names.
-        relative = PurePosixPath(path.strip())
+        # The kernel appends this to a v2 line when the cgroup has been removed
+        # while a task still names it. Left on, it becomes part of the directory
+        # name and the leaf silently resolves to nothing.
+        relative = PurePosixPath(path.strip().removesuffix(" (deleted)"))
         for parent in (relative, *relative.parents):
             if parent == PurePosixPath("/"):
                 continue
@@ -90,22 +93,20 @@ def _own(text: str) -> tuple[Path, ...]:
     return tuple(found)
 
 
-def _candidates(proc_self_cgroup: Path | None = None) -> tuple[Path, ...]:
+def _candidates() -> tuple[Path, ...]:
     """Every file that might hold this process's limit, most specific first.
 
     Absent `/proc/self/cgroup` — macOS, and anywhere else without procfs — is not a
     failure: it means there is no subtree to resolve, and the roots are all there
     ever was to ask.
 
-    The default is resolved on the call rather than bound to the signature, so the
-    module's paths are read when they are used and not snapshotted at import
-    ([LAW:no-ambient-temporal-coupling]) — a default bound at definition time is a
-    copy of the world taken before anyone asked for it, and it silently outlives
-    every later change to the original.
+    [`PROC_SELF_CGROUP`] is read through the module on every call rather than bound
+    into a default argument ([LAW:no-ambient-temporal-coupling]): a default is
+    evaluated once at import, which is a copy of the world taken before anyone
+    asked for it, and it outlives every later change to the original.
     """
-    source = PROC_SELF_CGROUP if proc_self_cgroup is None else proc_self_cgroup
     try:
-        text = source.read_text()
+        text = PROC_SELF_CGROUP.read_text()
     except FileNotFoundError:
         return LIMIT_FILES
     except OSError as error:
@@ -119,18 +120,24 @@ def _candidates(proc_self_cgroup: Path | None = None) -> tuple[Path, ...]:
             "cannot read %s, so this process's own cgroup cannot be resolved and "
             "only the mount roots will be consulted; if those are not this "
             "process's own, a real memory limit will go unseen: %s",
-            source,
+            PROC_SELF_CGROUP,
             error,
         )
         return LIMIT_FILES
     return _own(text) + LIMIT_FILES
 
-#: cgroup v1 has no word for "uncapped" and writes a number instead: the counter's
-#: maximum, rounded down to a page multiple. Anything at or above it is the kernel
-#: saying "nothing", not a deployment saying "eight exbibytes", and reading it as a
-#: real ceiling would make every v1 host look generously provisioned rather than
-#: unconfined. v2 says `max` in words and needs no such threshold.
-_V1_UNLIMITED = 0x7FFFFFFFFFFFF000
+#: Above which a number is the kernel saying "nothing", not a deployment saying
+#: "four exbibytes". cgroup v1 has no word for uncapped and writes the counter's
+#: maximum instead — `LONG_MAX` rounded down to a page multiple, so its exact value
+#: DEPENDS ON PAGE SIZE: 0x7FFFFFFFFFFFF000 at 4 KiB, and smaller at 16 or 64 KiB,
+#: which aarch64 and ppc64le kernels really use.
+#:
+#: So this is a plausibility bound and not the sentinel itself. Matching the 4 KiB
+#: spelling exactly would read a 64 KiB host's "unlimited" as a real 8 exbibyte
+#: ceiling — and that is the one direction that refuses a deployment which was
+#: fine, loudly and wrongly, on a machine nobody tested. No real limit approaches
+#: this, so no page size can slip past it.
+_V1_UNLIMITED = 1 << 62
 
 
 class Unconfined(Enum):
@@ -200,8 +207,10 @@ def limit(files: Iterable[Path] | None = None) -> Limit:
     account of what was read belongs beside it ([LAW:effects-at-boundaries]), and
     reporting from one caller would leave the next one free to read in silence.
     """
+    resolved = files is None
+    consulted = tuple(_candidates() if resolved else files)
     tightest: Limit = Unconfined.UNCONFINED
-    for path in _candidates() if files is None else files:
+    for path in consulted:
         try:
             text = path.read_text()
         except FileNotFoundError:
@@ -220,6 +229,26 @@ def limit(files: Iterable[Path] | None = None) -> Limit:
             continue
         _LOGGER.info("memory limit: %s says %r", path, text.strip())
         tightest = found if not isinstance(tightest, int) else min(tightest, found)
-    if not isinstance(tightest, int):
+    if isinstance(tightest, int):
+        # Which one BINDS, said once. A deep cgroup emits a line per readable
+        # ancestor, and an operator reading four numbers still has to be told
+        # which of them the kernel will hold this process to.
+        _LOGGER.info("memory limit: %d bytes is the tightest that binds", tightest)
+    elif resolved and consulted != LIMIT_FILES:
+        # [LAW:no-silent-failure] Only on the resolved path, because that is where
+        # the evidence comes from: `/proc/self/cgroup` positively stated this
+        # process is in a non-root cgroup, and not one of that cgroup's limit
+        # files exists. Two pieces of evidence -- confined, and unfindable -- and
+        # the honest report of them is not "nothing caps this process". It happens
+        # when /sys/fs/cgroup is not mounted in this mount namespace, or is mounted
+        # somewhere these paths do not name, and the cost of saying nothing is the
+        # OOM this module exists to prevent.
+        _LOGGER.warning(
+            "this process is in a non-root cgroup but none of its limit files "
+            "exist (%s), so it is being treated as unconfined; if it is not, "
+            "nothing here will refuse a synthesis ceiling too wide for it",
+            ", ".join(str(path) for path in consulted),
+        )
+    else:
         _LOGGER.info("memory limit: none -- nothing here caps this process")
     return tightest
