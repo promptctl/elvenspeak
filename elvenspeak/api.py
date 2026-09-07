@@ -48,7 +48,9 @@ import base64
 import itertools
 import json
 import logging
-from collections.abc import AsyncIterator, Iterator
+from functools import partial
+from collections.abc import AsyncIterator, Callable, Iterator
+from typing import TypeVar
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -64,6 +66,13 @@ from .formats import (
     UnknownOutputFormat,
 )
 from .settings import Settings
+
+#: What one synthesis hands back. Named only so [`_synthesising`] can promise the
+#: caller the same type its own callable returns: `object` there would make every
+#: `spoken.sample_rate` and every tuple unpack downstream a static error, and
+#: would accept a callable of the wrong shape until runtime
+#: ([LAW:types-are-the-program]).
+_Spoken = TypeVar("_Spoken")
 
 _LOGGER = logging.getLogger("elvenspeak.api")
 
@@ -374,6 +383,86 @@ def _audible(voice: Voice, text: str, chunks: Iterator[bytes]) -> Iterator[bytes
     raise Silence(voice, text)
 
 
+async def _synthesising(gate: asyncio.Semaphore, work: Callable[[], _Spoken]) -> _Spoken:
+    """Runs `work` off the loop, holding a permit until that THREAD has finished.
+
+    Not `async with gate:` around the await, and the difference is the whole
+    reason this exists. A `concurrent.futures` worker that has already started
+    cannot be cancelled, so when a caller hangs up mid-synthesis the engine keeps
+    running to completion on its thread — while `async with`'s `__aexit__` runs on
+    the `CancelledError` immediately and hands the slot to somebody else. A burst
+    of barge-ins would then start more syntheses than the bound allows, which is
+    the one thing the bound exists to prevent. Measured, before it was believed:
+    on cancellation the permit read free while the thread had not finished.
+
+    So the release rides with the work. Whoever submits it is the only one who
+    can see it end, and `call_soon_threadsafe` is how a worker thread hands that
+    fact back to the loop it was submitted from.
+
+    SHIELDED, and that is not decoration. Putting the release inside the
+    submitted callable makes it conditional on the callable running at all, and
+    cancelling an `asyncio.to_thread` whose future is still PENDING in the shared
+    executor cancels it outright: the work never runs, its `finally` never fires,
+    and the permit is gone for the life of the process. Measured -- a gate of two
+    came back one and stayed there. That is strictly worse than the race it was
+    meant to fix, trading transient over-subscription for monotonic starvation.
+    The shield keeps the submitted future uncancellable, so the work always runs
+    and always releases, whichever state the cancellation finds it in.
+    """
+    loop = asyncio.get_running_loop()
+    await gate.acquire()
+
+    def _and_then_release() -> _Spoken:
+        try:
+            return work()
+        finally:
+            try:
+                loop.call_soon_threadsafe(gate.release)
+            except RuntimeError:
+                # The loop closed while this thread was still running, which is
+                # process shutdown: the default executor's workers are joined by
+                # an `atexit` handler that runs after uvicorn has closed the
+                # loop. There is nothing left to release into and nobody left to
+                # tell, and letting it raise here would replace `work()`'s own
+                # result or exception with a bare thread traceback on every
+                # clean stop.
+                pass
+
+    speaking = asyncio.ensure_future(asyncio.to_thread(_and_then_release))
+    try:
+        return await asyncio.shield(speaking)
+    except asyncio.CancelledError:
+        # [LAW:no-silent-failure] The shield unregisters its inner callback the
+        # moment the outer await is cancelled, so nothing ever reads what the
+        # engine did next. The permit still comes back — that is the `finally` —
+        # but an engine that then FAILS has its exception discarded, resurfacing
+        # whenever the task is collected as a bare "Task exception was never
+        # retrieved" with nothing tying it to a request. Measured. The caller has
+        # gone either way; what this buys is an operator learning that synthesis
+        # broke, rather than the failure being swallowed by a hang-up.
+        speaking.add_done_callback(_complain_if_it_failed)
+        raise
+
+
+def _complain_if_it_failed(speaking: "asyncio.Future[_Spoken]") -> None:
+    """Reads an abandoned synthesis's outcome, so a failure is not lost with it.
+
+    `exc_info`, and it is the whole value of this callback. Asking a task for its
+    exception marks the traceback retrieved, which is what stops asyncio printing
+    it at collection time — so a bare `%r` here does not ADD a report, it swaps a
+    full stack through `to_thread` into `work()` into the engine for a single
+    line naming no frame. Measured both ways; the first version of this function
+    left an operator strictly worse off than the silence it replaced.
+    """
+    if speaking.cancelled():
+        return
+    failure = speaking.exception()
+    if failure is not None:
+        _LOGGER.error(
+            "synthesis failed after its caller hung up", exc_info=failure
+        )
+
+
 def _audible_pcm(voice: Voice, text: str, pcm: bytes) -> bytes:
     """The same checkpoint, for the endpoints handed a whole utterance.
 
@@ -407,6 +496,31 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     # cannot name a concrete one — it passes a string through to the module that
     # owns the alias table.
     cat = voices.Catalog.for_engine(settings.engine_name, engine, settings.fallback)
+
+    # [LAW:single-enforcer] The one thing in this process that decides how much
+    # synthesis this service STARTS. Every endpoint below runs its engine calls
+    # through [`_synthesising`] against this, and nothing else does.
+    #
+    # It narrows; it cannot widen. `asyncio.to_thread` still dispatches onto the
+    # shared default executor, so the real ceiling is the lower of this setting
+    # and that executor's width ([`elvenspeak.settings._default_concurrency`]),
+    # and a value set above that width has no effect. Said here because the
+    # alternative — sizing an executor to match — buys a second knob to answer
+    # for a direction nobody on this ticket wants ([LAW:no-mode-explosion]);
+    # every measurement behind this feature is about lowering the number.
+    #
+    # Waiting, not refusing. The burst that OOM-killed elvenspeak-piper was four
+    # times its design target (piper-memory-9rc); turning that into a queue makes
+    # it slow, and turning it into a 503 would make a caller's retry the next
+    # burst.
+    #
+    # [LAW:no-silent-failure] BOUNDED, so a release that does not answer an
+    # acquire raises rather than quietly widening the ceiling. This branch has
+    # already shipped two release bugs — one freeing the slot while the engine
+    # was still in it, one losing the permit entirely — and a plain `Semaphore`
+    # would answer the third by RAISING the limit, which is the single failure
+    # this feature cannot tolerate and the one nothing here could observe.
+    speaking_at_once = asyncio.BoundedSemaphore(settings.concurrent_syntheses)
 
     # Which `model_id` values reach this deployment at all, derived once from the
     # voices on offer rather than from this deployment's own engine name.
@@ -731,7 +845,13 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         # for the whole synthesis — and this endpoint did exactly that until the
         # streaming path, which gets its thread from the encoder's pump, made the
         # omission visible here.
-        sample_rate, pcm = await asyncio.to_thread(synthesize)
+        # The whole utterance in one call: `synthesize` drains the engine's
+        # generator on the thread, so the permit covers exactly the work that
+        # costs the memory.
+        sample_rate, pcm = await _synthesising(speaking_at_once, synthesize)
+        # Outside the permit: ffmpeg is a subprocess with its own footprint, and
+        # holding a synthesis slot through it would bound the encoder by a number
+        # measured for the engine.
         audio = await encoding.encode(pcm, sample_rate, fmt)
         return Response(
             content=audio,
@@ -753,19 +873,42 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         # or picks a model inside it would otherwise do that on the loop. The
         # samples are still pulled later, by the encoder's pump, so a client that
         # disconnects between request and read costs nothing.
-        spoken = await asyncio.to_thread(
-            engine.speak, resolution.voice, body.text, body.prosody(honoured(resolution.voice))
+        # Scoped, rather than handed to the response body to hold for the whole
+        # utterance. That was tried, and the reason against it is what a permit
+        # measures: between chunks a stream is blocked in the encoder's `drain`
+        # behind the client's socket, so a slow reader — or a router proxying
+        # someone else's audio — would occupy a slot budgeted for a model doing
+        # work. The remaining chunks are bounded where they are actually made, by
+        # the same gate handed to the pump below.
+        #
+        # It also cannot leak, which the other shape could in principle: a permit
+        # released by the response body is never released if that body is never
+        # started, and `aclose()` on an unstarted async generator runs no code
+        # (measured). No abort was found that actually reaches that state through
+        # uvicorn — four hard mid-`speak` hang-ups returned every permit — so this
+        # is a shape that removes the question rather than a fix for an observed
+        # leak.
+        prosody = body.prosody(honoured(resolution.voice))
+        spoken = await _synthesising(
+            speaking_at_once,
+            lambda: engine.speak(resolution.voice, body.text, prosody),
         )
-        # The first chunk is pulled here, on the thread, and not by the encoder:
-        # it is what proves the engine spoke, and a `StreamingResponse` has
-        # already sent 200 by the time its body raises. The status line is the
-        # only place this answer can still be told, so the checkpoint has to run
-        # before the response object exists.
-        audible = await asyncio.to_thread(
-            _audible, resolution.voice, body.text, spoken.audio
+        # The first chunk is pulled here, on the thread, and not by the
+        # encoder: it is what proves the engine spoke, and a
+        # `StreamingResponse` has already sent 200 by the time its body
+        # raises. The status line is the only place this answer can still be
+        # told, so the checkpoint has to run before the response object
+        # exists — and inside the permit, because pulling it synthesises.
+        audible = await _synthesising(
+            speaking_at_once, lambda: _audible(resolution.voice, body.text, spoken.audio)
         )
         return StreamingResponse(
-            encoding.encode_stream(audible, spoken.sample_rate, fmt),
+            encoding.encode_stream(
+                audible,
+                spoken.sample_rate,
+                fmt,
+                pull_a_chunk=partial(_synthesising, speaking_at_once),
+            ),
             media_type=fmt.content_type,
             headers=headers(resolution, body),
         )
@@ -780,8 +923,12 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         resolution = speaking(voice_id, body)
         require(Capability.TIMESTAMPS, resolution.voice)
 
-        spoken = await asyncio.to_thread(
-            engine.speak_timed, resolution.voice, body.text, body.prosody(honoured(resolution.voice))
+        # `speak_timed` is eager — it drains the model and returns whole PCM —
+        # so the permit covers the call and nothing escapes it.
+        timed_prosody = body.prosody(honoured(resolution.voice))
+        spoken = await _synthesising(
+            speaking_at_once,
+            lambda: engine.speak_timed(resolution.voice, body.text, timed_prosody),
         )
         pcm = _audible_pcm(resolution.voice, body.text, spoken.pcm)
         audio = await encoding.encode(pcm, spoken.sample_rate, fmt)
@@ -813,10 +960,18 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
             # alignment has to be measured against a known stretch of text and an
             # engine's chunks do not say which words they came from. Owning the
             # split is what makes each emitted object's timings meaningful.
+            #
+            # One permit per SENTENCE, around the synthesis only. Wrapping the
+            # whole loop would hold a slot through every `encoding.encode` — a
+            # full ffmpeg spawn each — and through every yield back to a
+            # client-paced socket, so one long body on one slow reader would
+            # occupy a synthesis slot for the length of the document. That is
+            # the same thing `/convert` refuses two endpoints up.
             elapsed = 0.0
             for sentence in text.split_sentences(body.text):
-                spoken = await asyncio.to_thread(
-                    engine.speak_timed, resolution.voice, sentence, prosody
+                spoken = await _synthesising(
+                    speaking_at_once,
+                    lambda: engine.speak_timed(resolution.voice, sentence, prosody),
                 )
                 pcm = _audible_pcm(resolution.voice, sentence, spoken.pcm)
                 audio = await encoding.encode(pcm, spoken.sample_rate, fmt)
