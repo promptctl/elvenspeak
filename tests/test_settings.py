@@ -14,6 +14,7 @@ each had a second home that already knew more than this module could.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import asyncio
@@ -28,7 +29,14 @@ from elvenspeak.engine import Capability
 from elvenspeak.engines import ENGINES
 from elvenspeak.piper import DEFAULT_VOICE
 from elvenspeak.provisioning import ConfigError, Registry
-from elvenspeak.settings import Settings, reported_or_exit
+from elvenspeak.memory import Unconfined
+from elvenspeak.settings import (
+    CONCURRENT_SYNTHESES,
+    MEASURED_PIPER,
+    Settings,
+    reported_or_exit,
+    unsized,
+)
 from elvenspeak.voices import Substitution
 
 
@@ -519,4 +527,136 @@ def test_the_clean_environment_clears_every_setting_a_startup_reads():
     assert not missing, (
         "these are read at startup but not cleared by `clean_env`: "
         + ", ".join(f"{name} ({module})" for name, module in sorted(missing.items()))
+    )
+
+
+# ------------------------------------------ the ceiling a confined deployment owes
+
+# `unsized` is asked at the composition root and not during the parse, so these
+# drive it directly and state the confinement rather than inheriting the machine's.
+# A developer laptop is unconfined, so a test that read the real cgroup would pass
+# here and prove nothing about the deployment this exists for.
+
+CONFINED = 2048 * 1048576
+
+
+def test_a_confined_deployment_that_named_no_ceiling_is_refused():
+    """[LAW:no-silent-failure] The configuration that OOM-killed piper four times.
+
+    A memory limit plus a ceiling inherited from the host's core count. Nothing
+    about it looks wrong until the burst arrives, and then it is a SIGKILL with
+    no traceback.
+    """
+    refusal = unsized(from_env(), CONFINED)
+    assert refusal is not None
+    assert CONCURRENT_SYNTHESES in refusal
+    assert "2048 MiB" in refusal
+
+
+def test_the_refusal_names_the_width_it_would_have_run_at():
+    """A refusal an operator cannot act on is a crashloop with better prose.
+
+    Asserted on the exact phrase rather than on the bare number, because the bare
+    number collides: the message carries 1140, 1164, 1335, 1773 and 2048, so on a
+    4-core host (the gpu node) the default of 8 is a substring of "2048", and on a
+    3-core host 7 is a substring of "1773". Either way the assertion would hold
+    with the interpolation deleted from the f-string entirely.
+    """
+    settings = from_env()
+    refusal = unsized(settings, CONFINED)
+    assert f"({settings.concurrent_syntheses} here)" in refusal
+    # The measured curve, so the number to choose is in the message rather than
+    # in a README the operator is not reading at 3am.
+    assert "1335" in refusal
+
+
+def test_the_refusal_converts_the_limit_it_was_actually_handed():
+    """A confinement that collides with nothing already in the message.
+
+    2048 is the historical incident figure, hardcoded in the narrative sentence
+    every refusal carries -- so a test asserting "2048 MiB" against a 2048 MiB
+    confinement passes on that sentence alone, even if the byte-to-MiB conversion
+    divided by the wrong constant or read the wrong variable. At 3072 the figure
+    can only come from the conversion.
+    """
+    refusal = unsized(from_env(), 3072 * 1048576)
+    assert refusal is not None
+    assert "3072 MiB" in refusal
+
+
+def test_a_confined_deployment_that_chose_a_ceiling_serves():
+    assert unsized(from_env(**{CONCURRENT_SYNTHESES: "4"}), CONFINED) is None
+
+
+def test_choosing_exactly_what_the_default_would_have_been_still_counts_as_choosing():
+    """Provenance cannot be recovered from the value, which is why it is carried.
+
+    An operator who works out the right number and finds it equals the core-derived
+    default has still chosen it, and refusing them would be the check calling a
+    correct deployment broken.
+    """
+    settings = from_env(**{CONCURRENT_SYNTHESES: str(from_env().concurrent_syntheses)})
+    assert settings.concurrency_chosen
+    assert unsized(settings, CONFINED) is None
+
+
+def test_an_unconfined_process_is_untouched():
+    """Every development machine, and every `docker run` without --memory."""
+    assert unsized(from_env(), Unconfined.UNCONFINED) is None
+
+
+def test_an_unset_variable_is_read_as_having_chosen_nothing():
+    assert not from_env().concurrency_chosen
+
+
+def test_the_field_defaults_to_unchosen():
+    """The conservative reading, pinned at the field rather than at one caller.
+
+    A `Settings` constructed in code did not come from an operator, so it cannot
+    have chosen. Defaulting the other way would make this check silently
+    inapplicable to every deployment that builds its settings directly — the
+    failure would be that nothing is ever refused, which looks exactly like
+    nothing being wrong.
+    """
+    assert Settings.__dataclass_fields__["concurrency_chosen"].default is False
+
+
+README = Path(__file__).parent.parent / "README.md"
+
+
+def test_the_readme_quotes_the_measured_curve_this_module_holds():
+    """[LAW:one-source-of-truth] One measurement, three readers.
+
+    The curve is quoted by the field comment, by the refusal an operator reads at
+    boot, and by the README paragraph they read beforehand. An operator picks a
+    ceiling off whichever they happen to see, so the three disagreeing is the
+    failure -- and it is silent, because every copy looks authoritative.
+
+    Read off README.md rather than off a rendered copy, for the reason
+    `tests/test_packaging.py` reads pyproject.toml: the file is what a reader
+    opens.
+    """
+    readme = README.read_text()
+    for _, mib in MEASURED_PIPER:
+        assert str(mib) in readme, (
+            f"{mib} MiB is in MEASURED_PIPER but appears nowhere in README.md; "
+            f"the measurement and the prose describing it have drifted"
+        )
+
+
+def test_the_readme_quotes_no_figure_the_measurement_does_not_have():
+    """The direction that catches a number left behind by an edit.
+
+    Scoped to the paragraph documenting this variable, and allowing 2048 -- the
+    limit it died against, which is a fact about the node rather than a row of
+    the curve.
+    """
+    readme = README.read_text()
+    start = readme.index(CONCURRENT_SYNTHESES)
+    paragraph = readme[start : readme.index("PORT=5001", start)]
+    allowed = {str(mib) for _, mib in MEASURED_PIPER} | {"2048", "32"}
+    cited = set(re.findall(r"\b\d{4}\b", paragraph))
+    assert cited <= allowed, (
+        f"README cites {sorted(cited - allowed)} where the measurement has "
+        f"{sorted(allowed)}; a figure was changed in one place only"
     )

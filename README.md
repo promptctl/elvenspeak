@@ -280,12 +280,17 @@ ELVENSPEAK_CONCURRENT_SYNTHESES=   # how much synthesis happens at once. Extra
                                    # the host's full width. Only pinning
                                    # (--cpuset-cpus, Nomad resources.cores)
                                    # lowers it. So on a memory-limited
-                                   # deployment you must set this yourself. Set
-                                   # it from the deployment's MEMORY limit, not
-                                   # its cores: piper measured ~1140 MiB idle,
-                                   # 1164 at 2 concurrent, 1335 at 4, 1773 at 8,
-                                   # and was OOM-killed by an eight-way burst
-                                   # against a 2048 MiB limit.
+                                   # deployment you must set this yourself --
+                                   # and a confined process that has not will
+                                   # REFUSE TO START rather than inherit a width
+                                   # from its host's cores. Set it from the
+                                   # deployment's MEMORY limit, not its cores:
+                                   # piper measured ~1140 MiB idle, 1164 at 2
+                                   # concurrent, 1335 at 4, 1773 at 8, and was
+                                   # OOM-killed by an eight-way burst against a
+                                   # 2048 MiB limit. An unconfined process --
+                                   # a laptop, a `docker run` with no --memory --
+                                   # is unaffected and keeps the default.
 PORT=5001
 HOST=0.0.0.0
 
