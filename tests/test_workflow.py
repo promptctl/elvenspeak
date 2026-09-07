@@ -1,4 +1,12 @@
-"""The images CI publishes, checked against the engines this package registers.
+"""What the publish workflow builds, and the order in which it proves it.
+
+Two claims about `.gitea/workflows/publish-image.yaml`, both read off the file
+because the file is what act_runner executes. The first is the engine set below.
+The second is one step ordering — that no image is pushed before it has been run
+and proved to serve — which is a guarantee made entirely of position and so
+cannot be held by anything except a check on position.
+
+The images CI publishes, checked against the engines this package registers.
 
 `.gitea/workflows/publish-image.yaml` builds one image per engine, and its build
 matrix is a third map of the engine set — after `elvenspeak.engines.ENGINES`,
@@ -42,13 +50,23 @@ _SERVICE_KEY = re.compile(r"elvenspeak-([a-z]+)")
 _MATRIX = re.compile(r"^\s*engine:\s*\[([^\]]*)\]\s*$", re.MULTILINE)
 
 
-def matrix_engines() -> list[str]:
-    """Every engine the publish job is told to build an image for."""
-    yaml = "\n".join(
+def workflow_yaml() -> str:
+    """The workflow with its prose removed, which is the only form worth matching.
+
+    This file discusses its own YAML at length, so a check that cannot tell YAML
+    from prose about YAML matches the discussion and reports on a sentence. Both
+    readers below share this one decision rather than each making it again.
+    """
+    return "\n".join(
         line
         for line in WORKFLOW.read_text(encoding="utf-8").splitlines()
         if not line.lstrip().startswith("#")
     )
+
+
+def matrix_engines() -> list[str]:
+    """Every engine the publish job is told to build an image for."""
+    yaml = workflow_yaml()
     return [
         engine.strip()
         for listing in _MATRIX.findall(yaml)
@@ -114,6 +132,49 @@ def test_the_deploy_instructions_name_every_engine_and_no_others():
     """
     named = set(_SERVICE_KEY.findall(DEPLOY_INSTRUCTIONS.read_text(encoding="utf-8")))
     assert named == set(ENGINES)
+
+
+#: The publish job's smoke, named by the image argument it takes. The
+#: reachability job runs the same script with `--help` to prove the runner's
+#: interpreter parses it, and that run smokes no image — so the flag is what
+#: tells the proof apart from the proof that the prover works.
+_SMOKE = re.compile(r'^\s*python3 smoke\.py "', re.MULTILINE)
+
+#: Every push of a built image to the registry.
+_PUSH = re.compile(r"^\s*docker push ", re.MULTILINE)
+
+
+def test_no_image_is_pushed_before_it_has_been_proved_to_run():
+    """[LAW:parse-dont-validate] The step order is the guarantee, so it is the thing to hold.
+
+    `smoke.py` runs the image and proves it answers /health. That it runs at all
+    is worth much less than *where*: above the push, a red smoke ends the leg
+    with the registry untouched; below it, the same script reports the same fact
+    about the same image after the bytes have landed and `:latest` has moved,
+    leaving a deploy one `nomad job run` away from an artifact the run already
+    knew was broken.
+
+    The move that breaks it is a reasonable-sounding one, which is why prose will
+    not hold it. Smoking the pushed reference reads like the more honest test —
+    it is what a deploy actually pulls — and rejoining the build and push steps
+    reads like tidying up two steps that were one until this check needed to
+    stand between them. Either edit leaves a green suite, a green publish, and no
+    proof left in the pipeline at all.
+
+    Positions rather than presence, and both patterns controlled for: a regex
+    that quietly stopped matching would compare nothing against nothing and pass,
+    which is how this suite's other static checks have failed before.
+    """
+    yaml = workflow_yaml()
+    smoked = [m.start() for m in _SMOKE.finditer(yaml)]
+    pushed = [m.start() for m in _PUSH.finditer(yaml)]
+
+    assert len(smoked) == 1, f"expected one smoke of a built image, found {len(smoked)}"
+    assert pushed, "matched no `docker push` — the regex is wrong, not the file"
+    assert smoked[0] < min(pushed), (
+        "the publish job pushes before it smokes, so a broken image reaches the "
+        "registry and `:latest` before anything starts the process"
+    )
 
 
 #: The CPU row of `elvenspeak.chatterbox`'s measurement table, which owns both
