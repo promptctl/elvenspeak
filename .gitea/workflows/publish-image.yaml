@@ -185,6 +185,22 @@ jobs:
           # missing jq prints an empty version and passes.
           jq --version
 
+          # The publish job smokes each image with `python3 smoke.py`, so the interpreter
+          # is now as much a build dependency as jq, and this is the job that says so.
+          # Asserted here because `reachability` runs on every ref while `publish` runs on
+          # master and dispatch: a runner without python3 is then a red branch push, rather
+          # than four cold builds of ~10 minutes each discovered to be unsmokeable on the
+          # one ref where someone actually wanted the images. No dated tag is lost either
+          # way — the smoke sits above the push — but the ten minutes per leg are.
+          #
+          # `--help` rather than `--version`, for the reason the paragraph above gives:
+          # this runs the actual script through this actual interpreter, so it proves the
+          # file parses and its parser builds here, not merely that something answering to
+          # `python3` is on PATH. That is the assertion worth having, because `smoke.py`
+          # holds a deliberate 3.8 syntax floor for exactly this interpreter, whatever it
+          # turns out to be. Output dropped, exit status not.
+          python3 smoke.py --help > /dev/null
+
       # BuildKit is not optional for this repo: the Dockerfile declares
       # `# syntax=docker/dockerfile:1`, which the legacy builder cannot resolve. Proving
       # the daemon is reachable AND BuildKit-capable here means the publish job fails on
@@ -887,7 +903,12 @@ jobs:
       # Every name in `REFS` is applied in the one `docker build`, so an alias can only ever
       # point at an image that was actually produced here — there is no retag of something
       # built earlier, and nothing is pushed that this run did not make.
-      - name: Build and push
+      #
+      # Building and pushing were one step until the smoke check below needed to stand
+      # between them. Splitting them changed nothing about that invariant — the single
+      # `docker build` still applies every name — and bought the one guarantee a combined
+      # step cannot offer: the push is downstream of the proof.
+      - name: Build the image this leg proposes to publish
         env:
           REFS: ${{ steps.tag.outputs.refs }}
           STAMP: ${{ steps.labels.outputs.stamp }}
@@ -934,6 +955,83 @@ jobs:
             --build-arg "ELVENSPEAK_ENGINE=$ENGINE" \
             "${args[@]}" \
             .
+
+      # ---------------------------------------------------------------------------
+      # THE PROOF THAT THE ARTIFACT RUNS, standing between the build and the push.
+      #
+      # Its position is the whole guarantee. Every step below this one describes an image
+      # that has already answered /health from inside a running container, because a red
+      # exit here ends the leg before `docker push` is reached. One step later it would
+      # report the same fact about the same image, and report it after the registry held
+      # the bytes and `:latest` had moved — leaving a deploy one `nomad job run` away from
+      # an artifact this run already knew was broken. The ordering is the check.
+      # [LAW:parse-dont-validate]
+      #
+      # No `if:`, no path filter, nothing to ask for it to be skipped: this project has
+      # already decided against checks that can be skipped, because a skip is
+      # indistinguishable from a pass. [LAW:dataflow-not-control-flow]
+      #
+      # THE IMAGE MUST BE LOCALLY PRESENT, and nothing about the invocation says so out
+      # loud. `smoke.py` reads the port to poll and the HEALTHCHECK to run out of
+      # `docker image inspect`, which resolves the local store and never the registry. The
+      # plain `docker build` above satisfies that for free. Two edits would break it, and
+      # both fail here at the first call rather than anywhere that explains itself: moving
+      # this step below the push and pointing it at a registry reference nothing pulled, or
+      # switching the build to `buildx --push`, which does not populate the local store.
+      #
+      # `--runtime docker` rather than smoke.py's first-installed default, for the same
+      # reason: the image this leg just built exists in that daemon's store and nowhere
+      # else, so a podman arriving on this runner would otherwise move the smoke to a
+      # runtime that cannot see what was built.
+      #
+      # UNCONFINED, DECIDED RATHER THAN DEFAULTED. Passing `--memory` obliges
+      # `--env ELVENSPEAK_CONCURRENT_SYNTHESES=N` — the image refuses to start under a
+      # ceiling nobody chose — and N is a per-engine runtime figure nobody has measured.
+      # Chatterbox's 4.69 GiB is its *bake* peak, which is a different number for a
+      # different phase, and reusing it here would be a guess wearing a measurement's
+      # clothes. A ceiling guessed low turns a leg red for a reason that has nothing to do
+      # with the commit that hit it, which is the failure the rest of this file keeps
+      # refusing. Confined is the shape the fleet actually runs and is worth proving; it
+      # is worth proving against measured numbers, and piper-build-b4h.3 is where driving
+      # a real synthesis produces them.
+      #
+      # ONE KNOWN FLAKE, WRITTEN DOWN SO NOBODY HUNTS A PHANTOM. `smoke.py` picks its
+      # host port by binding :0, reading the number and closing, so there is a small
+      # bounded window before the runtime binds it. `max-parallel: 1` above is declared and
+      # not honoured by this scheduler, so these legs genuinely do run at the same second
+      # and genuinely can race for a port. A leg that goes red on a bind error is this, and
+      # a re-run clears it — it is not a broken image. It was left unfixed deliberately:
+      # holding the socket open would stop the runtime binding at all, and the race-free
+      # form (publish to an ephemeral port and ask the runtime which it got) does not exist
+      # on every runtime `smoke.py` supports. See piper-build-b4h.1's review for the
+      # evidence. [LAW:no-ambient-temporal-coupling]
+      #
+      # No `--timeout`: 180s is `smoke.py`'s own default, chosen as the slowest engine's
+      # model load. Restating it here would be a second copy of a number that belongs to
+      # the script and would drift the first time only one was edited.
+      # [LAW:one-source-of-truth]
+      #
+      # No guard on `TAG`, matching the two verification steps below, which read the same
+      # output the same way and guard it no more than this does. A `TAG` that arrived empty
+      # reaches `smoke.py` as the reference `.../elvenspeak-piper:` and comes back as an
+      # image the runtime cannot resolve — loudly, and on the same exit path as an image
+      # that will not boot. Adding a check here and not there would be a second enforcer of
+      # an invariant, sited at one of its three readers. [LAW:single-enforcer]
+      # ---------------------------------------------------------------------------
+      - name: Prove the image serves before anything is pushed
+        env:
+          TAG: ${{ steps.tag.outputs.image-tag }}
+        run: |
+          set -euo pipefail
+          python3 smoke.py "$REGISTRY/$IMAGE:$TAG" --runtime docker
+
+      # Nothing here decides whether to push. Reaching this step at all is the decision,
+      # taken by the step above by exiting 0.
+      - name: Push what the smoke proved
+        env:
+          REFS: ${{ steps.tag.outputs.refs }}
+        run: |
+          set -euo pipefail
 
           for ref in $REFS; do
             docker push "$REGISTRY/$IMAGE:$ref"
