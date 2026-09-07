@@ -528,3 +528,33 @@ def test_the_aggregate_warning_does_not_claim_a_present_file_is_absent(
         "the aggregate warning claims the limit files do not exist, contradicting "
         "the per-file warning that just reported this one existing and failing"
     )
+
+
+def test_a_readable_host_root_does_not_answer_for_an_unreadable_own_cgroup(
+    tmp_path, monkeypatch, caplog
+):
+    """[LAW:no-silent-failure] The roots must not silence the alarm about ourselves.
+
+    Once a non-root subtree is resolved, `_own`'s own docstring says the mount
+    roots are the HOST's -- typically `max`. So a task whose own limit file cannot
+    be read, running on a host root that reads fine, must still be reported: the
+    root answered a question about somebody else.
+
+    Getting this wrong is the silent misdetection with its alarm disabled by
+    exactly the file the module already distrusts.
+    """
+    proc = tmp_path / "cgroup"
+    proc.write_text("0::/nomad.slice/elvenspeak.scope\n")
+    monkeypatch.setattr(memory, "PROC_SELF_CGROUP", proc)
+    root = tmp_path / "host-root"
+    root.write_text("max")
+    monkeypatch.setattr(memory, "LIMIT_FILES", (root,))
+    monkeypatch.setattr(memory, "_own", lambda _: (tmp_path / "absent-own",))
+
+    with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
+        assert memory.limit() is memory.Unconfined.UNCONFINED
+
+    assert any(r.levelno >= logging.WARNING for r in caplog.records), (
+        "the host root's readable `max` suppressed the warning about this "
+        "process's own unreadable limit file"
+    )

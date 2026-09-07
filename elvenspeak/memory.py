@@ -209,10 +209,18 @@ def limit(files: Iterable[Path] | None = None) -> Limit:
     """
     resolved = files is None
     consulted = tuple(_candidates() if resolved else files)
-    # Whether any candidate was READ, which is not the same question as whether one
-    # yielded a number: a file that exists and says `max` answers "unconfined"
-    # truthfully, and must not be reported as a file that could not be found.
-    read_any = False
+    # Whether one of OUR OWN cgroup's files was read -- not whether any candidate
+    # was, and not whether one yielded a number.
+    #
+    # Not "yielded a number", because a file that exists and says `max` answers
+    # "unconfined" truthfully and must not be reported as one that could not be
+    # read. And not "any candidate", because [`LIMIT_FILES`] is in that list: once
+    # a non-root subtree has been resolved those roots are the HOST's by this
+    # module's own reasoning, so letting one of them answer would suppress the
+    # warning for a task whose own file could not be read, on the strength of a
+    # `max` belonging to somebody else.
+    roots = frozenset(LIMIT_FILES)
+    read_own = False
     tightest: Limit = Unconfined.UNCONFINED
     for path in consulted:
         try:
@@ -228,7 +236,7 @@ def limit(files: Iterable[Path] | None = None) -> Limit:
                 error,
             )
             continue
-        read_any = True
+        read_own = read_own or path not in roots
         found = _parsed(text)
         if not isinstance(found, int):
             continue
@@ -239,7 +247,7 @@ def limit(files: Iterable[Path] | None = None) -> Limit:
         # ancestor, and an operator reading four numbers still has to be told
         # which of them the kernel will hold this process to.
         _LOGGER.info("memory limit: %d bytes is the tightest that binds", tightest)
-    elif resolved and consulted != LIMIT_FILES and not read_any:
+    elif resolved and consulted != LIMIT_FILES and not read_own:
         # [LAW:no-silent-failure] Only on the resolved path, because that is where
         # the evidence comes from: `/proc/self/cgroup` positively stated this
         # process is in a non-root cgroup, and NOT ONE of that cgroup's limit files
