@@ -308,23 +308,49 @@ def select_runtime(requested: str | None) -> Runtime:
     return usable[0]
 
 
-def _capture(argv: Sequence[str]) -> str:
-    """Run a runtime command and return its stdout, or fail loudly with its stderr.
+def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run a runtime command, converting a timeout into the one failure type.
 
-    The only way past this function is exit 0, so no caller downstream inspects a
-    return code ([LAW:parse-dont-validate]). A timeout is converted here rather
-    than left to escape as `TimeoutExpired`, so that every way a runtime call can
-    fail reaches the caller as one type carrying a sentence.
+    The base of three: the only place a runtime subprocess is spawned, so
+    `TimeoutExpired` has exactly one place it could escape from and does not. What
+    reaches a caller is a return code, which the two rungs above read differently
+    because a non-zero exit does not mean the same thing to them.
     """
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=CLI_TIMEOUT)
+        return subprocess.run(argv, capture_output=True, text=True, timeout=CLI_TIMEOUT)
     except subprocess.TimeoutExpired as expired:
         raise SmokeFailure(
             f"`{' '.join(argv)}` did not return within {CLI_TIMEOUT:.0f}s"
         ) from expired
+
+
+def _capture(argv: Sequence[str]) -> str:
+    """Run a runtime command and return its stdout, or fail loudly with its stderr.
+
+    The only way past this function is exit 0, so no caller downstream inspects a
+    return code ([LAW:parse-dont-validate]).
+    """
+    done = _run(argv)
     if done.returncode != 0:
         raise SmokeFailure(f"`{' '.join(argv)}` exited {done.returncode}\n{done.stderr.strip()}")
     return done.stdout
+
+
+def _attempt(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run a cleanup command that must not raise, whatever happens to it.
+
+    Cleanup runs while another failure is already on its way up, so a second one
+    raised from here would replace the verdict the caller came for and skip
+    whatever cleanup stood after it. The failure arm is therefore turned back into
+    data: a timeout returns 124 — what `timeout(1)` reports — carrying its own
+    sentence as stderr, which is the shape both callers already print. A wedged
+    daemon is then reported through the same path as any other bad exit rather
+    than through an arm written for it ([LAW:dataflow-not-control-flow]).
+    """
+    try:
+        return _run(argv)
+    except SmokeFailure as timed_out:
+        return subprocess.CompletedProcess(argv, 124, stdout="", stderr=str(timed_out))
 
 
 def _free_port() -> int:
@@ -336,6 +362,36 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _read_config(runtime: Runtime, image: str) -> ImageConfig:
+    """Ask a runtime to describe an image, and refuse an answer of the wrong shape.
+
+    Both `read_config` implementations walk into the runtime's JSON by index and
+    key, which is the right way to read a shape that is a contract and the wrong
+    way to meet one that is not. This is the single place that crossing is made
+    ([LAW:single-enforcer]), so a runtime that answers with an empty `variants`, a
+    missing key or something that is not JSON at all reaches the caller as the one
+    failure type quoting what it actually printed, rather than as a traceback past
+    `main`'s handler. The four names are the ways walking into JSON of an
+    unexpected shape goes wrong and not one name more: a bare `Exception` here
+    would also catch a genuine bug in either parser and report it as the runtime's
+    fault, which is a wrong diagnosis printed confidently.
+
+    `SmokeFailure` passes through because it descends from `Exception` directly and
+    is none of the four — load-bearing and invisible: rebased on `ValueError` it
+    would be swallowed here, and the refusals naming the exact healthcheck or port
+    they found would come back out wearing this generic sentence instead.
+    """
+    stdout = _capture([runtime.binary, *runtime.inspect_image, image])
+    try:
+        return runtime.read_config(stdout)
+    except (LookupError, ValueError, TypeError, AttributeError) as malformed:
+        raise SmokeFailure(
+            f"`{runtime.binary} {' '.join(runtime.inspect_image)}` described {image} in a "
+            f"shape this cannot read ({malformed!r}), so neither its port nor its "
+            f"healthcheck could be established:\n{stdout.strip()}"
+        ) from malformed
 
 
 @dataclass(frozen=True)
@@ -415,9 +471,7 @@ def _print_logs(runtime: Runtime, name: str) -> None:
     `logs` call that went wrong is visible rather than an empty block that reads
     like a quiet boot.
     """
-    done = subprocess.run(
-        [runtime.binary, "logs", name], capture_output=True, text=True, timeout=CLI_TIMEOUT
-    )
+    done = _attempt([runtime.binary, "logs", name])
     print(f"--- {name} logs (`{runtime.binary} logs` exited {done.returncode}) ---", flush=True)
     print(done.stdout, end="", flush=True)
     print(done.stderr, end="", flush=True)
@@ -428,23 +482,31 @@ def _print_logs(runtime: Runtime, name: str) -> None:
 def _container(runtime: Runtime, name: str, argv: Sequence[str]) -> Iterator[None]:
     """Own one container's whole lifetime: start it, then always log it and remove it.
 
-    The `finally` is what makes a leaked container and an unexplained failure
-    unrepresentable rather than merely unlikely. Removal reports a problem
-    without raising, because a failure to clean up must not overwrite the verdict
-    the caller came for — but it is said out loud, since what it leaves behind is
-    a container holding a port on the runner.
+    Starting is inside the manager because `run -d` is create-then-start, so a
+    start that fails after a successful create leaves a named container behind —
+    with the `run` outside, that was the one container neither logged nor removed
+    by the `finally` written to guarantee both.
+
+    The two ways in are kept apart because they leave the host in different states
+    and only one of them has anything to say. A `run` that failed may have created
+    nothing at all, so its sweep is silent: the caller already has the runtime's
+    own stderr in the failure going up, and warning that a container "was left
+    behind" when none was ever created would send someone hunting one that does
+    not exist. Past a `run` that succeeded there is certainly one, so its logs are
+    the point and a removal that fails is worth saying out loud — what that leaves
+    behind is a container holding a port on the runner.
     """
-    _capture(argv)
+    sweep = [runtime.binary, "rm", "--force", name]
+    try:
+        _capture(argv)
+    except SmokeFailure:
+        _attempt(sweep)
+        raise
     try:
         yield
     finally:
         _print_logs(runtime, name)
-        removed = subprocess.run(
-            [runtime.binary, "rm", "--force", name],
-            capture_output=True,
-            text=True,
-            timeout=CLI_TIMEOUT,
-        )
+        removed = _attempt(sweep)
         if removed.returncode != 0:
             print(
                 f"warning: {name} was left behind — `{runtime.binary} rm --force` "
@@ -468,7 +530,7 @@ def smoke(
     Returns nothing: there is no verdict to inspect, because the failure arm is
     an exception and the success arm is having got here at all.
     """
-    config = runtime.read_config(_capture([runtime.binary, *runtime.inspect_image, image]))
+    config = _read_config(runtime, image)
     host_port = _free_port()
     name = f"elvenspeak-smoke-{uuid.uuid4().hex[:8]}"
     url = f"http://127.0.0.1:{host_port}/health"
@@ -500,12 +562,9 @@ def smoke(
         served = _await_serving(runtime, name, url, timeout)
         print(f"smoke: {url} answered {served}", flush=True)
 
-        checked = subprocess.run(
-            [runtime.binary, "exec", name, "/bin/sh", "-c", config.healthcheck],
-            capture_output=True,
-            text=True,
-            timeout=CLI_TIMEOUT,
-        )
+        # `_run`, not `_capture`: a non-zero exit here is the answer to the
+        # question, phrased below, rather than a runtime call that went wrong.
+        checked = _run([runtime.binary, "exec", name, "/bin/sh", "-c", config.healthcheck])
         if checked.returncode != 0:
             raise SmokeFailure(
                 f"the image's own HEALTHCHECK exited {checked.returncode} against a "

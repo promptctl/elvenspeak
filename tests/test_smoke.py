@@ -20,17 +20,22 @@ _same_way` describes a single image in both spellings and requires one answer.
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
 from smoke import (
+    APPLE,
+    CLI_TIMEOUT,
     DOCKER,
     PODMAN,
     ImageConfig,
     SmokeFailure,
     _apple_image_config,
+    _attempt,
     _declared_port,
     _docker_image_config,
+    _read_config,
     select_runtime,
 )
 
@@ -222,3 +227,89 @@ def test_no_runtime_at_all_is_refused_naming_every_candidate(monkeypatch):
     with pytest.raises(SmokeFailure, match="none installed"):
         select_runtime(None)
 
+
+
+def test_a_wedged_runtime_call_becomes_a_result_cleanup_can_print(monkeypatch):
+    """[LAW:dataflow-not-control-flow] A timeout during cleanup is data, not an exception.
+
+    `_attempt` is what the context manager's `finally` runs, and it is the reason
+    that block cannot throw. A `logs` or `rm` call against a wedged daemon used to
+    raise `TimeoutExpired` out of the `finally` — skipping the removal on the next
+    line and replacing whatever failure sent us there. Coming back as a return
+    code instead means both call sites report it through the printing they already
+    do, with no arm written for the wedged case.
+    """
+
+    def wedge(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, CLI_TIMEOUT)
+
+    monkeypatch.setattr("smoke.subprocess.run", wedge)
+    done = _attempt(["docker", "rm", "--force", "elvenspeak-smoke-abc"])
+
+    assert done.returncode == 124
+    assert "did not return within" in done.stderr
+
+
+@pytest.mark.parametrize(
+    ("runtime", "stdout"),
+    [
+        (DOCKER, ""),
+        (DOCKER, "Error: image not found"),
+        (DOCKER, "{}"),
+        (DOCKER, '{"Env": ["PORT=5001"]}'),
+        (DOCKER, "[]"),
+        (DOCKER, '{"Env": [5001], "Healthcheck": null}'),
+        (DOCKER, '{"Env": ["PORT=5001"], "Healthcheck": 7}'),
+        (APPLE, ""),
+        (APPLE, "[]"),
+        (APPLE, '[{"variants": []}]'),
+        (APPLE, '[{"variants": [{"config": {}}]}]'),
+    ],
+    ids=[
+        "docker-empty",
+        "docker-not-json",
+        "docker-no-keys",
+        "docker-no-healthcheck-key",
+        "docker-array-not-object",
+        "docker-env-not-strings",
+        "docker-healthcheck-not-object",
+        "apple-empty",
+        "apple-no-image",
+        "apple-no-variants",
+        "apple-no-history",
+    ],
+)
+def test_a_runtime_that_answers_in_an_unreadable_shape_is_refused_not_traced(
+    monkeypatch, runtime, stdout
+):
+    """[LAW:no-silent-failure] The parsers walk into JSON by index; the boundary owns the fall.
+
+    Indexing straight into a runtime's output is right for a shape that is a
+    contract and wrong for one that is not, and every miss used to leave as a bare
+    `KeyError`/`IndexError`/`JSONDecodeError`/`AttributeError` — past `main`'s
+    `except SmokeFailure` and out as a traceback, which reads like a bug in this
+    file rather than a runtime that answered strangely. Both spellings cross at one
+    boundary, so both are listed here: the point of covering them together is that
+    neither parser carries its own apology for them to drift apart
+    ([LAW:single-enforcer]).
+    """
+    monkeypatch.setattr("smoke._capture", lambda argv: stdout)
+    with pytest.raises(SmokeFailure, match="shape this cannot read"):
+        _read_config(runtime, "registry.example/elvenspeak-piper:2026.09.07.1")
+
+
+def test_a_readable_shape_that_is_still_refused_keeps_its_own_sentence(monkeypatch):
+    """The generic refusal must not swallow the specific one.
+
+    `_shell_healthcheck` and `_declared_port` raise `SmokeFailure`, which is not a
+    `LookupError`, `ValueError`, `TypeError` or `AttributeError` — so their
+    carefully worded refusals pass the boundary untouched rather than being
+    rewrapped as "a shape this cannot read", which would be true of nothing and
+    useless to everyone. Held here because it rests on `SmokeFailure`'s base class.
+    """
+    monkeypatch.setattr(
+        "smoke._capture",
+        lambda argv: docker_inspect(["PORT=5001"], ["CMD", "curl", "-f", "/health"]),
+    )
+    with pytest.raises(SmokeFailure, match="only the shell form"):
+        _read_config(DOCKER, "registry.example/elvenspeak-piper:2026.09.07.1")
