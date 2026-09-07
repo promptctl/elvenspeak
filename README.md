@@ -456,9 +456,16 @@ That exits 0 in about 11 seconds on an arm64 Mac running the amd64 image. Drop
 the `--env` and the same image under the same 3072 MiB exits 1 in about four
 seconds, having printed its own refusal in the logs.
 
-Nothing in CI runs this yet: the publish workflow still builds, pushes and
-verifies the registry without ever starting the process, so smoking an image is
-a deliberate manual act today.
+CI runs this on every publish. Each engine's leg builds its image, smokes the
+image it just built, and only then pushes — so a red smoke ends the leg with the
+registry untouched and `:latest` unmoved. The step order is the guarantee, and
+`tests/test_workflow.py` fails if a later edit ever puts the push first.
+
+The CI run is unconfined: it passes no `--memory`, and therefore no
+`ELVENSPEAK_CONCURRENT_SYNTHESES` either. Running it confined would prove the
+shape the fleet actually deploys, but the ceiling has to be a measured per-engine
+number rather than a guess — a guessed ceiling turns a build red for a reason
+that has nothing to do with the commit — and those numbers do not exist yet.
 
 ### Pointing openconv at it
 

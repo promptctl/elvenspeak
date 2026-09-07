@@ -125,8 +125,10 @@ def test_the_refusal_does_not_reach_the_bake_step(monkeypatch):
     `python -m elvenspeak.bake` runs inside the image build and synthesizes
     nothing, so a synthesis ceiling is not its concern. If this refusal sat on
     `Settings.from_env`, a memory-limited builder would fail every image build --
-    and since nothing in CI runs a container (piper-build-b4h), the first evidence
-    would be a publish that spent a dated tag on an image that cannot boot.
+    and while CI now runs each image before pushing it (piper-build-b4h.2), it
+    runs it unconfined, so a refusal that fires only under a ceiling is still
+    invisible there. The first evidence would be a publish that spent a dated tag
+    on an image that cannot boot.
 
     The confinement is patched over conftest's `_unconfined` fixture BEFORE the
     parse, which is the whole of what makes this a regression test. Left to the
