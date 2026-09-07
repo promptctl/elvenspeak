@@ -230,13 +230,16 @@ def test_a_nomad_task_scope_resolves():
     )
 
 
-def test_an_ancestor_limit_binds_a_leaf_that_declares_none(tmp_path, monkeypatch):
-    """The bug the ancestor walk exists for, end to end.
+def test_a_leaf_that_declares_no_limit_does_not_hide_a_tighter_one_beside_it(
+    tmp_path,
+):
+    """A `max` leaf must not stop the search, nor answer for the files after it.
 
-    The leaf says `max` and the slice above it carries the ceiling -- which is a
-    shape a scheduler is free to produce. Reading the leaf alone answers
-    "unconfined" for a process the kernel is capping at 2 GiB, and nothing warns,
-    because nothing failed.
+    Not the ancestor walk end to end -- this hands `limit` an explicit pair and so
+    never reaches `_own`; `test_the_roots_are_consulted_alongside_the_resolved_cgroup`
+    below is what covers the resolution. What this pins is the arm beside it: that
+    `tightest` still being UNCONFINED when the first real number arrives takes that
+    number, rather than the `max` before it winning by arriving first.
     """
     leaf, ancestor = tmp_path / "leaf", tmp_path / "ancestor"
     leaf.write_text("max")
@@ -348,4 +351,107 @@ def test_an_absent_proc_self_cgroup_does_not_warn(tmp_path, caplog, monkeypatch)
     monkeypatch.setattr(memory, "PROC_SELF_CGROUP", tmp_path / "absent")
     with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
         assert memory._candidates() == memory.LIMIT_FILES
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+# ------------------------------------- the roots, on the shape this really deploys
+
+
+def test_the_roots_are_consulted_alongside_the_resolved_cgroup(tmp_path, monkeypatch):
+    """[LAW:no-silent-failure] The production path, and the one term nothing pinned.
+
+    On `--cgroupns=private` -- Docker's default on a v2 host, which is what this
+    service deploys as -- `/proc/self/cgroup` reads `0::/`, so `_own` correctly
+    returns nothing and the mount roots are the ONLY candidates that hold the
+    limit. Dropping `+ LIMIT_FILES` from `_candidates` therefore leaves every other
+    test in this file green while answering "unconfined" for every containerized
+    deployment there is.
+
+    That is one edit away from the exact silent misdetection this module exists to
+    close, and the wording of `_candidates`' own docstring invites it -- "the roots
+    are all there ever was to ask" reads as though they were only the fallback. So
+    the roots are asserted to be there on the resolved path too.
+    """
+    proc = tmp_path / "cgroup"
+    proc.write_text("0::/nomad.slice/elvenspeak.scope\n")
+    monkeypatch.setattr(memory, "PROC_SELF_CGROUP", proc)
+
+    candidates = memory._candidates()
+
+    assert candidates[0] == Path(
+        "/sys/fs/cgroup/nomad.slice/elvenspeak.scope/memory.max"
+    )
+    for root in memory.LIMIT_FILES:
+        assert root in candidates, (
+            f"{root} is missing from the candidates; under a private cgroup "
+            f"namespace the roots are the only files that hold the limit, so "
+            f"dropping them answers 'unconfined' for every container"
+        )
+
+
+def test_a_private_namespace_still_asks_the_roots(tmp_path, monkeypatch):
+    """The same point at the exact input production presents: `0::/`."""
+    proc = tmp_path / "cgroup"
+    proc.write_text("0::/\n")
+    monkeypatch.setattr(memory, "PROC_SELF_CGROUP", proc)
+
+    assert memory._candidates() == memory.LIMIT_FILES
+
+
+def test_v1s_uncapped_sentinel_is_recognised_at_every_page_size():
+    """The sentinel is `LONG_MAX` rounded to a page, so its value varies by kernel.
+
+    Matching the 4 KiB spelling exactly reads a 64 KiB host's "unlimited" as a real
+    8-exbibyte ceiling, and that refuses a deployment which was fine -- loudly and
+    wrongly, on a machine nobody tested. aarch64 and ppc64le kernels really do use
+    64 KiB pages.
+    """
+    for page in (4096, 16384, 65536):
+        sentinel = ((1 << 63) - 1) // page * page
+        assert memory._parsed(str(sentinel)) is memory.Unconfined.UNCONFINED, (
+            f"the v1 unlimited sentinel for a {page}-byte page ({sentinel}) was "
+            f"read as a real limit"
+        )
+
+
+def test_a_dead_cgroups_deleted_suffix_is_not_part_of_its_name():
+    """The kernel appends this when a task still names a removed cgroup."""
+    assert memory._own("0::/nomad.slice/elvenspeak.scope (deleted)\n") == (
+        Path("/sys/fs/cgroup/nomad.slice/elvenspeak.scope/memory.max"),
+        Path("/sys/fs/cgroup/nomad.slice/memory.max"),
+    )
+
+
+def test_a_resolved_cgroup_whose_files_are_all_missing_is_reported(
+    tmp_path, monkeypatch, caplog
+):
+    """[LAW:no-silent-failure] Confined, and unfindable, is not "nothing caps me".
+
+    `/proc/self/cgroup` says this process is in a non-root cgroup and not one of
+    that cgroup's limit files exists -- which happens when /sys/fs/cgroup is not
+    mounted in this mount namespace, or is mounted where these paths do not name.
+    Two pieces of evidence, and answering "unconfined" quietly discards both.
+    """
+    proc = tmp_path / "cgroup"
+    proc.write_text("0::/nomad.slice/elvenspeak.scope\n")
+    monkeypatch.setattr(memory, "PROC_SELF_CGROUP", proc)
+    monkeypatch.setattr(memory, "LIMIT_FILES", (tmp_path / "absent-root",))
+
+    with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
+        assert memory.limit() is memory.Unconfined.UNCONFINED
+
+    assert any(r.levelno == logging.WARNING for r in caplog.records), (
+        "a process that positively reported being in a non-root cgroup, whose "
+        "limit files were all missing, was called unconfined without comment"
+    )
+
+
+def test_a_machine_with_no_cgroups_at_all_stays_quiet(tmp_path, monkeypatch, caplog):
+    """macOS: no /proc/self/cgroup, no roots, and nothing worth saying about it."""
+    monkeypatch.setattr(memory, "PROC_SELF_CGROUP", tmp_path / "absent")
+    monkeypatch.setattr(memory, "LIMIT_FILES", (tmp_path / "absent-root",))
+
+    with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
+        assert memory.limit() is memory.Unconfined.UNCONFINED
+
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
