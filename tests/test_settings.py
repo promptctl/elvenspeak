@@ -14,7 +14,10 @@ each had a second home that already knew more than this module could.
 
 from __future__ import annotations
 
+import ast
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import asyncio
@@ -24,7 +27,7 @@ import time
 import pytest
 from conftest import _ENVIRONMENT, DeclaredPrepared, serves
 
-from elvenspeak import piper
+from elvenspeak import chatterbox, piper, router
 from elvenspeak.engine import Capability
 from elvenspeak.engines import ENGINES
 from elvenspeak.piper import DEFAULT_VOICE
@@ -33,7 +36,10 @@ from elvenspeak.memory import Unconfined
 from elvenspeak.settings import (
     CONCURRENT_SYNTHESES,
     MEASURED_PIPER,
+    PREFIX,
+    VOCABULARY,
     Settings,
+    _declared_by,
     reported_or_exit,
     unsized,
 )
@@ -452,6 +458,39 @@ def test_a_good_environment_comes_back_as_settings(clean_env):
     assert settings.engine == piper.configure({}, frozenset(), serves("piper"))
 
 
+def _string_assigned(node: ast.stmt, known: dict[str, str]) -> dict[str, str]:
+    """What a module-level statement binds to a string, if it binds one at all.
+
+    Two shapes, because `elvenspeak/settings.py` uses both: a literal, and a
+    concatenation onto a name already resolved — `PREFIX + "ENGINE"`, which is
+    how that module keeps every variable it reads inside the prefix it refuses
+    unknown names in. A walker blind to the second shape would find no settings
+    at all in the module that has the most of them, and would say so by passing
+    ([LAW:no-silent-failure] — the check is one-directional, so its way of
+    covering nothing looks exactly like its way of finding no fault).
+
+    Returns a mapping rather than a value so that the caller's update is one
+    unconditional statement whatever the node turns out to be
+    ([LAW:dataflow-not-control-flow]).
+    """
+    match node:
+        case ast.Assign(value=ast.Constant(value=str() as text)):
+            pass
+        case ast.Assign(
+            value=ast.BinOp(
+                left=ast.Name(id=str() as base),
+                op=ast.Add(),
+                right=ast.Constant(value=str() as tail),
+            )
+        ) if base in known:
+            text = known[base] + tail
+        case _:
+            return {}
+    return {
+        target.id: text for target in node.targets if isinstance(target, ast.Name)
+    }
+
+
 def _settings_read_from_the_environment() -> dict[str, str]:
     """Every variable name the package reads out of an environment, by module.
 
@@ -463,22 +502,18 @@ def _settings_read_from_the_environment() -> dict[str, str]:
     skipped, which is correct: that function reads whichever name its caller
     passed, and those callers are found here individually.
     """
-    import ast
-
     import elvenspeak
 
     found: dict[str, str] = {}
     for path in sorted(Path(elvenspeak.__file__).parent.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        # Module-level `NAME = "VALUE"`, so a setting exported as a constant —
-        # `router.CONSUL_URL` — is resolved to the variable it names.
-        constants = {
-            target.id: node.value.value
-            for node in tree.body
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-            for target in node.targets
-            if isinstance(target, ast.Name) and isinstance(node.value.value, str)
-        }
+        # Module-level string assignments, so a setting exported as a constant —
+        # `router.CONSUL_URL` — is resolved to the variable it names. In source
+        # order, because `settings.py` builds its names onto an earlier one.
+        constants: dict[str, str] = {}
+        for node in tree.body:
+            resolved = _string_assigned(node, constants)
+            constants.update(resolved)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -660,3 +695,168 @@ def test_the_readme_quotes_no_figure_the_measurement_does_not_have():
         f"README cites {sorted(cited - allowed)} where the measurement has "
         f"{sorted(allowed)}; a figure was changed in one place only"
     )
+
+
+# The ELVENSPEAK_ vocabulary: what this module reads, and what it refuses.
+#
+# The refusal exists because the opposite is silent. A jobspec carrying
+# ELVENSPEAK_CONCURRENT_SYNTHESES against an image that predated the setting
+# brought up a green allocation, showed the variable in its env, and ran
+# eight-wide anyway -- there was nothing an operator could have looked at.
+
+
+def test_a_name_in_this_prefix_that_nothing_reads_is_refused():
+    """[LAW:no-silent-failure] The near miss is named, so the fix is the message.
+
+    The misspelling is the one that actually happened, one letter short of the
+    setting whose absence was the whole of `piper-memory-9rc`.
+    """
+    with pytest.raises(ConfigError) as raised:
+        from_env(ELVENSPEAK_CONCURENT_SYNTHESES="4")
+    problem = "\n".join(raised.value.problems)
+    assert "ELVENSPEAK_CONCURENT_SYNTHESES" in problem
+    assert CONCURRENT_SYNTHESES in problem
+
+
+def test_the_nearest_real_name_is_offered_first():
+    """Ordered by resemblance, so the answer is the first thing read.
+
+    The whole read set is offered every time rather than a suggestion when one
+    is close enough: an operator who invented a name outright is exactly the one
+    for whom the real names are the answer, and a "did you mean" that sometimes
+    has nothing to say leaves them with a refusal and no vocabulary. What is
+    tested is therefore the ORDER, not the presence of one entry.
+    """
+    with pytest.raises(ConfigError) as raised:
+        from_env(ELVENSPEAK_CONCURENT_SYNTHESES="4")
+    offered = "\n".join(raised.value.problems)
+    assert offered.index(CONCURRENT_SYNTHESES) < offered.index("ELVENSPEAK_ENGINE")
+
+
+def test_a_retired_name_is_answered_for_rather_than_called_unread():
+    """[`_RETIRED`] is in the vocabulary, so its own advice is what comes back.
+
+    Both messages would be true of `ELVENSPEAK_TIMESTAMPS`; only one is useful.
+    Reporting it as unread would send an operator looking for a spelling of a
+    setting that no longer exists under any name.
+    """
+    with pytest.raises(ConfigError) as raised:
+        from_env(ELVENSPEAK_TIMESTAMPS="1")
+    problem = "\n".join(raised.value.problems)
+    assert "no longer read" in problem
+    assert "is not read by this build" not in problem
+
+
+def test_an_unread_name_joins_the_other_faults_rather_than_preempting_them():
+    """The promise this module's docstring makes: every problem at once.
+
+    Two independent faults, one run. Raised before the accumulation, this would
+    cost an operator one restart per mistake -- which is the failure the whole
+    `problems` list exists to prevent, reintroduced by the check meant to help.
+    """
+    with pytest.raises(ConfigError) as raised:
+        from_env(ELVENSPEAK_BANANA="1", PORT="not-a-number")
+    problem = "\n".join(raised.value.problems)
+    assert "ELVENSPEAK_BANANA is not read by this build" in problem
+    assert "PORT='not-a-number' is not a number" in problem
+
+
+def test_the_engines_own_prefixes_and_the_unprefixed_pair_are_untouched():
+    """The rule is scoped to `ELVENSPEAK_`, and nothing else is this module's.
+
+    Every engine parses its own prefix privately -- `PIPER_*`, `KOKORO_*`,
+    `CHATTERBOX_*`, `ROUTER_*` -- and a server-side check with an opinion about
+    those would refuse a legal variable of an engine it is not even running.
+    `HOST` and `PORT` are unprefixed on purpose: they are what every service on
+    this network is given.
+
+    One legal variable of each, all at once, on a boot that must come back
+    clean. Naming them from the modules that own them where a constant exists,
+    so this list cannot outlive a rename ([LAW:one-source-of-truth]).
+    """
+    settings = from_env(
+        PIPER_ALLOW_DOWNLOAD="0",
+        KOKORO_VOICES="af_heart",
+        **{
+            chatterbox.DEVICE: "cpu",
+            router.CONSUL_URL: "http://consul.invalid:8500",
+            "HOST": "127.0.0.1",
+            "PORT": "5002",
+        },
+    )
+    assert settings.host == "127.0.0.1"
+    assert settings.port == 5002
+
+
+def test_the_vocabulary_is_read_off_the_fields_of_whatever_it_is_given():
+    """[LAW:one-source-of-truth] Adding a setting is adding a field, and only that.
+
+    Asked about a dataclass this package has never seen, so the answer cannot
+    have been written down in advance: a hand-kept tuple beside `Settings` --
+    the shape this ticket exists to refuse -- passes every test that only ever
+    asks about `Settings`, and fails this one.
+
+    The second field declares nothing and must not appear. That is how
+    `engine_name`, `known_engines` and `concurrency_chosen` stay out of the
+    vocabulary: they are computed from other answers, not set by anybody.
+    """
+
+    @dataclass(frozen=True)
+    class Invented:
+        set_by_an_operator: str = field(metadata={"env": "ELVENSPEAK_INVENTED"})
+        worked_out_from_the_others: int = 0
+
+    assert _declared_by(Invented) == {"ELVENSPEAK_INVENTED"}
+
+
+class _Recording(Mapping[str, str]):
+    """An environment that remembers which names were asked for.
+
+    Every lookup lands on `__getitem__` -- `Mapping` builds `get` and `in` from
+    it -- so this records what `from_env` and the engine it opens really read,
+    rather than what a list somewhere claims they read. Iteration is not a
+    lookup and is not recorded: the unread-name check walks the whole
+    environment, and counting that as a read would make every name legal.
+    """
+
+    def __init__(self, values: dict[str, str]) -> None:
+        self._values = values
+        self.asked: set[str] = set()
+
+    def __getitem__(self, key: str) -> str:
+        self.asked.add(key)
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+
+def test_every_name_this_module_asks_about_is_one_it_answers_for():
+    """The drift check, run against the parse rather than against a list.
+
+    Equality in both directions, and each direction catches its own failure. A
+    name looked up but not in the vocabulary is a setting nothing could refuse a
+    misspelling of -- the bug this epic is about, arriving one setting later. A
+    name in the vocabulary but never looked up is a field lying about where it
+    comes from, which `tests/conftest.py` would then clear for nothing.
+
+    Against the whole vocabulary rather than [`READS`], because a retired name is
+    looked up too: `name in env` is how its refusal is found, and `Mapping` walks
+    that through the same lookup as a read. Both halves of the vocabulary are
+    therefore asked about on every boot, which is exactly what makes this
+    equality rather than containment.
+
+    It holds because this module asks after every one of its names on every boot
+    and lets the values decide what happens ([LAW:dataflow-not-control-flow]). A
+    setting read only when some other setting is present would fail here, and
+    should: it would be the first variable whose legality depended on the
+    environment it was found in.
+    """
+    recording = _Recording(env())
+    Settings.from_env(ENGINES, recording)
+    assert {name for name in recording.asked if name.startswith(PREFIX)} == {
+        name for name in VOCABULARY if name.startswith(PREFIX)
+    }
