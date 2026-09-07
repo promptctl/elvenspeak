@@ -5,6 +5,15 @@ values already known to be well-formed, so no handler asks whether a port was a
 number. A bad environment stops the process at startup, naming every problem at
 once, rather than surfacing as a 500 on somebody's first call.
 
+A bad environment includes one that names a setting this build does not have.
+[`PREFIX`] is the namespace this module answers for and [`VOCABULARY`] is
+everything in it that means anything here — derived from the [`Settings`] fields
+themselves, so the two cannot drift and adding a setting is adding a field. A
+name in that namespace outside that set was previously read by nobody and
+complained about by nobody, which is not a hypothetical: a jobspec carried
+`ELVENSPEAK_CONCURRENT_SYNTHESES` to an image that predated the setting, and the
+allocation came up green, showed the variable in its env, and ran eight-wide.
+
 # What is here and what is the engine's
 
 Only what is true whichever engine is running: which engine that is, which voice
@@ -32,22 +41,51 @@ the reusable half of this package would stop being importable without them.
 
 from __future__ import annotations
 
+import difflib
 import os
 import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 
 from . import memory, models
 from .engine import Capability
 from .provisioning import ConfigError, Prepared, Registry
 from .voices import Fallback, Substitution
 
-#: The variable [`Settings.concurrent_syntheses`] is read from. Named here so the
-#: one other place that has to know it — `tests/conftest.py`'s clearing list —
-#: reads it rather than spelling it again ([LAW:one-source-of-truth]); a second
-#: spelling stops clearing the real variable the day this one changes.
-CONCURRENT_SYNTHESES = "ELVENSPEAK_CONCURRENT_SYNTHESES"
+#: The prefix this module answers for, and the one thing that decides what
+#: [`Settings.from_env`] is entitled to refuse. Every other prefix in the
+#: environment belongs to an engine and is parsed privately by it — `PIPER_*` at
+#: [`elvenspeak.piper.configure`], `KOKORO_*`, `CHATTERBOX_*`, `ROUTER_*` — so a
+#: name outside this prefix is never this module's to have an opinion about.
+#:
+#: The names below are built from it rather than spelled out, so a variable this
+#: module reads cannot fall outside the prefix it checks. Spelled twice, they
+#: could: a mistyped `ELVESPEAK_` constant would be read by `from_env` and
+#: skipped by the check, which is a variable nothing can complain about — the
+#: exact silence this whole epic exists to end.
+PREFIX = "ELVENSPEAK_"
+
+#: The variables this module reads, one constant each. Named rather than written
+#: at the read site because a [`Settings`] field declares which one fills it, and
+#: the declaration and the read must be the same object rather than two spellings
+#: of one name ([LAW:one-source-of-truth]). That declaration is what makes
+#: [`VOCABULARY`] derivable, and it is why no list of legal names exists anywhere
+#: in this package: the fields are the list.
+ENGINE = PREFIX + "ENGINE"
+FALLBACK_VOICE = PREFIX + "FALLBACK_VOICE"
+API_KEY = PREFIX + "API_KEY"
+WITHHOLD = PREFIX + "WITHHOLD"
+CONCURRENT_SYNTHESES = PREFIX + "CONCURRENT_SYNTHESES"
+
+#: Unprefixed, and staying that way: they are what every service on this network
+#: is given, not this one's own vocabulary. Declared here all the same so that
+#: the fields they fill can name them like any other — a field filled from a
+#: variable it does not declare is a variable `tests/conftest.py` stops clearing.
+#: Being outside [`PREFIX`], they are never candidates for the refusal below,
+#: which is how that rule stays scoped without an exception list to maintain.
+HOST = "HOST"
+PORT = "PORT"
 
 #: What piper really cost per concurrent synthesis on the gpu node, as
 #: `(concurrent, MiB)` — `MemoryStats.Usage`, which is the figure Nomad reports,
@@ -108,7 +146,7 @@ def _default_concurrency() -> int:
 #: the next name is a line here ([LAW:dataflow-not-control-flow]).
 _RETIRED = {
     "ELVENSPEAK_TIMESTAMPS": (
-        "set ELVENSPEAK_WITHHOLD=timestamps to switch them off, or unset this"
+        f"set {WITHHOLD}=timestamps to switch them off, or unset this"
     )
 }
 
@@ -121,7 +159,7 @@ class Settings:
     #: opens it; the image's bake step acquires its assets. Both read this one
     #: value, which is what stops the build and the boot naming different
     #: engines.
-    engine: Prepared
+    engine: Prepared = field(metadata={"env": ENGINE})
     #: What that engine is called: its key in the registry [`from_env`] was
     #: handed. The name used to be computed here and thrown away, which left the
     #: server able to run an engine it could not name — and the alias
@@ -147,19 +185,19 @@ class Settings:
     #: [`elvenspeak.api.create_app`], which is the one place the two meet — and
     #: handed to the engine at [`Configure`] as well, so an engine that can spare
     #: itself the machinery does. Empty is the ordinary case: nothing withheld.
-    withheld: frozenset[Capability]
+    withheld: frozenset[Capability] = field(metadata={"env": WITHHOLD})
     #: Which voice answers for an id this server does not know. A name, or one of
     #: [`Substitution`]'s two answers for callers who named neither a voice nor
     #: nothing. Switching substitution off makes unknown ids 404 — correct for a
     #: closed deployment, wrong for anything replacing ElevenLabs, which is why
     #: it is not the default.
-    fallback: Fallback
+    fallback: Fallback = field(metadata={"env": FALLBACK_VOICE})
     #: The value callers must present in `xi-api-key`. `None` accepts every
     #: request, which is the right default for a service on a private network
     #: and the wrong one anywhere else.
-    api_key: str | None
-    host: str
-    port: int
+    api_key: str | None = field(metadata={"env": API_KEY})
+    host: str = field(metadata={"env": HOST})
+    port: int = field(metadata={"env": PORT})
     #: How much synthesis this process does at once. Callers beyond it wait
     #: rather than being refused, so a burst is slower than the limit rather than
     #: fatal to it.
@@ -208,7 +246,9 @@ class Settings:
     #: [LAW:one-source-of-truth] The default is the same callable [`from_env`]
     #: uses, not a second spelling of the formula: a constructed `Settings` and a
     #: parsed one must not disagree about what "unset" means.
-    concurrent_syntheses: int = field(default_factory=_default_concurrency)
+    concurrent_syntheses: int = field(
+        default_factory=_default_concurrency, metadata={"env": CONCURRENT_SYNTHESES}
+    )
     #: Whether a deployment chose [`concurrent_syntheses`], as against inheriting
     #: it from the host's core count.
     #:
@@ -229,18 +269,18 @@ class Settings:
 
         # Stripped like the values it is compared against downstream. A trailing
         # space in a .env file once made a plainly-present voice report missing.
-        fallback_text = env.get("ELVENSPEAK_FALLBACK_VOICE")
+        fallback_text = env.get(FALLBACK_VOICE)
         fallback: Fallback = (
             Substitution.FIRST_OFFERED
             if fallback_text is None
             else (fallback_text.strip() or Substitution.OFF)
         )
 
-        port_text = env.get("PORT", "5001")
+        port_text = env.get(PORT, "5001")
         try:
             port = int(port_text)
         except ValueError:
-            problems.append(f"PORT={port_text!r} is not a number")
+            problems.append(f"{PORT}={port_text!r} is not a number")
             port = 0
         else:
             # Parsing is not validating: -1 and 99999 are integers and neither is
@@ -248,7 +288,7 @@ class Settings:
             # produce, instead of failing later inside uvicorn with a worse
             # message.
             if not 1 <= port <= 65535:
-                problems.append(f"PORT={port} is outside 1-65535")
+                problems.append(f"{PORT}={port} is outside 1-65535")
 
         # Parsed like PORT and for the same reason: an operator with two bad
         # numbers should read both on the first run, not one per restart.
@@ -284,6 +324,23 @@ class Settings:
             if name in env
         ]
 
+        # [LAW:no-silent-failure] A name in this module's prefix that no field is
+        # filled from is a setting an operator believes they made: it is visible
+        # in the allocation's env, the service comes up green, and the process
+        # runs on the value they meant to change. That is how a jobspec came to
+        # carry `ELVENSPEAK_CONCURRENT_SYNTHESES` against an image that predated
+        # it, eight-wide, until the OOM kill.
+        #
+        # Joined to `problems` rather than raised, so that an operator with a
+        # misspelling and a bad port reads both on the first run — the promise
+        # this module's docstring makes and, for this class of fault, did not
+        # keep.
+        problems += [
+            f"{name} is not read by this build; it reads {_nearest(name)}"
+            for name in sorted(env)
+            if name.startswith(PREFIX) and name not in VOCABULARY
+        ]
+
         try:
             withheld = _withheld(env)
         except ValueError as error:
@@ -310,12 +367,66 @@ class Settings:
             known_engines=frozenset(engines),
             withheld=withheld,
             fallback=fallback,
-            api_key=env.get("ELVENSPEAK_API_KEY") or None,
-            host=env.get("HOST", "0.0.0.0"),
+            api_key=env.get(API_KEY) or None,
+            host=env.get(HOST, "0.0.0.0"),
             port=port,
             concurrent_syntheses=concurrent_syntheses,
             concurrency_chosen=concurrency_chosen,
         )
+
+
+def _declared_by(settings: type) -> frozenset[str]:
+    """The environment variables a settings dataclass declares it is filled from.
+
+    [LAW:one-source-of-truth] The whole of this module's vocabulary, read off the
+    fields that consume it. There is no list to keep beside the dataclass, so
+    there is nothing to forget to update: a field that declares no variable is
+    one nothing sets — [`Settings.engine_name`], [`Settings.known_engines`] and
+    [`Settings.concurrency_chosen`] are all computed from other answers — and a
+    field that declares one is legal by having said so.
+
+    Takes the class rather than reading [`Settings`] out of the module, so that
+    the derivation can be shown to be by-field on a dataclass it has never seen
+    ([LAW:behavior-not-structure]): a test that only ever asks it about
+    `Settings` cannot tell a derivation from a hard-coded answer.
+    """
+    return frozenset(
+        item.metadata["env"] for item in fields(settings) if "env" in item.metadata
+    )
+
+
+#: Every variable [`Settings.from_env`] is filled from, this module's own and the
+#: two unprefixed ones. Derived, so adding a setting is adding a field.
+READS: frozenset[str] = _declared_by(Settings)
+
+#: Every variable a startup here answers for by name: [`READS`], plus the
+#: [`_RETIRED`] names that are refused rather than ignored. The wider of the two
+#: because an operator who exports a retired name has still named something this
+#: build knows about, and telling them it is unread would be worse than useless —
+#: the retirement notice says what replaced it.
+#:
+#: This is the set a name in [`PREFIX`] is measured against, and it is what
+#: `tests/conftest.py` clears between tests, rather than either place keeping a
+#: list of its own.
+VOCABULARY: frozenset[str] = READS | frozenset(_RETIRED)
+
+
+def _nearest(name: str) -> str:
+    """[`READS`], ordered by resemblance to `name`, nearest first.
+
+    The whole set every time rather than a suggestion when one is close enough.
+    "Did you mean X?" has two shapes — one with a suggestion and one without —
+    and the second is what an operator who invented a name out of whole cloth
+    gets, which is exactly the operator for whom the real names are the answer
+    ([LAW:dataflow-not-control-flow]). One shape, sorted, always.
+
+    [`_RETIRED`] names are absent on purpose: they are answered for, not read,
+    and offering one as the near miss would send an operator to a variable that
+    stops the boot on its own terms.
+    """
+    return ", ".join(
+        difflib.get_close_matches(name, sorted(READS), n=len(READS), cutoff=0.0)
+    )
 
 
 def _curve() -> str:
@@ -419,15 +530,11 @@ def _withheld(env: Mapping[str, str]) -> frozenset[Capability]:
     becomes one: what this returns is subtracted from a set, and subtracting
     something absent is how sets already behave.
     """
-    named = [
-        text.strip()
-        for text in env.get("ELVENSPEAK_WITHHOLD", "").split(",")
-        if text.strip()
-    ]
+    named = [text.strip() for text in env.get(WITHHOLD, "").split(",") if text.strip()]
     unknown = [text for text in named if text.upper() not in Capability.__members__]
     if unknown:
         raise ValueError(
-            f"ELVENSPEAK_WITHHOLD names {', '.join(repr(text) for text in unknown)}, "
+            f"{WITHHOLD} names {', '.join(repr(text) for text in unknown)}, "
             f"which is not a capability; choose from "
             f"{', '.join(item.name.lower() for item in Capability)}"
         )
@@ -477,17 +584,13 @@ def _prepare(
         # say it is non-empty.
         raise ConfigError(["no engines registered"])
 
-    named = env.get("ELVENSPEAK_ENGINE", "").strip()
-    if "ELVENSPEAK_ENGINE" in env and not named:
-        raise ConfigError(
-            ["ELVENSPEAK_ENGINE is empty; name an engine or unset it"]
-        )
+    named = env.get(ENGINE, "").strip()
+    if ENGINE in env and not named:
+        raise ConfigError([f"{ENGINE} is empty; name an engine or unset it"])
     chosen = named or next(iter(engines))
     configure = engines.get(chosen)
     if configure is None:
-        raise ConfigError(
-            [f"ELVENSPEAK_ENGINE={chosen!r} is not one of: {', '.join(engines)}"]
-        )
+        raise ConfigError([f"{ENGINE}={chosen!r} is not one of: {', '.join(engines)}"])
     # [LAW:one-source-of-truth] The one place the chosen name and the registry's
     # keys are both in hand, so it is where the engine's declared model ids are
     # read. An engine module cannot do it: it is registered under a name it has

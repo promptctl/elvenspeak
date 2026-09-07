@@ -194,15 +194,21 @@ def reclaim():
 #: remembered in one test's clearing list and forgotten in the other, and the
 #: test that forgot goes flaky later with nothing pointing at the cause.
 #:
-#: Retired names belong here too. `ELVENSPEAK_TIMESTAMPS` is no longer read, and
-#: is refused rather than ignored — so a shell that still exports it fails a
-#: startup just as surely as one that mistyped a port.
+#: The server's half is read from `settings.VOCABULARY` and not listed, which is
+#: what makes that true rather than merely intended: it is derived from the
+#: `Settings` fields, so a setting added there is cleared here having been typed
+#: nowhere ([LAW:one-source-of-truth]). Retired names are in it too —
+#: `ELVENSPEAK_TIMESTAMPS` is no longer read and is refused rather than ignored,
+#: so a shell that still exports it fails a startup just as surely as one that
+#: mistyped a port. `HOST` and `PORT` are in it for the same reason: unprefixed,
+#: but still variables a `Settings` field declares it is filled from.
+#:
+#: The engines' half stays spelled out: those modules parse their own prefixes
+#: privately and expose no equivalent set, so a copy is the honest shape here.
+#: Where one does own its name as a constant, that constant is read rather than
+#: spelled again — Piper's and Kokoro's are literals because they expose none.
 _ENVIRONMENT = (
-    "ELVENSPEAK_ENGINE",
-    "ELVENSPEAK_FALLBACK_VOICE",
-    "ELVENSPEAK_API_KEY",
-    "ELVENSPEAK_WITHHOLD",
-    "ELVENSPEAK_TIMESTAMPS",
+    *sorted(settings_mod.VOCABULARY),
     "PIPER_VOICES",
     "PIPER_MODELS_DIR",
     "PIPER_ALLOW_DOWNLOAD",
@@ -210,11 +216,6 @@ _ENVIRONMENT = (
     "KOKORO_MODELS_DIR",
     "KOKORO_MODEL",
     "KOKORO_ALLOW_DOWNLOAD",
-    # Read from the module that owns the name rather than spelled again. Piper's
-    # and Kokoro's are literals here because those modules expose no constant to
-    # read; this one does, and a second spelling of it would stop clearing the
-    # real variable the day it changed ([LAW:one-source-of-truth]).
-    settings_mod.CONCURRENT_SYNTHESES,
     router.CONSUL_URL,
     router.BACKEND_API_KEY,
     chatterbox.MODELS_DIR,
@@ -222,8 +223,6 @@ _ENVIRONMENT = (
     chatterbox.SPEAKERS,
     chatterbox.LANGUAGES,
     chatterbox.ALLOW_DOWNLOAD,
-    "HOST",
-    "PORT",
 )
 
 
