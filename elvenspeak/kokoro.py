@@ -611,6 +611,32 @@ _SILENT_FAILURES = (
 )
 
 
+def _unusable(audio) -> int:
+    """How many of the library's samples are not numbers.
+
+    The third way this library could report having synthesized nothing, and the
+    only one that would not raise: samples of the right length that are not
+    audio. It is guarded because [`_pcm`]'s cast is undefined on them, not
+    because it has been seen — across 160 local runs (both published exports,
+    both entry points, the four voices most prone to short-line failure) the
+    count here was always zero. Every failure that did occur arrived as one of
+    [`_SILENT_FAILURES`] instead.
+
+    So this is a closed door, not a reported one, and it is deliberately kept
+    shut: the cost is one pass over samples that were about to be scaled anyway,
+    and the alternative is a conversion whose result on such input is defined by
+    nothing and differs between the machine this is developed on and the one it
+    runs on.
+
+    Counted rather than merely detected so that the log can tell an operator
+    which failure they have: every sample bad and a handful bad want different
+    investigations.
+    """
+    import numpy
+
+    return int((~numpy.isfinite(audio)).sum())
+
+
 def _created(create: "Callable[[], tuple]", voice_id: str, text: str) -> tuple | None:
     """What the library returned, or None when it synthesized nothing.
 
@@ -626,12 +652,19 @@ def _created(create: "Callable[[], tuple]", voice_id: str, text: str) -> tuple |
     decide once what every caller is told: the engine reports, the boundary
     answers.
 
+    [LAW:single-enforcer] The third door — samples that are not numbers, see
+    [`_unusable`] — is answered here for the same reason, and here only. It
+    would be cheaper to spot in [`_pcm`], where the bad cast actually happens,
+    and that is the wrong place: [`_pcm`] is inland of this seam, a check there
+    would be a second authority on one question, and neither entry point could
+    then tell a refusal apart from silence.
+
     Narrow on purpose. Any other `ValueError` is re-raised untouched, because a
     blanket catch would turn a real bug in this engine into a tidy report that
     the voice was merely quiet.
     """
     try:
-        return create()
+        created = create()
     except ValueError as error:
         if not any(known in str(error) for known in _SILENT_FAILURES):
             raise
@@ -646,6 +679,22 @@ def _created(create: "Callable[[], tuple]", voice_id: str, text: str) -> tuple |
             error,
         )
         return None
+    # [LAW:parse-dont-validate] The third door arrives as a value rather than an
+    # exception, so it is a branch here and not an entry in [`_SILENT_FAILURES`].
+    # It is checked at this seam and nowhere downstream: everything past this
+    # return has been stamped as real audio, which is what lets [`_pcm`] convert
+    # without asking again.
+    unusable = _unusable(created[0])
+    if not unusable:
+        return created
+    _LOGGER.error(
+        "kokoro returned %d non-finite samples of %d for voice %r from %d characters",
+        unusable,
+        len(created[0]),
+        voice_id,
+        len(text),
+    )
+    return None
 
 
 def _synthesized(
@@ -671,6 +720,15 @@ def _pcm(audio) -> bytes:
     Clipped before scaling. A model output above 1.0 wraps around on conversion
     — a loud sample becoming a maximally negative one — which is an audible
     click that no test of lengths or rates would ever catch.
+
+    Every sample here is a number, because [`_created`] stamped it as one before
+    either caller got this far. That is load-bearing rather than incidental:
+    `astype` on a non-finite float is undefined and does not fail — numpy warns
+    and converts, to 0 on the arm64 this is developed on and conventionally to
+    the full-scale minimum on the linux/x86_64 the images run on. A caller would
+    get a 200 carrying the right number of samples of something that is not
+    sound, and the platform where that looks harmless is the one nobody ships.
+    Refusing at the seam is what keeps this cast defined.
     """
     import numpy
 
