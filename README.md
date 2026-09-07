@@ -414,6 +414,52 @@ also decides which engine's libraries get installed, so the piper image carries
 no Kokoro and the kokoro image carries no piper-tts — one word, `ELVENSPEAK_ENGINE`,
 picks the dependencies, the baked assets and the running engine together.
 
+### Smoke-testing a built image
+
+The publish job proves the bytes arrived — the registry holds the digest that was
+pushed and the config blob carries the right labels. The suite proves the
+*program*: it runs in-process against `create_app`. Neither one ever starts the
+process, so the gap between the program and the artifact had no check in it at
+all, which is how an engine shipped in an image that had never run anywhere.
+`smoke.py` is that check. It runs the image and asks it two questions.
+
+```
+python3 smoke.py registry.sanctuary.gdn/elvenspeak-piper:2026.09.07.1
+```
+
+The first question is whether `/health` answers 200, probed from outside the
+container. The second is whether the image's *own* `HEALTHCHECK` — the command an
+orchestrator runs — exits 0 inside the running container. Both the port and that
+command are read out of the image itself, not out of the Dockerfile and not out
+of a constant in the script: a published image and a working tree are routinely
+different commits, so reading the source would prove a property of the source
+while claiming to have proved the artifact. It exits 0 only when both questions
+passed, and 1 otherwise. The container's logs are printed on every path, success
+included — on a passing run they are the only account anyone has of what the
+artifact said at boot — and the container is removed either way.
+
+Standard-library Python 3 only, so `python3 smoke.py <image>` is the whole
+invocation: it imports nothing from `elvenspeak`, and there is no virtualenv to
+activate. It drives `docker`, `podman` or Apple's `container`, taking the first
+of those three that is installed unless `--runtime` names one. `--timeout` caps
+the wait for a 200 at 180 seconds, which is the slowest engine's model load
+rather than the fastest's, and `--memory`, `--platform` and a repeatable
+`--env NAME=VALUE` shape the run:
+
+```
+python3 smoke.py registry.sanctuary.gdn/elvenspeak-piper:2026.09.07.1 \
+  --runtime container --platform linux/amd64 --memory 3072m \
+  --env ELVENSPEAK_CONCURRENT_SYNTHESES=2
+```
+
+That exits 0 in about 11 seconds on an arm64 Mac running the amd64 image. Drop
+the `--env` and the same image under the same 3072 MiB exits 1 in about four
+seconds, having printed its own refusal in the logs.
+
+Nothing in CI runs this yet: the publish workflow still builds, pushes and
+verifies the registry without ever starting the process, so smoking an image is
+a deliberate manual act today.
+
 ### Pointing openconv at it
 
 ```
