@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 from fastapi.dependencies import models as _fastapi_dependencies
 
-from elvenspeak import chatterbox, router, settings as settings_mod
+from elvenspeak import chatterbox, memory, router, settings as settings_mod
 from elvenspeak.engine import (
     Capability,
     Prosody,
@@ -197,6 +197,30 @@ def reclaim():
 #: Retired names belong here too. `ELVENSPEAK_TIMESTAMPS` is no longer read, and
 #: is refused rather than ignored — so a shell that still exports it fails a
 #: startup just as surely as one that mistyped a port.
+@pytest.fixture(autouse=True)
+def _unconfined(monkeypatch):
+    """Every test runs as though nothing caps this process's memory.
+
+    [LAW:no-ambient-temporal-coupling] `settings.unsized` refuses to serve when a
+    process is memory-confined and named no synthesis ceiling, and `_ENVIRONMENT`
+    below clears that variable for every test — so on a memory-confined runner
+    every test that reaches `main.build()`'s success path would fail for a reason
+    it has nothing to do with. `.gitea/workflows/publish-image.yaml` instruments
+    cgroup memory for this exact job because of past SIGKILL-137s, so that runner
+    is a live candidate and the suite would go red there and green here.
+
+    Worse than red, in one case: `_app` refuses before `Catalog` runs, so
+    `test_a_fallback_naming_no_offered_voice_exits_the_same_way` would fail while
+    the check it exists to pin was never reached.
+
+    So the world is stated rather than inherited, in the same spirit as the
+    variable clearing below. A test that is about confinement passes a limit to
+    `unsized` directly, or overrides this fixture — see `tests/test_settings.py`
+    and `tests/test_main.py`.
+    """
+    monkeypatch.setattr(memory, "limit", lambda *_: memory.Unconfined.UNCONFINED)
+
+
 _ENVIRONMENT = (
     "ELVENSPEAK_ENGINE",
     "ELVENSPEAK_FALLBACK_VOICE",
