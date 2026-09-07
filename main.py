@@ -11,7 +11,8 @@ import logging
 
 from elvenspeak import create_app
 from elvenspeak.engines import ENGINES
-from elvenspeak.settings import Settings, reported_or_exit
+from elvenspeak.provisioning import ConfigError
+from elvenspeak.settings import Settings, reported_or_exit, unsized
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -29,7 +30,16 @@ def _app(settings: Settings):
     Built before the server starts rather than in a lifespan hook, so a voice
     that cannot be fetched or opened is a refusal to boot with a non-zero exit,
     not a process that binds a port and then answers 500 to everything.
+
+    The same moment answers [`unsized`], and it is asked here rather than in the
+    parse because the parse is shared with the bake step, which synthesizes
+    nothing and must not be refused for the width it will never use. Asked before
+    the engine opens, so a deployment that cannot serve safely says so without
+    first spending a minute loading models it is about to abandon.
     """
+    refusal = unsized(settings)
+    if refusal is not None:
+        raise ConfigError([refusal])
     return create_app(settings, settings.engine.open())
 
 
