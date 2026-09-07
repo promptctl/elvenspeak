@@ -39,6 +39,68 @@ LIMIT_FILES = (
     Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
 )
 
+#: Where this process's own cgroup is named, relative to those mounts.
+PROC_SELF_CGROUP = Path("/proc/self/cgroup")
+
+
+def _own(text: str) -> tuple[Path, ...]:
+    """The limit files for the cgroup `/proc/self/cgroup` says this process is in.
+
+    The mount root answers for this process only when it has a cgroup namespace of
+    its own — Docker's default on a v2 host. Under `--cgroupns=host`, on a v1 host,
+    or under Nomad's exec and raw_exec drivers, the root files are the HOST's and
+    typically say `max`, while the task's real limit sits in a subtree. That is the
+    worst failure available to this module: the read SUCCEEDS, the answer is
+    uncapped, no warning fires because nothing went wrong, and a genuinely confined
+    deployment is served as unconfined by the code written to stop exactly that.
+
+    So the subtree is asked first and the root second. It is a generalisation
+    rather than a replacement: with a private namespace the v2 line reads `0::/`,
+    the resolved path collapses onto the root file, and nothing changes where
+    nothing was wrong.
+
+    v2 writes one line, `0::<path>`. v1 writes one per controller,
+    `<id>:<controllers>:<path>`, and only the one listing `memory` is ours.
+    """
+    found: list[Path] = []
+    for line in text.splitlines():
+        fields = line.split(":", 2)
+        if len(fields) != 3:
+            continue
+        _, controllers, path = fields
+        relative = path.strip().lstrip("/")
+        if not relative:
+            # The root, which LIMIT_FILES already names.
+            continue
+        if not controllers:
+            found.append(Path("/sys/fs/cgroup") / relative / "memory.max")
+        elif "memory" in controllers.split(","):
+            found.append(
+                Path("/sys/fs/cgroup/memory") / relative / "memory.limit_in_bytes"
+            )
+    return tuple(found)
+
+
+def _candidates(proc_self_cgroup: Path | None = None) -> tuple[Path, ...]:
+    """Every file that might hold this process's limit, most specific first.
+
+    Absent `/proc/self/cgroup` — macOS, and anywhere else without procfs — is not a
+    failure: it means there is no subtree to resolve, and the roots are all there
+    ever was to ask.
+
+    The default is resolved on the call rather than bound to the signature, so the
+    module's paths are read when they are used and not snapshotted at import
+    ([LAW:no-ambient-temporal-coupling]) — a default bound at definition time is a
+    copy of the world taken before anyone asked for it, and it silently outlives
+    every later change to the original.
+    """
+    source = PROC_SELF_CGROUP if proc_self_cgroup is None else proc_self_cgroup
+    try:
+        text = source.read_text()
+    except OSError:
+        return LIMIT_FILES
+    return _own(text) + LIMIT_FILES
+
 #: cgroup v1 has no word for "uncapped" and writes a number instead: the counter's
 #: maximum, rounded down to a page multiple. Anything at or above it is the kernel
 #: saying "nothing", not a deployment saying "eight exbibytes", and reading it as a
@@ -89,13 +151,15 @@ def _parsed(text: str) -> Limit:
     return Unconfined.UNCONFINED if value >= _V1_UNLIMITED else value
 
 
-def limit(files: Iterable[Path] = LIMIT_FILES) -> Limit:
+def limit(files: Iterable[Path] | None = None) -> Limit:
     """This process's own memory ceiling, or that it has none.
 
-    The first readable file decides. A file that is not there is not an error —
-    exactly one of these layouts exists on a given host, and neither exists on
-    macOS — which is why absence continues the search and an exhausted search is
-    [`Unconfined.UNCONFINED`] rather than a raise.
+    The first readable file decides, and [`_candidates`] orders them so that this
+    process's own cgroup is asked before the mount root — see [`_own`] for why the
+    root is not automatically ours. A file that is not there is not an error —
+    exactly one layout exists on a given host, most subtree paths do not exist, and
+    neither exists on macOS — which is why absence continues the search and an
+    exhausted search is [`Unconfined.UNCONFINED`] rather than a raise.
 
     [LAW:no-silent-failure] Absence and unreadability are told apart, because they
     are the same answer and not the same event. Both end as unconfined, and
@@ -109,7 +173,7 @@ def limit(files: Iterable[Path] = LIMIT_FILES) -> Limit:
     account of what was read belongs beside it ([LAW:effects-at-boundaries]), and
     reporting from one caller would leave the next one free to read in silence.
     """
-    for path in files:
+    for path in _candidates() if files is None else files:
         try:
             text = path.read_text()
         except FileNotFoundError:

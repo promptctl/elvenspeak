@@ -554,13 +554,34 @@ def test_a_confined_deployment_that_named_no_ceiling_is_refused():
 
 
 def test_the_refusal_names_the_width_it_would_have_run_at():
-    """A refusal an operator cannot act on is a crashloop with better prose."""
+    """A refusal an operator cannot act on is a crashloop with better prose.
+
+    Asserted on the exact phrase rather than on the bare number, because the bare
+    number collides: the message carries 1140, 1164, 1335, 1773 and 2048, so on a
+    4-core host (the gpu node) the default of 8 is a substring of "2048", and on a
+    3-core host 7 is a substring of "1773". Either way the assertion would hold
+    with the interpolation deleted from the f-string entirely.
+    """
     settings = from_env()
     refusal = unsized(settings, CONFINED)
-    assert str(settings.concurrent_syntheses) in refusal
+    assert f"({settings.concurrent_syntheses} here)" in refusal
     # The measured curve, so the number to choose is in the message rather than
     # in a README the operator is not reading at 3am.
     assert "1335" in refusal
+
+
+def test_the_refusal_converts_the_limit_it_was_actually_handed():
+    """A confinement that collides with nothing already in the message.
+
+    2048 is the historical incident figure, hardcoded in the narrative sentence
+    every refusal carries -- so a test asserting "2048 MiB" against a 2048 MiB
+    confinement passes on that sentence alone, even if the byte-to-MiB conversion
+    divided by the wrong constant or read the wrong variable. At 3072 the figure
+    can only come from the conversion.
+    """
+    refusal = unsized(from_env(), 3072 * 1048576)
+    assert refusal is not None
+    assert "3072 MiB" in refusal
 
 
 def test_a_confined_deployment_that_chose_a_ceiling_serves():

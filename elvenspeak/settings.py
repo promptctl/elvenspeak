@@ -53,11 +53,12 @@ CONCURRENT_SYNTHESES = "ELVENSPEAK_CONCURRENT_SYNTHESES"
 #: `(concurrent, MiB)` — `MemoryStats.Usage`, which is the figure Nomad reports,
 #: since cgroup v2 leaves RSS at 0. The first row is idle with five voices loaded.
 #:
-#: Data rather than prose because it is quoted in three places — the field comment
-#: below, the refusal [`unsized`] renders, and the README's description of the
-#: variable — and an operator picks a number off it ([LAW:one-source-of-truth]).
-#: `tests/test_settings.py` holds the README equal to this, so the three cannot
-#: drift into disagreeing about what was measured.
+#: Data rather than prose because an operator picks a ceiling off it, and it used
+#: to be written out longhand everywhere it was needed ([LAW:one-source-of-truth]).
+#: Now the field comment below points at it and [`_curve`] renders it for the
+#: refusal, so README.md holds the only remaining literal copy of the figures —
+#: which is why `tests/test_settings.py` holds that copy equal to this one, in
+#: both directions.
 #:
 #: The last row is the one that matters: 8 concurrent is what the 4-core node's
 #: CPU-derived default produced, and it died against a 2048 MiB limit.
@@ -188,8 +189,9 @@ class Settings:
     #: real capacity change out of a default nobody set.
     #:
     #: [`MEASURED_PIPER`] is what it really cost on that node -- pick from that
-    #: rather than from taste. It is not repeated here: a table quoted in four
-    #: places is four chances to update three of them.
+    #: rather than from taste. The figures are not written out here: a table
+    #: copied to each place that needs it is one chance per copy to update all
+    #: but one of them.
     #:
     #: A CPU-derived default for a memory bound is the wrong unit on purpose: it
     #: preserves today's behaviour exactly. The right unit is the deployment's own
