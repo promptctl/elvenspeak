@@ -136,15 +136,20 @@ def test_a_limit_that_exists_and_cannot_be_read_is_reported_rather_than_assumed(
     capped, whose limit file this process cannot read, is served as uncapped by the
     very module that exists to stop that. It cannot be refused (there is no number
     to refuse against), so it is said out loud.
+
+    A directory rather than a `chmod 000` file, for the reason
+    `tests/test_voices.py` gives at the equivalent spot: the gitea runner executes
+    this suite as root (`user: root (uid 0)`, printed by the publish workflow) and
+    root reads a mode-000 file happily, so that version would fail on the one
+    runner that matters. `read_text()` on a directory raises `IsADirectoryError` —
+    an `OSError`, and not a `FileNotFoundError`, so it lands on exactly the arm
+    under test — and it refuses whoever asks.
     """
     unreadable = tmp_path / "memory.max"
-    unreadable.write_text("2147483648")
-    unreadable.chmod(0o000)
-    try:
-        with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
-            assert memory.limit((unreadable,)) is memory.Unconfined.UNCONFINED
-    finally:
-        unreadable.chmod(0o644)
+    unreadable.mkdir()
+
+    with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
+        assert memory.limit((unreadable,)) is memory.Unconfined.UNCONFINED
 
     assert any(r.levelno == logging.WARNING for r in caplog.records), (
         "a limit file that exists and cannot be read was treated as no limit "
