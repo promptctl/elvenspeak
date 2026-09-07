@@ -169,3 +169,72 @@ def test_a_layout_that_is_simply_absent_does_not_warn(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
         assert memory.limit((tmp_path / "absent",)) is memory.Unconfined.UNCONFINED
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+# ------------------------------- whose cgroup the mount root actually answers for
+
+# The mount root is this process's own limit only under a private cgroup
+# namespace. These pin the resolution against real `/proc/self/cgroup` text,
+# because the failure it prevents is the silent one: on a host namespace the root
+# read SUCCEEDS and reports the host's uncapped value, so nothing warns and a
+# confined deployment is served as unconfined.
+
+
+def test_a_private_namespace_resolves_to_the_root_and_changes_nothing():
+    """Docker's default on a v2 host writes `0::/`, and the root IS ours there."""
+    assert memory._own("0::/\n") == ()
+
+
+def test_a_host_namespace_resolves_to_this_process_own_subtree():
+    """`--cgroupns=host`: the root is the host's, and ours is named in the line."""
+    assert memory._own("0::/docker/abc123\n") == (
+        Path("/sys/fs/cgroup/docker/abc123/memory.max"),
+    )
+
+
+def test_a_v1_line_resolves_through_the_memory_controller_only():
+    """v1 writes one line per controller and only the memory one is ours."""
+    text = "7:memory:/docker/abc\n3:cpu,cpuacct:/docker/abc\n"
+    assert memory._own(text) == (
+        Path("/sys/fs/cgroup/memory/docker/abc/memory.limit_in_bytes"),
+    )
+
+
+def test_a_nomad_task_scope_resolves():
+    """The shape this service actually deploys into."""
+    assert memory._own("0::/nomad.slice/elvenspeak.scope\n") == (
+        Path("/sys/fs/cgroup/nomad.slice/elvenspeak.scope/memory.max"),
+    )
+
+
+def test_the_processes_own_cgroup_is_asked_before_the_root(tmp_path, monkeypatch):
+    """Order is the whole point: the root would answer, and answer wrongly.
+
+    A host-namespace root says `max` and a read of it succeeds, so asking it first
+    would return unconfined with nothing amiss to report -- the silent
+    misdetection this ordering exists to prevent.
+    """
+    own = tmp_path / "own"
+    own.write_text("2147483648")
+    root = tmp_path / "root"
+    root.write_text("max")
+    monkeypatch.setattr(memory, "_own", lambda _: (own,))
+    monkeypatch.setattr(memory, "LIMIT_FILES", (root,))
+    proc = tmp_path / "proc"
+    proc.write_text("0::/whatever\n")
+    monkeypatch.setattr(memory, "PROC_SELF_CGROUP", proc)
+
+    assert memory.limit() == 2147483648
+
+
+def test_no_proc_self_cgroup_falls_back_to_the_roots(tmp_path, monkeypatch):
+    """macOS, and anywhere else without procfs: there is no subtree to resolve."""
+    monkeypatch.setattr(memory, "PROC_SELF_CGROUP", tmp_path / "absent")
+    assert memory._candidates(tmp_path / "absent") == memory.LIMIT_FILES
+
+
+def test_a_malformed_line_is_skipped_rather_than_guessed_at():
+    """A line this was not written against can only invent a path."""
+    assert memory._own("garbage\n0::/real\n") == (
+        Path("/sys/fs/cgroup/real/memory.max"),
+    )
