@@ -1023,7 +1023,29 @@ jobs:
           TAG: ${{ steps.tag.outputs.image-tag }}
         run: |
           set -euo pipefail
-          python3 smoke.py "$REGISTRY/$IMAGE:$TAG" --runtime docker
+
+          # WHAT EACH ENGINE NEEDS BEFORE IT CAN ANSWER AT ALL, as one table.
+          #
+          # The first run of this step gave every engine an empty environment and two
+          # legs went red for it -- not because the images were broken but because a
+          # setting with no default was missing, which is a red that says nothing about
+          # the commit. Observed on gitea run 38: chatterbox printed
+          # `CHATTERBOX_DEVICE=(unset) is not one of cuda, mps, cpu` and the router
+          # `ROUTER_CONSUL_URL is required`, each from inside its own container.
+          #
+          # `cpu` because this runner has no accelerator, and the smoke only boots the
+          # image -- nothing here synthesizes, so the 8-33x real time that makes cpu the
+          # wrong choice for a deployment costs nothing at this gate.
+          #
+          # A table and not a branch: every engine runs the same commands below and only
+          # these values differ, so an engine absent from it is one that needs nothing
+          # rather than one that is treated differently. [LAW:dataflow-not-control-flow]
+          case "$ENGINE" in
+            chatterbox) boot=(--env CHATTERBOX_DEVICE=cpu) ;;
+            *)          boot=() ;;
+          esac
+
+          python3 smoke.py "$REGISTRY/$IMAGE:$TAG" --runtime docker "${boot[@]}"
 
       # Nothing here decides whether to push. Reaching this step at all is the decision,
       # taken by the step above by exiting 0.

@@ -462,7 +462,10 @@ registry untouched and `:latest` unmoved. The step order is the guarantee, and
 `tests/test_workflow.py` fails if a later edit ever puts the push first.
 
 The CI run is unconfined: it passes no `--memory`, and therefore no
-`ELVENSPEAK_CONCURRENT_SYNTHESES` either. Running it confined would prove the
+`ELVENSPEAK_CONCURRENT_SYNTHESES` either. It does pass whatever a given engine
+needs before it can answer at all — `CHATTERBOX_DEVICE=cpu` for chatterbox, which
+has no default because cpu runs that model at 8-33x real time. Nothing is
+synthesized at this gate, so cpu costs nothing here. Running it confined would prove the
 shape the fleet actually deploys, but the ceiling has to be a measured per-engine
 number rather than a guess — a guessed ceiling turns a build red for a reason
 that has nothing to do with the commit — and those numbers do not exist yet.

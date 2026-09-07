@@ -177,6 +177,31 @@ def test_no_image_is_pushed_before_it_has_been_proved_to_run():
     )
 
 
+#: The smoke step's boot table — the engines that need something in their
+#: environment before the image can answer at all.
+_BOOT_TABLE = re.compile(r"^\s*([a-z][a-z0-9_]*)\)\s*boot=\(", re.MULTILINE)
+
+
+def test_the_smoke_boot_table_names_only_real_engines():
+    """A setting keyed to an engine that no longer exists is a silent no-op.
+
+    Two of four legs went red on the first real run of the smoke step because the
+    image was handed an empty environment and a setting with no default was
+    missing -- a red that says nothing about the commit. The table that fixed it
+    is keyed by engine name, and a name that stops matching stops applying,
+    quietly: the leg goes back to booting bare and fails for the original reason,
+    with the table sitting right there looking like it covers the case.
+
+    Only this direction is checkable. That a *new* engine needs no boot
+    environment cannot be read off any file -- it is a fact about that engine's
+    settings, and the run that discovers it is the one this table exists to stop
+    being surprised by.
+    """
+    named = set(_BOOT_TABLE.findall(workflow_yaml()))
+    assert named, "matched no boot-table entries — the regex is wrong, not the file"
+    assert named <= set(ENGINES), f"boot table names non-engines: {named - set(ENGINES)}"
+
+
 #: The CPU row of `elvenspeak.chatterbox`'s measurement table, which owns both
 #: figures every other file quotes: the RTF range, then resident and peak.
 _MEASURED = re.compile(
