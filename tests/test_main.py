@@ -22,6 +22,9 @@ from conftest import MODELS_DIR as MODELS
 from fastapi import FastAPI
 
 import main
+from elvenspeak import memory as main_memory
+from elvenspeak.engines import ENGINES
+from elvenspeak.settings import Settings
 
 
 def test_the_factory_entry_point_exits_the_same_way(monkeypatch, capsys):
@@ -84,3 +87,53 @@ def test_a_good_environment_builds_an_application(monkeypatch):
 
     app = main.build()
     assert isinstance(app, FastAPI)
+
+
+@pytest.mark.usefixtures("piper_installed")
+def test_a_confined_deployment_that_named_no_ceiling_exits_rather_than_serving(
+    monkeypatch, capsys
+):
+    """The refusal reaches an operator through the same door every other one does.
+
+    Driven through `main.build()` rather than through `settings.unsized`, because
+    what is being checked is the WIRING: the check lives at the composition root
+    precisely so the bake step does not inherit it, and a check placed correctly
+    but never called is exactly as useless as no check. `tests/test_settings.py`
+    covers what it decides; this covers that anything asks it.
+
+    The confinement is stated rather than read, since a developer machine is
+    unconfined and this test would otherwise pass by never reaching the code.
+    """
+    monkeypatch.setenv("PIPER_VOICES", VOICE)
+    monkeypatch.setenv("PIPER_MODELS_DIR", str(MODELS))
+    monkeypatch.setenv("PIPER_ALLOW_DOWNLOAD", "0")
+    monkeypatch.delenv("ELVENSPEAK_ENGINE", raising=False)
+    monkeypatch.delenv("ELVENSPEAK_CONCURRENT_SYNTHESES", raising=False)
+    monkeypatch.setattr(main_memory, "limit", lambda *_: 2048 * 1048576)
+
+    with pytest.raises(SystemExit) as raised:
+        main.build()
+
+    assert raised.value.code == 2
+    assert "ELVENSPEAK_CONCURRENT_SYNTHESES" in capsys.readouterr().err
+
+
+@pytest.mark.usefixtures("piper_installed")
+def test_the_refusal_does_not_reach_the_bake_step(monkeypatch):
+    """The reason the check is not in the shared parse.
+
+    `python -m elvenspeak.bake` runs inside the image build and synthesizes
+    nothing, so a synthesis ceiling is not its concern. If this refusal sat on
+    `Settings.from_env`, a memory-limited builder would fail every image build --
+    and since nothing in CI runs a container, the first evidence would be a
+    publish that spent a dated tag on an image that cannot boot.
+    """
+    monkeypatch.setenv("PIPER_VOICES", VOICE)
+    monkeypatch.setenv("PIPER_MODELS_DIR", str(MODELS))
+    monkeypatch.setenv("PIPER_ALLOW_DOWNLOAD", "0")
+    monkeypatch.delenv("ELVENSPEAK_ENGINE", raising=False)
+    monkeypatch.delenv("ELVENSPEAK_CONCURRENT_SYNTHESES", raising=False)
+    monkeypatch.setattr(main_memory, "limit", lambda *_: 2048 * 1048576)
+
+    # Parses clean under exactly the confinement that refuses a server.
+    assert Settings.from_env(ENGINES) is not None
