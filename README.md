@@ -327,6 +327,27 @@ ROUTER_BACKEND_API_KEY=            # the key the engines behind it are guarded
                                    # router need not share a secret.
 ```
 
+Those `ELVENSPEAK_` names are the whole set. Any other name in that prefix stops
+the boot rather than being ignored — `ELVENSPEAK_CONCURENT_SYNTHESES is not read
+by this build; it reads ELVENSPEAK_CONCURRENT_SYNTHESES, ELVENSPEAK_ENGINE, …`,
+the real names ordered by resemblance, nearest first. It exits 2 like any other
+configuration fault and joins the list rather than cutting it short, so a
+misspelling and an out-of-range `PORT` come back together on the first run. A
+retired name is refused too, but with what replaced it: `ELVENSPEAK_TIMESTAMPS`
+below is the only one.
+
+Silence was the whole bug. A jobspec set `ELVENSPEAK_CONCURRENT_SYNTHESES`
+against image 2026.09.03.1, which predated the commit that introduced the
+setting: the allocation came up green, the variable was plainly visible in its
+env, and the process ran eight-wide anyway — the width that OOM-killed
+elvenspeak-piper. Nothing an operator could look at told that apart from a
+working configuration.
+
+Only the `ELVENSPEAK_` prefix is checked this way. `PIPER_*`, `KOKORO_*`,
+`CHATTERBOX_*` and `ROUTER_*` are each parsed privately by the engine that owns
+them, and a legal engine variable is never refused here. `PORT` and `HOST` are
+read but never refused: they are the network's names, not this server's.
+
 `ELVENSPEAK_WITHHOLD` is in the server's group and stays there whichever engine
 runs. It names capabilities rather than features — the same closed vocabulary the
 engines declare against — so `ELVENSPEAK_WITHHOLD=timestamps` means the timestamp
