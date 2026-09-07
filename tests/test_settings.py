@@ -16,6 +16,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import asyncio
+import threading
+import time
+
 import pytest
 from conftest import _ENVIRONMENT, DeclaredPrepared, serves
 
@@ -307,6 +311,95 @@ def test_non_numeric_port_is_refused():
     with pytest.raises(ConfigError) as raised:
         from_env(PORT="eighty")
     assert "not a number" in str(raised.value)
+
+
+@pytest.mark.parametrize("at_once", ["0", "-1"])
+def test_a_concurrency_below_one_is_refused(at_once):
+    """Zero is not "no limit" here, and refusing it is what keeps that true.
+
+    A gate that disappears at zero would be a second mode of the whole synthesis
+    path — bounded and unbounded — reachable by one character in an environment
+    file, and the unbounded one is the shape that OOM-killed elvenspeak-piper
+    (piper-memory-9rc). A deployment that wants no practical bound says so with a
+    number ([LAW:no-mode-explosion]).
+    """
+    with pytest.raises(ConfigError) as raised:
+        from_env(ELVENSPEAK_CONCURRENT_SYNTHESES=at_once)
+    assert "at least 1" in str(raised.value)
+
+
+def test_a_non_numeric_concurrency_is_refused():
+    with pytest.raises(ConfigError) as raised:
+        from_env(ELVENSPEAK_CONCURRENT_SYNTHESES="lots")
+    assert "not a number" in str(raised.value)
+
+
+def test_the_concurrency_default_is_the_bound_that_was_already_there():
+    """[LAW:one-source-of-truth] Naming the ceiling must not move it.
+
+    Every synthesis dispatches through `asyncio.to_thread`, so the default
+    executor's width was already the limit on concurrent synthesis — set by the
+    host rather than by anyone's decision. The default here has to be that same
+    number, or switching this setting on silently changes a deployment's capacity
+    while claiming to change nothing.
+
+    MEASURED, NOT RESTATED, and that is the whole design of this test. It used to
+    assert against a second copy of CPython's formula, spelled `os.cpu_count()` —
+    which is not the formula 3.13's `ThreadPoolExecutor` uses. A copy cannot
+    detect its own drift, so the check written to enforce the invariant was the
+    one thing structurally unable to see it break.
+
+    Saturating the executor and counting asks the question of the thing itself,
+    so the next time CPython changes this a test fails rather than a deployment
+    quietly getting a ceiling nobody chose.
+    """
+
+    async def widest() -> int:
+        peak = 0
+        running = 0
+        counting = threading.Lock()
+
+        def occupy() -> None:
+            nonlocal peak, running
+            with counting:
+                running += 1
+                peak = max(peak, running)
+            # Long enough that every worker the executor will create is still
+            # inside this sleep when the last of the first batch is dispatched.
+            # `_adjust_thread_count` reuses an idle thread rather than spawning
+            # another, so a sleep short enough for the first worker to finish
+            # early would undercount the width and fail this test with a message
+            # about the default — on a loaded runner, which this suite has
+            # already met once at load average 104.
+            time.sleep(0.5)
+            with counting:
+                running -= 1
+
+        # Comfortably more than any width `min(32, ...)` can produce, submitted
+        # in one loop iteration so the executor is saturated rather than sampled.
+        await asyncio.gather(*(asyncio.to_thread(occupy) for _ in range(80)))
+        return peak
+
+    assert from_env().concurrent_syntheses == asyncio.run(widest())
+
+
+@pytest.mark.parametrize("unset", ["", "   "])
+def test_an_empty_concurrency_reads_as_unset(unset):
+    """The spelling the README documents must not crashloop the service.
+
+    `ELVENSPEAK_CONCURRENT_SYNTHESES=` with nothing after it is how the README
+    lists it and how a Nomad `env { NAME = "" }` arrives. Every other optional
+    variable in that block already tolerates empty as unset; a number that alone
+    refused it would fail a deployment copied from the documentation.
+    """
+    assert (
+        from_env(ELVENSPEAK_CONCURRENT_SYNTHESES=unset).concurrent_syntheses
+        == from_env().concurrent_syntheses
+    )
+
+
+def test_a_chosen_concurrency_is_what_arrives():
+    assert from_env(ELVENSPEAK_CONCURRENT_SYNTHESES="3").concurrent_syntheses == 3
 
 
 def test_a_bad_environment_exits_two_naming_every_problem(monkeypatch, capsys):

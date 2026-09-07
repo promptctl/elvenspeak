@@ -258,6 +258,34 @@ ELVENSPEAK_WITHHOLD=               # comma-separated capabilities to switch off:
                                    # timestamps, speed. Naming one the engine
                                    # never had is fine; a name that is not a
                                    # capability refuses to start.
+ELVENSPEAK_CONCURRENT_SYNTHESES=   # how much synthesis happens at once. Extra
+                                   # callers wait rather than being refused. It
+                                   # bounds synthesis WORK, not open streams: a
+                                   # caller reading slowly holds no slot. On a
+                                   # router deployment it still gates the reads
+                                   # from backends -- nothing special-cases the
+                                   # router -- so set it there for the fan-out
+                                   # that process needs, not for a model's
+                                   # memory. It only ever
+                                   # NARROWS: threads still come from asyncio's
+                                   # default pool, so a value above
+                                   # min(32, process_cpu_count+4) has no effect.
+                                   # Default: min(32, process_cpu_count + 4) —
+                                   # what asyncio's default thread pool already
+                                   # imposed, so the default changes nothing.
+                                   # That default does NOT shrink to fit a CPU
+                                   # quota: process_cpu_count follows AFFINITY,
+                                   # so `docker --cpus=2` or a Nomad
+                                   # resources.cpu on a big host still answers
+                                   # the host's full width. Only pinning
+                                   # (--cpuset-cpus, Nomad resources.cores)
+                                   # lowers it. So on a memory-limited
+                                   # deployment you must set this yourself. Set
+                                   # it from the deployment's MEMORY limit, not
+                                   # its cores: piper measured ~1140 MiB idle,
+                                   # 1164 at 2 concurrent, 1335 at 4, 1773 at 8,
+                                   # and was OOM-killed by an eight-way burst
+                                   # against a 2048 MiB limit.
 PORT=5001
 HOST=0.0.0.0
 
