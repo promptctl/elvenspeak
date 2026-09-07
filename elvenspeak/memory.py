@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,20 +44,26 @@ PROC_SELF_CGROUP = Path("/proc/self/cgroup")
 
 
 def _own(text: str) -> tuple[Path, ...]:
-    """The limit files for the cgroup `/proc/self/cgroup` says this process is in.
+    """Every cgroup limit file that binds this process, leaf first then ancestors.
 
-    The mount root answers for this process only when it has a cgroup namespace of
-    its own — Docker's default on a v2 host. Under `--cgroupns=host`, on a v1 host,
-    or under Nomad's exec and raw_exec drivers, the root files are the HOST's and
-    typically say `max`, while the task's real limit sits in a subtree. That is the
-    worst failure available to this module: the read SUCCEEDS, the answer is
-    uncapped, no warning fires because nothing went wrong, and a genuinely confined
-    deployment is served as unconfined by the code written to stop exactly that.
+    Two reasons the mount root is not simply this process's limit.
 
-    So the subtree is asked first and the root second. It is a generalisation
-    rather than a replacement: with a private namespace the v2 line reads `0::/`,
-    the resolved path collapses onto the root file, and nothing changes where
-    nothing was wrong.
+    It may not be OURS. The root holds our confinement only when we have a cgroup
+    namespace of our own — Docker's default on a v2 host, and not guaranteed
+    anywhere else. Under `--cgroupns=host`, on a v1 host, or under Nomad's exec and
+    raw_exec drivers, the root files are the HOST's and typically say `max` while
+    the task's real limit sits in a subtree.
+
+    And the leaf may not be the WHOLE of it. The kernel enforces the minimum of
+    `memory.max` along the entire chain, so a leaf that says `max` under a slice
+    carrying the real ceiling is still confined by that slice. Reading only the
+    leaf would report unconfined for a process the kernel is actively capping.
+
+    Both are the same failure and it is the worst one available here: the read
+    SUCCEEDS, the answer is uncapped, nothing warns because nothing went wrong, and
+    a genuinely confined deployment is served as unconfined by the module written
+    to stop precisely that. So every file that binds us is returned, and [`limit`]
+    takes the tightest — which is what the kernel does.
 
     v2 writes one line, `0::<path>`. v1 writes one per controller,
     `<id>:<controllers>:<path>`, and only the one listing `memory` is ours.
@@ -68,16 +74,19 @@ def _own(text: str) -> tuple[Path, ...]:
         if len(fields) != 3:
             continue
         _, controllers, path = fields
-        relative = path.strip().lstrip("/")
-        if not relative:
-            # The root, which LIMIT_FILES already names.
-            continue
         if not controllers:
-            found.append(Path("/sys/fs/cgroup") / relative / "memory.max")
+            mount, name = Path("/sys/fs/cgroup"), "memory.max"
         elif "memory" in controllers.split(","):
-            found.append(
-                Path("/sys/fs/cgroup/memory") / relative / "memory.limit_in_bytes"
-            )
+            mount, name = Path("/sys/fs/cgroup/memory"), "memory.limit_in_bytes"
+        else:
+            continue
+        # The leaf, then each ancestor up to but excluding the mount itself, which
+        # LIMIT_FILES already names.
+        relative = PurePosixPath(path.strip())
+        for parent in (relative, *relative.parents):
+            if parent == PurePosixPath("/"):
+                continue
+            found.append(mount / str(parent).lstrip("/") / name)
     return tuple(found)
 
 
@@ -97,7 +106,22 @@ def _candidates(proc_self_cgroup: Path | None = None) -> tuple[Path, ...]:
     source = PROC_SELF_CGROUP if proc_self_cgroup is None else proc_self_cgroup
     try:
         text = source.read_text()
-    except OSError:
+    except FileNotFoundError:
+        return LIMIT_FILES
+    except OSError as error:
+        # [LAW:no-silent-failure] The same split [`limit`] makes, at the step that
+        # decides which files it will even consult. Unreadable here means the
+        # subtree cannot be resolved, so only the roots are asked -- and if this
+        # process is in a host namespace those are someone else's and typically
+        # uncapped, which is the silent misdetection this module exists to close,
+        # reached one layer up from where it was closed.
+        _LOGGER.warning(
+            "cannot read %s, so this process's own cgroup cannot be resolved and "
+            "only the mount roots will be consulted; if those are not this "
+            "process's own, a real memory limit will go unseen: %s",
+            source,
+            error,
+        )
         return LIMIT_FILES
     return _own(text) + LIMIT_FILES
 
@@ -154,25 +178,29 @@ def _parsed(text: str) -> Limit:
 def limit(files: Iterable[Path] | None = None) -> Limit:
     """This process's own memory ceiling, or that it has none.
 
-    The first readable file decides, and [`_candidates`] orders them so that this
-    process's own cgroup is asked before the mount root — see [`_own`] for why the
-    root is not automatically ours. A file that is not there is not an error —
-    exactly one layout exists on a given host, most subtree paths do not exist, and
-    neither exists on macOS — which is why absence continues the search and an
-    exhausted search is [`Unconfined.UNCONFINED`] rather than a raise.
+    THE TIGHTEST OF EVERY FILE THAT BINDS US, not the first one found, because
+    that is what the kernel enforces: `memory.max` applies down the whole chain, so
+    a process is held to the smallest limit any of its cgroups declares. Taking the
+    first would report a leaf's `max` while an ancestor was doing the capping.
 
-    [LAW:no-silent-failure] Absence and unreadability are told apart, because they
-    are the same answer and not the same event. Both end as unconfined, and
-    unconfined is the answer that declines to refuse anything — so a limit that
-    exists and could not be read is a deployment that believes it is capped being
-    served as uncapped, which is the OOM this module exists to prevent, arrived at
-    through the module itself. It is a warning naming the file. A layout that is
-    simply not on this host is the ordinary case and says so at INFO.
+    Erring tight is deliberate and is the only safe direction. Too tight refuses a
+    boot that would have been fine — loudly, with the number in the message, and an
+    operator can act on it. Too loose is the SIGKILL with no traceback that this
+    module exists to prevent. So a candidate that cannot be read is skipped rather
+    than treated as unbounded, and the search continues past it.
+
+    A file that is not there is not an error — exactly one layout exists on a given
+    host, most ancestor paths do not exist, and neither exists on macOS — which is
+    why absence is quiet and an exhausted search is [`Unconfined.UNCONFINED`]
+    rather than a raise. A file that is there and cannot be READ is different: it
+    may hold the limit that binds us, so it is a warning naming the file
+    ([LAW:no-silent-failure]).
 
     Reported here rather than by the caller: the read is the boundary, so the
     account of what was read belongs beside it ([LAW:effects-at-boundaries]), and
     reporting from one caller would leave the next one free to read in silence.
     """
+    tightest: Limit = Unconfined.UNCONFINED
     for path in _candidates() if files is None else files:
         try:
             text = path.read_text()
@@ -180,15 +208,18 @@ def limit(files: Iterable[Path] | None = None) -> Limit:
             continue
         except OSError as error:
             _LOGGER.warning(
-                "cannot read %s, so this process is treated as having no memory "
-                "limit; if it does have one, nothing here will refuse a synthesis "
+                "cannot read %s, so any limit it holds is not being applied; if "
+                "this process is confined, nothing here will refuse a synthesis "
                 "ceiling too wide for it: %s",
                 path,
                 error,
             )
             continue
-        limit = _parsed(text)
+        found = _parsed(text)
+        if not isinstance(found, int):
+            continue
         _LOGGER.info("memory limit: %s says %r", path, text.strip())
-        return limit
-    _LOGGER.info("memory limit: none -- no cgroup layout here caps this process")
-    return Unconfined.UNCONFINED
+        tightest = found if not isinstance(tightest, int) else min(tightest, found)
+    if not isinstance(tightest, int):
+        _LOGGER.info("memory limit: none -- nothing here caps this process")
+    return tightest
