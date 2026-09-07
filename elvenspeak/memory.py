@@ -20,9 +20,12 @@ wide as its 4-core host (8), and an eight-way burst OOM-killed it against a
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from enum import Enum
 from pathlib import Path
+
+_LOGGER = logging.getLogger(__name__)
 
 #: cgroup v2 first, then v1. A host presents one layout or the other, so this is a
 #: search for the one that is here rather than a preference between two that both
@@ -94,17 +97,34 @@ def limit(files: Iterable[Path] = LIMIT_FILES) -> Limit:
     macOS — which is why absence continues the search and an exhausted search is
     [`Unconfined.UNCONFINED`] rather than a raise.
 
-    That is the one place this could go quietly wrong, so it does not go quietly:
-    a file present but unreadable would also read as unconfined, and unconfined is
-    the answer that declines to refuse anything. `create_app` logs which file was
-    consulted and what it said, so a deployment that believes it is capped and is
-    being read as unconfined says so at boot rather than at the OOM
-    ([LAW:no-silent-failure]).
+    [LAW:no-silent-failure] Absence and unreadability are told apart, because they
+    are the same answer and not the same event. Both end as unconfined, and
+    unconfined is the answer that declines to refuse anything — so a limit that
+    exists and could not be read is a deployment that believes it is capped being
+    served as uncapped, which is the OOM this module exists to prevent, arrived at
+    through the module itself. It is a warning naming the file. A layout that is
+    simply not on this host is the ordinary case and says so at INFO.
+
+    Reported here rather than by the caller: the read is the boundary, so the
+    account of what was read belongs beside it ([LAW:effects-at-boundaries]), and
+    reporting from one caller would leave the next one free to read in silence.
     """
     for path in files:
         try:
             text = path.read_text()
-        except OSError:
+        except FileNotFoundError:
             continue
-        return _parsed(text)
+        except OSError as error:
+            _LOGGER.warning(
+                "cannot read %s, so this process is treated as having no memory "
+                "limit; if it does have one, nothing here will refuse a synthesis "
+                "ceiling too wide for it: %s",
+                path,
+                error,
+            )
+            continue
+        limit = _parsed(text)
+        _LOGGER.info("memory limit: %s says %r", path, text.strip())
+        return limit
+    _LOGGER.info("memory limit: none -- no cgroup layout here caps this process")
     return Unconfined.UNCONFINED

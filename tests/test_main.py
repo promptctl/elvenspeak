@@ -24,7 +24,7 @@ from fastapi import FastAPI
 import main
 from elvenspeak import memory as main_memory
 from elvenspeak.engines import ENGINES
-from elvenspeak.settings import Settings
+from elvenspeak.settings import Settings, unsized
 
 
 def test_the_factory_entry_point_exits_the_same_way(monkeypatch, capsys):
@@ -125,15 +125,26 @@ def test_the_refusal_does_not_reach_the_bake_step(monkeypatch):
     `python -m elvenspeak.bake` runs inside the image build and synthesizes
     nothing, so a synthesis ceiling is not its concern. If this refusal sat on
     `Settings.from_env`, a memory-limited builder would fail every image build --
-    and since nothing in CI runs a container, the first evidence would be a
-    publish that spent a dated tag on an image that cannot boot.
+    and since nothing in CI runs a container (piper-build-b4h), the first evidence
+    would be a publish that spent a dated tag on an image that cannot boot.
+
+    Both halves are asserted on one `Settings`, so the test cannot pass by the
+    confinement never being reached: the parse yields a usable value, AND the
+    server-side question answers "refuse" for that very value under that very
+    limit. It goes red if the refusal is ever moved into `from_env`, which is the
+    regression it exists to catch.
     """
     monkeypatch.setenv("PIPER_VOICES", VOICE)
     monkeypatch.setenv("PIPER_MODELS_DIR", str(MODELS))
     monkeypatch.setenv("PIPER_ALLOW_DOWNLOAD", "0")
     monkeypatch.delenv("ELVENSPEAK_ENGINE", raising=False)
     monkeypatch.delenv("ELVENSPEAK_CONCURRENT_SYNTHESES", raising=False)
-    monkeypatch.setattr(main_memory, "limit", lambda *_: 2048 * 1048576)
 
-    # Parses clean under exactly the confinement that refuses a server.
-    assert Settings.from_env(ENGINES) is not None
+    settings = Settings.from_env(ENGINES)
+
+    confined = 2048 * 1048576
+    assert unsized(settings, confined) is not None, (
+        "the confinement this test states must actually refuse a server, or the "
+        "assertion below proves nothing about the parse being exempt from it"
+    )
+    assert settings.engine is not None

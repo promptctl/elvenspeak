@@ -15,6 +15,7 @@ that matter most are the ones pinning that a real limit stays a real limit.
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
@@ -23,6 +24,18 @@ import pytest
 from elvenspeak import memory
 
 WORKFLOW = Path(__file__).parent.parent / ".gitea" / "workflows" / "publish-image.yaml"
+
+
+@pytest.fixture(autouse=True)
+def _unconfined():
+    """Overrides conftest's stub, which would otherwise answer for the subject.
+
+    Every other module wants `memory.limit` pinned to unconfined so the suite does
+    not inherit the runner's cgroup state. This module IS `memory.limit`, so the
+    stub would make its tests assert against the stub and pass no matter what the
+    real function did — green, and measuring nothing.
+    """
+    yield
 
 
 def test_a_v2_limit_is_read_as_that_many_bytes():
@@ -111,3 +124,43 @@ def test_the_workflow_names_no_cgroup_memory_file_this_module_misses():
     """The other direction, which is the one that catches a layout being added."""
     named = set(re.findall(r"/sys/fs/cgroup/\S*memory[\w./]*", WORKFLOW.read_text()))
     assert named == {str(path) for path in memory.LIMIT_FILES}
+
+
+def test_a_limit_that_exists_and_cannot_be_read_is_reported_rather_than_assumed(
+    tmp_path, caplog
+):
+    """[LAW:no-silent-failure] The one case where this module could cause the OOM.
+
+    Absent and unreadable end at the same answer -- unconfined -- and unconfined is
+    the answer that declines to refuse anything. So a deployment that really is
+    capped, whose limit file this process cannot read, is served as uncapped by the
+    very module that exists to stop that. It cannot be refused (there is no number
+    to refuse against), so it is said out loud.
+    """
+    unreadable = tmp_path / "memory.max"
+    unreadable.write_text("2147483648")
+    unreadable.chmod(0o000)
+    try:
+        with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
+            assert memory.limit((unreadable,)) is memory.Unconfined.UNCONFINED
+    finally:
+        unreadable.chmod(0o644)
+
+    assert any(r.levelno == logging.WARNING for r in caplog.records), (
+        "a limit file that exists and cannot be read was treated as no limit "
+        "without saying so -- the silent path this module exists to close"
+    )
+    assert str(unreadable) in caplog.text
+
+
+def test_a_layout_that_is_simply_absent_does_not_warn(tmp_path, caplog):
+    """The ordinary case, which must stay quiet or the warning means nothing.
+
+    Exactly one cgroup layout exists on a given host and neither exists on macOS,
+    so warning on absence would fire on every developer machine and on the
+    not-present half of every real one -- and a warning that fires always is a
+    warning nobody reads when it finally matters.
+    """
+    with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
+        assert memory.limit((tmp_path / "absent",)) is memory.Unconfined.UNCONFINED
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
