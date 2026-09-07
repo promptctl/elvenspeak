@@ -464,8 +464,10 @@ def unsized(
     Called from the composition root rather than from [`Settings.from_env`],
     because the parse is shared with `python -m elvenspeak.bake` and that step
     synthesizes nothing. A refusal on the shared parse would fail image builds
-    under a memory-limited builder — and since nothing in CI runs a container,
-    the first evidence would be a publish that spent a dated tag on an image that
+    under a memory-limited builder — and CI now runs each image before it is
+    pushed (piper-build-b4h.2) but runs it UNCONFINED, so a refusal that fires
+    only under a ceiling is still not something any check here would see. The
+    first evidence would be a publish that spent a dated tag on an image that
     cannot boot.
     """
     limit = memory.limit() if confinement is None else confinement
