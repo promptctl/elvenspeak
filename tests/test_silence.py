@@ -291,6 +291,98 @@ def test_kokoro_does_not_swallow_another_reduction_that_is_not_the_pause_one():
         kokoro._synthesized(_Crashing(other), KOKORO_VOICE, "Hi", Prosody(speed=1.0))
 
 
+# ------------------------------------- the door that arrives as a value, not a raise
+
+
+class _Returning:
+    """Stands in for `Kokoro`, returning exactly the samples it was built with.
+
+    Both entry points, for the same reason [`_Crashing`] covers both: the
+    translation is shared and a change that stops wiring one of them up would
+    otherwise stay green.
+    """
+
+    def __init__(self, audio) -> None:
+        self._audio = audio
+
+    def create(self, *args, **kwargs):
+        return (self._audio, 24000)
+
+    def create_timed(self, *args, **kwargs):
+        return (self._audio, 24000, ())
+
+
+def _samples(*values):
+    """Float samples as the library hands them over."""
+    import numpy
+
+    return numpy.array(values, dtype="float32")
+
+
+#: The two shapes non-finite output can take. Constructed rather than captured:
+#: 160 local runs over both published exports never produced any, so this door is
+#: pinned by what the conversion would do with such samples, not by a recording of
+#: the library emitting them. The partial case is here because it is the one a
+#: length check would wave through. Both are one fact to a caller -- kokoro made
+#: no audio -- so every test over this door runs over both.
+NOT_AUDIO = [
+    pytest.param(_samples(float("nan"), float("nan")), id="every-sample"),
+    pytest.param(_samples(0.5, float("nan"), -0.5), id="some-samples"),
+]
+
+
+@pytest.mark.parametrize("audio", NOT_AUDIO)
+def test_kokoro_reports_no_samples_when_the_library_returns_nan(audio):
+    """[LAW:no-silent-failure] The door that does not raise, answered like the two that do.
+
+    The other two doors cost a caller an honest refusal. This one would cost them
+    a 200: `astype` on a non-finite float is undefined, so the bytes come back the
+    right length and are not sound.
+    """
+    assert (
+        kokoro._synthesized(_Returning(audio), KOKORO_VOICE, "Si", Prosody(speed=1.0))
+        == b""
+    )
+
+
+@pytest.mark.parametrize("audio", NOT_AUDIO)
+def test_speak_timed_reports_no_samples_when_the_library_returns_nan(audio):
+    spoken = _engine_over(_Returning(audio)).speak_timed(
+        KOKORO_VOICE, "Si", Prosody(speed=1.0)
+    )
+    assert spoken.pcm == b""
+    assert spoken.timings == ()
+
+
+def test_the_refusal_is_asserted_and_never_what_a_nan_casts_to():
+    """The regression pin, and the reason it is written this way.
+
+    `(numpy.clip(nan, -1, 1) * 32767).astype("<i2")` has no defined value: on the
+    arm64 this is developed on it is 0, and on the linux/x86_64 the images run on
+    it is conventionally the full-scale minimum. A test that asserted either
+    number would pass on one platform, fail on the other, and — worse — pin the
+    corrupt output as the expected answer. So what is pinned is that no bytes come
+    back at all, which is true on every platform and false the moment the seam
+    goes back to converting.
+    """
+    for audio in (_samples(float("nan")), _samples(float("inf"))):
+        assert not kokoro._synthesized(
+            _Returning(audio), KOKORO_VOICE, "Si", Prosody(speed=1.0)
+        )
+
+
+def test_audio_that_is_merely_silent_is_still_audio():
+    """The other half, and the reason this checkpoint is not paranoia.
+
+    Zeros are finite, so they are samples — a voice that genuinely says nothing
+    loud is not a voice that failed, and refusing it would take the service down
+    while looking in the logs exactly like the bug this fixes.
+    """
+    assert kokoro._synthesized(
+        _Returning(_samples(0.0, 0.0, 0.0)), KOKORO_VOICE, "Si", Prosody(speed=1.0)
+    ) == bytes(6)
+
+
 # `speak_timed` reaches the same translation through the library's other entry
 # point. Driven end to end rather than through `_created` directly, because the
 # extraction that gave both callers one catch is exactly the kind of change that
