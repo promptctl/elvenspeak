@@ -15,7 +15,12 @@ from pathlib import Path
 import pytest
 from conftest import ENGINE_LIBRARIES
 
-from elvenspeak.encoding import EncodingFailed, encode, encode_stream
+from elvenspeak.encoding import (
+    EncodingFailed,
+    encode,
+    encode_stream,
+    unbounded_pull,
+)
 from elvenspeak.formats import OutputFormat
 
 NATIVE_RATE = 22050
@@ -95,7 +100,15 @@ async def test_a_producer_failure_is_raised_not_encoded_as_a_short_answer():
 
 async def encode_stream_to_bytes(chunks):
     return b"".join(
-        [part async for part in encode_stream(chunks, NATIVE_RATE, OutputFormat.parse("pcm_22050"))]
+        [
+            part
+            async for part in encode_stream(
+                chunks,
+                NATIVE_RATE,
+                OutputFormat.parse("pcm_22050"),
+                pull_a_chunk=unbounded_pull,
+            )
+        ]
     )
 
 
