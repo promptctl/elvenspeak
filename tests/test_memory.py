@@ -73,18 +73,24 @@ def test_neither_layout_present_is_an_answer_and_not_a_raise(tmp_path):
     assert memory.limit(absent) is memory.Unconfined.UNCONFINED
 
 
-def test_the_first_readable_layout_decides(tmp_path):
-    """A host presents one layout; the search stops at the one that is there."""
+def test_a_single_readable_layout_decides(tmp_path):
+    """A host presents one layout; the absent one contributes nothing."""
     v1 = tmp_path / "v1"
     v1.write_text("4294967296")
     assert memory.limit((tmp_path / "absent-v2", v1)) == 4294967296
 
 
-def test_a_present_layout_is_preferred_over_a_later_one(tmp_path):
-    v2, v1 = tmp_path / "v2", tmp_path / "v1"
-    v2.write_text("2147483648")
-    v1.write_text("4294967296")
-    assert memory.limit((v2, v1)) == 2147483648
+def test_the_tightest_limit_wins_whichever_order_it_is_found_in(tmp_path):
+    """[FRAMING:representation] The kernel holds a process to the smallest cap.
+
+    Asserted in both orders, because taking the FIRST readable answer passes one
+    of them by accident -- and the accident is the direction that loses a limit.
+    """
+    tight, loose = tmp_path / "tight", tmp_path / "loose"
+    tight.write_text("2147483648")
+    loose.write_text("4294967296")
+    assert memory.limit((tight, loose)) == 2147483648
+    assert memory.limit((loose, tight)) == 2147483648
 
 
 def test_unconfined_is_not_a_number_any_arithmetic_can_reach():
@@ -189,6 +195,21 @@ def test_a_host_namespace_resolves_to_this_process_own_subtree():
     """`--cgroupns=host`: the root is the host's, and ours is named in the line."""
     assert memory._own("0::/docker/abc123\n") == (
         Path("/sys/fs/cgroup/docker/abc123/memory.max"),
+        Path("/sys/fs/cgroup/docker/memory.max"),
+    )
+
+
+def test_every_ancestor_is_resolved_and_not_only_the_leaf():
+    """The kernel enforces `memory.max` down the whole chain, not just at the leaf.
+
+    A leaf that says `max` beneath a slice carrying the real ceiling is still
+    confined by that slice, so reading only the leaf would report unconfined for a
+    process the kernel is actively capping.
+    """
+    assert memory._own("0::/a/b/c\n") == (
+        Path("/sys/fs/cgroup/a/b/c/memory.max"),
+        Path("/sys/fs/cgroup/a/b/memory.max"),
+        Path("/sys/fs/cgroup/a/memory.max"),
     )
 
 
@@ -197,6 +218,7 @@ def test_a_v1_line_resolves_through_the_memory_controller_only():
     text = "7:memory:/docker/abc\n3:cpu,cpuacct:/docker/abc\n"
     assert memory._own(text) == (
         Path("/sys/fs/cgroup/memory/docker/abc/memory.limit_in_bytes"),
+        Path("/sys/fs/cgroup/memory/docker/memory.limit_in_bytes"),
     )
 
 
@@ -204,15 +226,31 @@ def test_a_nomad_task_scope_resolves():
     """The shape this service actually deploys into."""
     assert memory._own("0::/nomad.slice/elvenspeak.scope\n") == (
         Path("/sys/fs/cgroup/nomad.slice/elvenspeak.scope/memory.max"),
+        Path("/sys/fs/cgroup/nomad.slice/memory.max"),
     )
 
 
-def test_the_processes_own_cgroup_is_asked_before_the_root(tmp_path, monkeypatch):
-    """Order is the whole point: the root would answer, and answer wrongly.
+def test_an_ancestor_limit_binds_a_leaf_that_declares_none(tmp_path, monkeypatch):
+    """The bug the ancestor walk exists for, end to end.
 
-    A host-namespace root says `max` and a read of it succeeds, so asking it first
-    would return unconfined with nothing amiss to report -- the silent
-    misdetection this ordering exists to prevent.
+    The leaf says `max` and the slice above it carries the ceiling -- which is a
+    shape a scheduler is free to produce. Reading the leaf alone answers
+    "unconfined" for a process the kernel is capping at 2 GiB, and nothing warns,
+    because nothing failed.
+    """
+    leaf, ancestor = tmp_path / "leaf", tmp_path / "ancestor"
+    leaf.write_text("max")
+    ancestor.write_text("2147483648")
+
+    assert memory.limit((leaf, ancestor)) == 2147483648
+
+
+def test_the_processes_own_cgroup_outranks_an_uncapped_root(tmp_path, monkeypatch):
+    """The root would answer, and answer wrongly.
+
+    A host-namespace root says `max` and a read of it succeeds, so a search that
+    took the first readable answer would return unconfined with nothing amiss to
+    report -- the silent misdetection this resolution exists to prevent.
     """
     own = tmp_path / "own"
     own.write_text("2147483648")
@@ -263,3 +301,51 @@ def test_a_malformed_line_is_skipped_rather_than_guessed_at():
     assert memory._own("garbage\n0::/real\n") == (
         Path("/sys/fs/cgroup/real/memory.max"),
     )
+
+
+def test_an_unreadable_candidate_does_not_end_the_search(tmp_path, caplog):
+    """The `continue` is the fallback the docstrings call important.
+
+    A single-element tuple cannot tell `continue` from an early return -- both
+    answer unconfined -- so this pairs an unreadable candidate with a readable,
+    meaningful one. If a refactor short-circuited on `OSError`, the real limit
+    below it would be silently lost, which is the failure this module is about.
+    """
+    unreadable = tmp_path / "unreadable"
+    unreadable.mkdir()
+    readable = tmp_path / "readable"
+    readable.write_text("2147483648")
+
+    with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
+        assert memory.limit((unreadable, readable)) == 2147483648
+
+    assert str(unreadable) in caplog.text, (
+        "the unreadable candidate must still be reported -- it may have held a "
+        "tighter limit than the one that was found"
+    )
+
+
+def test_an_unreadable_proc_self_cgroup_is_reported(tmp_path, caplog, monkeypatch):
+    """[LAW:no-silent-failure] The same split, at the step that picks the files.
+
+    If this is unreadable the subtree cannot be resolved and only the mount roots
+    are consulted -- and in a host namespace those are someone else's and usually
+    uncapped. That is the module's own silent misdetection, reached one layer above
+    where it was closed, so it does not pass quietly.
+    """
+    unreadable = tmp_path / "cgroup"
+    unreadable.mkdir()
+    monkeypatch.setattr(memory, "PROC_SELF_CGROUP", unreadable)
+
+    with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
+        assert memory._candidates() == memory.LIMIT_FILES
+
+    assert str(unreadable) in caplog.text
+
+
+def test_an_absent_proc_self_cgroup_does_not_warn(tmp_path, caplog, monkeypatch):
+    """macOS and anything else without procfs: expected, so it must stay quiet."""
+    monkeypatch.setattr(memory, "PROC_SELF_CGROUP", tmp_path / "absent")
+    with caplog.at_level(logging.WARNING, logger="elvenspeak.memory"):
+        assert memory._candidates() == memory.LIMIT_FILES
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
