@@ -21,11 +21,14 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 
+import fleetstub
 import uvicorn
-from conftest import DeclaredEngine, DeclaredPrepared, declaring
+from conftest import SERVES, DeclaredEngine, DeclaredPrepared, declaring
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from fleetstub import health_entry
 
-from elvenspeak import api
+from elvenspeak import api, router
 from elvenspeak.discovery import ENGINE_TAG
 from elvenspeak.engine import Capability, Voice
 from elvenspeak.engines import ENGINES
@@ -96,6 +99,30 @@ def engine_app(
     return api.create_app(settings, DeclaredEngine(declaring(capabilities, voices)))
 
 
+def routed(consul_url: str) -> TestClient:
+    """A client on the whole server a routed deployment boots, not just its engine.
+
+    [LAW:one-source-of-truth] Written out once. Four tests across two files need
+    the same `Settings`, and the copies were already drifting toward being edited
+    separately — a router's deployment settings are one fact about this project,
+    not one per test. Here rather than in `test_router`, where it began, because
+    `test_smoke` needs the same deployment to ask whether the stub fleet is enough
+    to make one healthy, and a test module importing another test module's helper
+    is a dependency neither file declares.
+    """
+    settings = Settings(
+        engine=router.configure({router.CONSUL_URL: consul_url}, frozenset(), SERVES),
+        engine_name="router",
+        known_engines=frozenset(ENGINES),
+        withheld=frozenset(),
+        fallback=Substitution.FIRST_OFFERED,
+        api_key=None,
+        host="127.0.0.1",
+        port=0,
+    )
+    return TestClient(api.create_app(settings, settings.engine.open()))
+
+
 @dataclass
 class Registered:
     """One service as the stub Consul will report it."""
@@ -110,20 +137,6 @@ class Registered:
     passing: bool = True
 
 
-def health_entry(host: str, port: int, service_address: str = "") -> dict:
-    """One instance in the shape Consul's health endpoint reports it.
-
-    `Service.Address` defaults to empty exactly as the real agent leaves it for a
-    service that did not override its node's address, so the fallback to
-    `Node.Address` is the ordinary path here rather than a special case only one
-    test remembers to build.
-    """
-    return {
-        "Node": {"Address": host},
-        "Service": {"Address": service_address, "Port": port},
-    }
-
-
 def consul_app(
     catalog: dict[str, list[str]],
     health: dict[str, list[dict]],
@@ -131,12 +144,20 @@ def consul_app(
 ) -> FastAPI:
     """The two endpoints [`elvenspeak.discovery`] asks, answering what it is told.
 
-    [LAW:one-source-of-truth] The one Consul-shaped fake. There were two — this
-    and a hand-written twin in `test_discovery` — and they drifted exactly as two
-    copies do: when the `?passing=true` filter turned out to be unverified, the
-    fix had to be made in both, and either could have been missed while the other
-    kept its file green. The endpoint shapes, the filter and the address fallback
-    are stated here, once, and both callers build on it.
+    [LAW:one-source-of-truth] The one Consul-shaped fake, and since
+    `piper-build-b4h.4` its shape lives in [`fleetstub`] rather than here — the
+    paths, the address fallback and the `?passing=true` filter, all imported. That
+    file serves the same catalog to a *container* over the standard library, so
+    the alternative was a third description of Consul's API answering the same
+    router; there were two once, this and a hand-written twin in `test_discovery`,
+    and they drifted exactly as two copies do — when the filter turned out to be
+    unverified, the fix had to be made in both.
+
+    What stays here is the transport ([LAW:effects-at-boundaries]). The handlers
+    are still typed and still mounted at declared routes, which is what keeps this
+    fake a model of a *correct* agent: it cannot emit a catalog that is not an
+    object, which is why `test_discovery.broken_consul` exists separately and must
+    keep existing.
 
     `unhealthy` holds instances that exist but fail their check. Withheld when the
     lookup filters to passing and returned when it does not, which is what makes
@@ -145,20 +166,13 @@ def consul_app(
     failing = unhealthy or {}
     app = FastAPI()
 
-    @app.get("/v1/catalog/services")
+    @app.get(fleetstub.CATALOG_PATH)
     def services() -> dict:
         return catalog
 
-    @app.get("/v1/health/service/{name}")
+    @app.get(fleetstub.HEALTH_PATH + "{name}")
     def instances(name: str, passing: bool = False):
-        """Honours `passing` exactly as the real agent does.
-
-        `discovery` appends `?passing=true` so that only servers whose voices are
-        already open are routed to. A stub that ignored the parameter would let
-        that be deleted from the URL with the whole suite still green.
-        """
-        listed = list(health.get(name, []))
-        return listed if passing else listed + list(failing.get(name, []))
+        return fleetstub.passing_instances(name, passing, health, failing)
 
     return app
 

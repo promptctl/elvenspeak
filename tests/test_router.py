@@ -14,7 +14,14 @@ from dataclasses import replace
 import pytest
 from fastapi import FastAPI, Response
 from fastapi.testclient import TestClient
-from fleet import Registered, cluster, engine_app, registered_consul, serving
+from fleet import (
+    Registered,
+    cluster,
+    engine_app,
+    registered_consul,
+    routed,
+    serving,
+)
 
 from conftest import SERVES
 
@@ -60,27 +67,6 @@ BETA_VOICES = (
 def opened(consul_url: str) -> router.RouterEngine:
     """The router a deployment pointed at `consul_url` would boot with."""
     return router.configure({router.CONSUL_URL: consul_url}, NOTHING, SERVES).open()
-
-
-def routed(consul_url: str) -> TestClient:
-    """A client on the whole server a routed deployment boots, not just its engine.
-
-    [LAW:one-source-of-truth] Written out once. Three tests need the same
-    `Settings`, and the copies were already drifting toward being edited
-    separately — a router's deployment settings are one fact about this project,
-    not one per test.
-    """
-    settings = Settings(
-        engine=router.configure({router.CONSUL_URL: consul_url}, NOTHING, SERVES),
-        engine_name="router",
-        known_engines=frozenset(ENGINES),
-        withheld=NOTHING,
-        fallback=Substitution.FIRST_OFFERED,
-        api_key=None,
-        host="127.0.0.1",
-        port=0,
-    )
-    return TestClient(create_app(settings, settings.engine.open()))
 
 
 def test_the_fleets_voices_are_offered_as_one_engines():

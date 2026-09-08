@@ -20,11 +20,23 @@ _same_way` describes a single image in both spellings and requires one answer.
 from __future__ import annotations
 
 import ast
+import http.server
 import json
 import pathlib
 import subprocess
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from unittest import mock
 
+import fleetstub
 import pytest
+import smoke
+from conftest import SERVES
+from fleet import consul_app, routed, serving
+
+from elvenspeak import discovery, remote, router
+from elvenspeak.engine import Capability
 
 from smoke import (
     APPLE,
@@ -37,6 +49,7 @@ from smoke import (
     _attempt,
     _declared_port,
     _docker_image_config,
+    _fleet_address,
     _read_config,
     select_runtime,
 )
@@ -343,3 +356,261 @@ def test_a_readable_shape_that_is_still_refused_keeps_its_own_sentence(monkeypat
     )
     with pytest.raises(SmokeFailure, match="only the shell form"):
         _read_config(DOCKER, "registry.example/elvenspeak-piper:2026.09.07.1")
+
+
+# ---------------------------------------------------------------------------
+# The stub fleet (`fleetstub.py`), and the three facts it states that it cannot
+# import.
+#
+# It runs inside the image under test, on that image's bare `python3` rather than
+# on the uv virtualenv the package lives in, so `from elvenspeak import ...` fails
+# there — see its own docstring. Every value it therefore has to spell out is held
+# equal to its owner below rather than promised in a comment, which is the
+# arrangement `tests/test_workflow.py` already uses to hold the gitea engine
+# matrix equal to `elvenspeak.engines.ENGINES`.
+#
+# The point of each of these is a failure that is silent in the shape that matters
+# most: a stub that registers under the wrong tag, or fills a variable the image
+# no longer reads, does not produce a mismatch anyone can see. It produces an
+# empty fleet — a router that boots correctly, has no voices, and answers 503
+# until `smoke.py` gives up at 180 seconds, which reads like a hang and says
+# nothing about the cause.
+# ---------------------------------------------------------------------------
+
+
+def test_the_stub_registers_under_the_tag_discovery_selects_on():
+    """A stub tagged anything else is a stub the router is right to ignore."""
+    assert fleetstub.ENGINE_TAG == discovery.ENGINE_TAG
+
+
+def test_the_variable_the_stub_fills_is_the_one_the_router_reads():
+    """`--fleet` is only worth anything if the image is looking where it points."""
+    assert smoke.CONSUL_URL_VAR == router.CONSUL_URL
+
+
+def test_the_paths_the_stub_answers_are_the_paths_discovery_asks():
+    """Held against the lookups `discovery` builds, not against its own constants.
+
+    [LAW:behavior-not-structure] `discovery` composes both URLs inline, so there is
+    nothing there to compare a string to. What can be compared is the request it
+    actually makes: a recording agent is asked for a fleet, and every target it
+    was given must be one `fleetstub` answers.
+    """
+    asked: list[str] = []
+
+    def record(url: str, what: str) -> object:
+        asked.append(url.removeprefix("http://consul.example"))
+        return {} if url.endswith(fleetstub.CATALOG_PATH) else []
+
+    with mock.patch.object(discovery, "_fetch", record):
+        discovery.engines("http://consul.example")
+
+    answer = fleetstub.answering("http://fleet.example:8500", {})
+    assert asked and all(answer(target) is not None for target in asked)
+
+
+def test_the_voice_the_stub_publishes_is_one_a_router_can_parse():
+    """The shape `elvenspeak.remote` requires, checked by that parser and no other.
+
+    A hand-written payload is a rendering of `elvenspeak.api`'s serialization that
+    the compiler cannot check, and `_voice` is strict in three separate ways that
+    each raise their own `ConfigError`: a voice naming no capabilities, no models
+    or no language is refused rather than defaulted. Asserting the keys are present
+    would only confirm the fixture matches itself; running the real parser over it
+    is what makes this fail the day `_voice` asks for a fourth thing.
+    """
+    parsed = remote._voice(fleetstub.VOICE, fleetstub.SERVICE)
+
+    assert parsed.id == fleetstub.VOICE["voice_id"]
+    assert parsed.models == frozenset(fleetstub.VOICE["models"])
+    assert parsed.language == fleetstub.VOICE["language"]
+    assert parsed.capabilities == frozenset(Capability)
+
+
+def test_every_capability_the_stub_claims_is_one_that_exists():
+    """Not that it claims all of them — that it claims nothing invented.
+
+    `_voice` reads an unknown capability as absent, so a typo here would quietly
+    narrow what the stub's voice offers instead of failing, and the assertion above
+    would then be the thing that broke, naming the wrong cause.
+    """
+    assert set(fleetstub.VOICE["capabilities"]) <= {
+        capability.name.lower() for capability in Capability
+    }
+
+
+@contextmanager
+def stub_serving(make_handler) -> Iterator[str]:
+    """`fleetstub` on loopback, yielding the base URL it was told to advertise.
+
+    `make_handler` is handed that URL and returns the handler, because the fleet
+    has to advertise the address it is reachable at and nothing knows that address
+    until the socket is bound. Binding happens in the constructor and the handler
+    class is only consulted per request, so it can be settled in between — which
+    beats picking a free port first and racing something else to it
+    ([LAW:no-ambient-temporal-coupling]).
+
+    The handler itself comes from [`fleetstub.handler`], not from a copy: what is
+    being proven is the file that will run inside the container, including its path
+    matching and its query parsing, both of which the FastAPI transport in
+    `tests/fleet.py` replaces with its own. Loopback stands in for the container
+    network — the router asks over real HTTP either way, and the address the
+    catalog carries is the one it dials.
+    """
+    served = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), http.server.BaseHTTPRequestHandler
+    )
+    host, port = served.server_address[:2]
+    base = f"http://{host}:{port}"
+    served.RequestHandlerClass = make_handler(base)
+    thread = threading.Thread(target=served.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield base
+    finally:
+        served.shutdown()
+        served.server_close()
+        thread.join(timeout=10)
+        # [LAW:no-silent-failure] An unchecked join leaks the thread and its bound
+        # socket past the test that started them, and the suite stays green.
+        assert not thread.is_alive(), "the stub fleet did not stop in time"
+
+
+def stub_handler(health, unhealthy=None):
+    """A [`stub_serving`] factory answering for `health`, as `fleetstub.serve` does."""
+    return lambda base: fleetstub.handler(fleetstub.answering(base, health, unhealthy))
+
+
+@contextmanager
+def stub_fleet() -> Iterator[str]:
+    """The fleet `fleetstub.serve` serves, on loopback instead of a container IP.
+
+    Assembled the way `serve` assembles it: one tagged service whose sole instance
+    is the server answering, advertising the address it is reachable at. Supplying
+    that address is the whole difference between here and the container, and it is
+    the one thing `fleetstub.own_ip` exists to decide there.
+    """
+
+    def fleet(base: str) -> type[http.server.BaseHTTPRequestHandler]:
+        host, _, port = base.removeprefix("http://").rpartition(":")
+        registered = {fleetstub.SERVICE: [fleetstub.health_entry(host, int(port))]}
+        return stub_handler(registered)(base)
+
+    with stub_serving(fleet) as base:
+        yield base
+
+
+def test_a_router_boots_against_the_stub_fleet_and_offers_its_voice():
+    """The whole of `piper-build-b4h.4`, one rung below the container.
+
+    [LAW:verifiable-goals] The ticket's "done" is the router image answering 200
+    once a backend is discoverable. The half of that which does not need a runtime
+    is this: the real `elvenspeak.router`, configured exactly as a deployment
+    configures it, discovering the real `fleetstub` over real HTTP and coming back
+    with a voice. Nothing is patched — a patched client is a different program, for
+    the reason `tests/test_router.py` gives.
+
+    What this catches that no container run would catch quickly: every way the stub
+    can be wrong takes 180 seconds to report inside CI and one second here.
+    """
+    with stub_fleet() as consul:
+        engine = router.configure({router.CONSUL_URL: consul}, frozenset(), SERVES).open()
+
+    assert [voice.id for voice in engine.voices()] == [fleetstub.VOICE["voice_id"]]
+
+
+def test_the_stub_fleet_is_what_makes_the_router_answer_health_200():
+    """The endpoint `smoke.py` actually waits on, against the server that serves it.
+
+    Asserted through the whole app rather than on the engine, because the 503 this
+    replaces is `elvenspeak.api`'s answer to an engine with no voices and not the
+    router's own — so an engine-level assertion would prove the fleet was found
+    while saying nothing about the status `--fleet` exists to change.
+
+    Only the 200 half is here. `test_router.test_a_router_that_found_no_engines_
+    reports_itself_unfit_at_health` already owns the 503, and it owns it better —
+    it is the regression test for the 2026-09-02 deploy that produced the rule.
+    Restating it here would be a second enforcer of one invariant
+    ([LAW:single-enforcer]), sited at the reader least able to explain it.
+    """
+    with stub_fleet() as consul, routed(consul) as client:
+        assert client.get("/health").status_code == 200
+
+
+def test_both_transports_of_one_catalog_answer_a_lookup_the_same_way():
+    """The drift this file's shared shape exists to prevent, asserted rather than argued.
+
+    `fleetstub` matches Consul's two paths and parses `?passing=true` by hand;
+    `tests/fleet.py` mounts the same answers behind FastAPI, which parses the query
+    for it. Sharing [`passing_instances`] makes the *filtering* one rule, and leaves
+    the two readings of the flag able to disagree — at which point the suite would
+    keep proving a filter the container stub does not apply, which is the drift the
+    hand-written twin in `test_discovery` already demonstrated once.
+
+    So both are driven with one fleet holding a healthy instance and an unhealthy
+    one, through the real `discovery`, and required to come back with one answer.
+    [LAW:behavior-not-structure] — nothing here compares the parsers.
+    """
+    healthy = fleetstub.health_entry("10.0.0.4", 29280)
+    failing = fleetstub.health_entry("10.0.0.9", 29289)
+    catalog = {fleetstub.SERVICE: [fleetstub.ENGINE_TAG]}
+    health = {fleetstub.SERVICE: [healthy]}
+    unhealthy = {fleetstub.SERVICE: [failing]}
+
+    with serving(consul_app(catalog, health, unhealthy)) as through_fastapi:
+        by_suite = discovery.engines(through_fastapi)
+
+    with stub_serving(stub_handler(health, unhealthy)) as through_stdlib:
+        by_container = discovery.engines(through_stdlib)
+
+    assert by_container == by_suite
+    assert [backend.base_url for backend in by_container] == ["http://10.0.0.4:29280"]
+
+
+def test_smoke_reads_the_address_the_stub_actually_publishes():
+    """The seam between the two files, which neither can check alone.
+
+    `fleetstub` answers `/address` and `smoke.py` reads it to build
+    `ROUTER_CONSUL_URL`. Both sides looked right while the key was spelled
+    differently on each, and nothing failed: the stub came up, the read raised a
+    `LookupError` at the boundary, and the leg reported "answered with something
+    that is not an address" — true, unhelpful, and about the wrong file.
+    """
+    with stub_fleet() as base:
+        assert _fleet_address(base + fleetstub.ADDRESS_PATH).startswith("http://")
+
+
+@pytest.mark.parametrize(
+    "answered",
+    ['{"url": "http://10.0.0.4:8500"}', "[]", '"http://10.0.0.4:8500"', "not json at all"],
+    ids=["another key", "a list", "a bare string", "not json"],
+)
+def test_a_fleet_that_answers_with_something_else_is_named_not_traced(answered):
+    """[LAW:parse-dont-validate] The boundary owns the fall, as `_read_config`'s does.
+
+    A list or a bare string takes a string subscript and raises `TypeError`, not
+    the `LookupError` a missing key gives — which is why catching only the obvious
+    two would let the least likely answer out as a traceback, past `main`'s
+    handler, reading like a bug in this file rather than a stub that is out of date.
+    """
+    with stub_serving(lambda base: _literal_handler(answered)) as base:
+        with pytest.raises(SmokeFailure, match="not an address"):
+            _fleet_address(base + fleetstub.ADDRESS_PATH)
+
+
+def _literal_handler(body: str):
+    """A handler answering `body` verbatim, whatever shape it is."""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body.encode("utf-8"))))
+            self.end_headers()
+            self.wfile.write(body.encode("utf-8"))
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            """Silenced: pytest owns this process's stderr, unlike the container's."""
+
+    return Handler
