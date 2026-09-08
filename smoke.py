@@ -50,13 +50,23 @@ three instances differing in *data* ([LAW:one-type-per-behavior]) — `docker` a
 `podman` differ in nothing but the binary's name — and the single genuine
 divergence, how an image's config is spelled, is a pure function per runtime.
 
+THE ROUTER IS THE ONE IMAGE THIS CANNOT ASK ALONE. It synthesizes nothing and
+discovers what it fronts, so started by itself it has no voices and answers
+`/health` 503 for as long as anyone waits. `--fleet` runs [`fleetstub`] beside it
+— in a container started from the image under test, so nothing is built and
+nothing is pulled — and hands the image the address to discover it at. Every
+other engine is given an empty list of companions and runs the identical
+sequence below ([LAW:dataflow-not-control-flow]).
+
 Standard library only, deliberately. This runs on a CI runner before anything is
 installed and on a laptop with no virtualenv activated; `python3 smoke.py` has
 to be the whole invocation, so nothing here may import from `elvenspeak` or from
-any dependency of it. Importing nothing buys nothing if the *syntax* outruns the
-`python3` already on the machine — that dies at parse time, before any of the
-failure messages below can be reached — so the floor is pinned and checked by
-`tests/test_smoke.py` rather than promised here.
+any dependency of it. [`fleetstub`] is neither, and is held to the same rule for
+its own reasons, so importing it costs that guarantee nothing. Importing nothing
+buys nothing if the *syntax* outruns the `python3` already on the machine — that
+dies at parse time, before any of the failure messages below can be reached — so
+the floor is pinned and checked by `tests/test_smoke.py` rather than promised
+here.
 """
 
 from __future__ import annotations
@@ -64,6 +74,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import pathlib
 import re
 import shutil
 import socket
@@ -74,8 +85,10 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
+
+import fleetstub
 
 #: How long a container gets to answer `/health` before this gives up. The
 #: image's own HEALTHCHECK allows a 120s start period, and piper reached 200 in
@@ -94,6 +107,20 @@ PROBE_INTERVAL = 2.0
 #: bounds the whole wait: this one bounds one `docker`/`container` invocation, so
 #: a wedged daemon surfaces as a named failure instead of a hung job.
 CLI_TIMEOUT = 120.0
+
+#: How long the stub fleet gets to answer. Distinct from DEFAULT_TIMEOUT, which is
+#: sized for a container loading a model: this one binds a socket and answers from
+#: memory, so a wait longer than this is a fleet the runner cannot route to rather
+#: than one still starting — and the image under test still has its own full
+#: budget to spend after it.
+FLEET_TIMEOUT = 30.0
+
+#: The variable a router reads to learn where to discover the engines it fronts.
+#: Held equal to `elvenspeak.router.CONSUL_URL` by `tests/test_smoke.py`, because
+#: this file cannot import it: a stub filling a variable the image no longer reads
+#: would present as the empty fleet `--fleet` exists to prevent, and present it as
+#: a timeout rather than as a name that does not match.
+CONSUL_URL_VAR = "ROUTER_CONSUL_URL"
 
 
 class SmokeFailure(Exception):
@@ -518,6 +545,88 @@ def _container(runtime: Runtime, name: str, argv: Sequence[str]) -> Iterator[Non
             )
 
 
+def _fleet_address(url: str) -> str:
+    """The address the stub fleet says a sibling container reaches it at.
+
+    The one place an answer from [`fleetstub`] is crossed into this file, so a
+    stub that came up but replied with something else — an old copy of the file
+    with no `/address`, a proxy in the way — reaches the caller as a named failure
+    instead of a `KeyError` past `main`'s handler ([LAW:parse-dont-validate]).
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=PROBE_INTERVAL) as answer:
+            found = json.load(answer)["base_url"]
+            # Into the handler below, so a wrong answer and no answer fail alike.
+            if not isinstance(found, str) or not found:
+                raise TypeError(f"base_url was {found!r}")
+            return found
+    # The same four names `_read_config` crosses on, plus the two a socket fails
+    # with. `TypeError` is the one that looks redundant and is not: an answer that
+    # is a JSON list or string takes a string subscript and raises it, not the
+    # `LookupError` a missing key would.
+    except (
+        OSError,
+        http.client.HTTPException,
+        ValueError,
+        LookupError,
+        TypeError,
+        AttributeError,
+    ) as unread:
+        raise SmokeFailure(
+            f"the stub fleet answered {url} with something that is not an address "
+            f"({unread!r}), so the image has nowhere to be pointed"
+        ) from unread
+
+
+@contextmanager
+def _serving_fleet(runtime: Runtime, image: str, platform: str | None) -> Iterator[str]:
+    """Run [`fleetstub`] beside the image, yielding the env entry that finds it.
+
+    STARTED FROM THE IMAGE UNDER TEST, with its entrypoint replaced by the
+    `python3` its own base layer already carries, and this repository's file
+    handed to it as source on the command line. Nothing is built, nothing is
+    pulled and nothing is mounted: the image is already in the local store because
+    the step above built it there, and a mount or a copy would assume the runner's
+    filesystem is the daemon's, which is not a thing this file is entitled to
+    assume. On a registry with no other elvenspeak image there is also nothing
+    else to borrow.
+
+    THE PORT IS PUBLISHED TO LOOPBACK FOR THIS PROCESS, not for the image under
+    test — which reaches the stub over the container network at the address the
+    stub reports. Two addresses for one server, because the two callers are on
+    different sides of it. Publishing is what lets the wait below be the same wait
+    every container here gets, rather than a sleep long enough to usually work
+    ([LAW:no-ambient-temporal-coupling]).
+    """
+    host_port = _free_port()
+    name = f"elvenspeak-fleet-{uuid.uuid4().hex[:8]}"
+    probe = f"http://127.0.0.1:{host_port}{fleetstub.ADDRESS_PATH}"
+    argv = [
+        runtime.binary,
+        "run",
+        "-d",
+        "--name",
+        name,
+        "-p",
+        f"127.0.0.1:{host_port}:{fleetstub.DEFAULT_PORT}",
+        *(("--platform", platform) if platform else ()),
+        "--entrypoint",
+        "python3",
+        image,
+        "-c",
+        pathlib.Path(fleetstub.__file__).read_text(encoding="utf-8"),
+        "--port",
+        str(fleetstub.DEFAULT_PORT),
+    ]
+
+    print(f"smoke: {runtime.name} running the stub fleet as {name}", flush=True)
+    with _container(runtime, name, argv):
+        _await_serving(runtime, name, probe, FLEET_TIMEOUT)
+        found = _fleet_address(probe)
+        print(f"smoke: the stub fleet reports itself at {found}", flush=True)
+        yield f"{CONSUL_URL_VAR}={found}"
+
+
 def smoke(
     runtime: Runtime,
     image: str,
@@ -526,41 +635,59 @@ def smoke(
     memory: str | None = None,
     platform: str | None = None,
     env: Sequence[str] = (),
+    fleet: bool = False,
 ) -> None:
     """Run `image` and return only if it served and its own healthcheck passed.
 
     Returns nothing: there is no verdict to inspect, because the failure arm is
     an exception and the success arm is having got here at all.
+
+    `fleet` asks for a discoverable fleet to exist first, which only the router
+    needs. It is resolved here into environment entries — nothing below this line
+    knows a router exists, and the sequence an image is put through is the same
+    one whether the list it produced was empty or not.
     """
-    config = _read_config(runtime, image)
-    host_port = _free_port()
-    name = f"elvenspeak-smoke-{uuid.uuid4().hex[:8]}"
-    url = f"http://127.0.0.1:{host_port}/health"
+    with ExitStack() as running:
+        supplied = (
+            [running.enter_context(_serving_fleet(runtime, image, platform))]
+            if fleet
+            else []
+        )
+        env = (*env, *supplied)
+        config = _read_config(runtime, image)
+        host_port = _free_port()
+        name = f"elvenspeak-smoke-{uuid.uuid4().hex[:8]}"
+        url = f"http://127.0.0.1:{host_port}/health"
 
-    # `--rm` is not used and must not be added: with `-d` it removes the
-    # container the instant it exits, taking the logs of exactly the boot failure
-    # this exists to explain. Removal is the context manager's job, after the
-    # logs have been read.
-    argv = [
-        runtime.binary,
-        "run",
-        "-d",
-        "--name",
-        name,
-        "-p",
-        f"127.0.0.1:{host_port}:{config.port}",
-        *(("--platform", platform) if platform else ()),
-        *(("-m", memory) if memory else ()),
-        *[argument for value in env for argument in ("-e", value)],
-        image,
-    ]
+        # `--rm` is not used and must not be added: with `-d` it removes the
+        # container the instant it exits, taking the logs of exactly the boot
+        # failure this exists to explain. Removal is the context manager's job,
+        # after the logs have been read.
+        argv = [
+            runtime.binary,
+            "run",
+            "-d",
+            "--name",
+            name,
+            "-p",
+            f"127.0.0.1:{host_port}:{config.port}",
+            *(("--platform", platform) if platform else ()),
+            *(("-m", memory) if memory else ()),
+            *[argument for value in env for argument in ("-e", value)],
+            image,
+        ]
 
-    print(
-        f"smoke: {runtime.name} running {image} as {name}, "
-        f"container port {config.port} published on {host_port}",
-        flush=True,
-    )
-    with _container(runtime, name, argv):
+        print(
+            f"smoke: {runtime.name} running {image} as {name}, "
+            f"container port {config.port} published on {host_port}",
+            flush=True,
+        )
+        # Entered on the one stack rather than in a nested `with`, so that a fleet
+        # started above is torn down after this container and not before it: the
+        # image under test is logged and removed while the thing it discovered is
+        # still answering, which is the order that keeps a shutdown from looking
+        # like a lost backend.
+        running.enter_context(_container(runtime, name, argv))
         served = _await_serving(runtime, name, url, timeout)
         print(f"smoke: {url} answered {served}", flush=True)
 
@@ -615,6 +742,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="NAME=VALUE",
         help="an environment variable for the container; repeatable",
     )
+    parser.add_argument(
+        "--fleet",
+        action="store_true",
+        help="run a discoverable stub fleet beside the image and set "
+        f"{CONSUL_URL_VAR} to it — what a router needs before it has any voices",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -625,6 +758,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             memory=args.memory,
             platform=args.platform,
             env=args.env,
+            fleet=args.fleet,
         )
     except SmokeFailure as failure:
         print(f"smoke: FAILED — {failure}", file=sys.stderr, flush=True)

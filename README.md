@@ -471,11 +471,22 @@ be a measured per-engine number rather than a guess — a guessed ceiling turns 
 build red for a reason that has nothing to do with the commit — and those numbers
 do not exist yet.
 
-The router is the exception, and its leg is red on every publish. It needs a stub
-Consul with a backend registered in it — not merely a `ROUTER_CONSUL_URL`, since a
-router that discovers an empty fleet is not refused: it serves `/health` 503 by
-design while the smoke waits for 200. That second container is
-`piper-build-b4h.4`.
+The router's entry in that table is `--fleet`: what it needs before it can answer
+is a fleet to discover. That runs the repo-root `fleetstub.py` in a second
+container started from the image being smoked — entrypoint replaced by that
+image's own `python3`, the file handed over as source on the command line — so
+nothing extra is built, pulled, mounted or copied. One process serves both roles
+on one port, the Consul catalog and health endpoints and a backend's own `GET
+/v1/voices` and `GET /v1/models`, because the router dials whatever address the
+catalog gave it and has no opinion about whether that is also the agent it asked;
+the stub reports its own container-network address, which only it can observe,
+and `smoke.py` points `ROUTER_CONSUL_URL` there. A bare `ROUTER_CONSUL_URL` would
+not do — a router that discovers an empty fleet is not refused: it boots
+correctly, has no voices, and serves `/health` 503 by design while the smoke
+waits for a 200, so an empty stub trades a fast, clear failure for a 180-second
+timeout that reads like a hang. `elvenspeak-router:2026.09.07.2` answers 200 with
+`{"voices":["stub-voice"]}` under `--fleet`, and 503 with `{"voices":[]}` against
+a reachable but empty catalog.
 
 ### Pointing openconv at it
 
