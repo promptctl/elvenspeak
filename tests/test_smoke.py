@@ -25,6 +25,8 @@ import json
 import pathlib
 import subprocess
 import threading
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest import mock
@@ -32,8 +34,9 @@ from unittest import mock
 import fleetstub
 import pytest
 import smoke
+import speaks
 from conftest import SERVES
-from fleet import consul_app, routed, serving
+from fleet import consul_app, routed, router_app, serving
 
 from elvenspeak import discovery, remote, router
 from elvenspeak.engine import Capability
@@ -412,7 +415,7 @@ def test_the_paths_the_stub_answers_are_the_paths_discovery_asks():
         fleetstub.CATALOG_PATH,
         fleetstub.HEALTH_PATH + fleetstub.SERVICE,
     }
-    assert all(answer(target) is not None for target in asked)
+    assert all(answer(target, b"") is not None for target in asked)
 
 
 def test_the_voice_the_stub_publishes_is_one_a_router_can_parse():
@@ -541,6 +544,119 @@ def test_the_stub_fleet_is_what_makes_the_router_answer_health_200():
     """
     with stub_fleet() as consul, routed(consul) as client:
         assert client.get("/health").status_code == 200
+
+
+def test_the_stub_fleet_speaks_well_enough_for_the_conformance_it_will_face():
+    """`speaks.py` against the stub alone, which is the cheaper half of the test below.
+
+    Not redundant with it: the smoke leg only ever points `speaks.conform` at the
+    router, so when that goes red the question is immediately which of the two
+    servers was wrong. This answers it in one line and a few milliseconds — and it
+    is also the only place the stub's own arithmetic is asked for at a rate the
+    router never requests, since `remote` asks every backend for `pcm_48000` and
+    nothing else ever would.
+    """
+    with stub_fleet() as base:
+        speaks.conform(base, timeout=10.0)
+
+
+def test_a_router_fronting_the_stub_fleet_conforms_over_real_http():
+    """The router leg of the smoke script, one rung below the container.
+
+    [LAW:verifiable-goals] What CI will run after `piper-pipeline-4mx` is
+    `speaks.conform` against each published image, and the router's copy of that
+    run is the only one whose every answer is relayed rather than synthesized: the
+    audio, its length, the speed applied to it and the alignment measured over it
+    are all the stub's, carried across `elvenspeak.remote` and re-encoded by
+    `elvenspeak.api` on the way out. Nothing in that path is exercised by pointing
+    conformance at an engine.
+
+    Over a real socket rather than a `TestClient`, because `speaks.py` is stdlib
+    HTTP by construction — it is the same file the CI runner executes against a
+    container, and a version of it driven through ASGI in-process would be a
+    different program proving a different thing.
+    """
+    with stub_fleet() as consul, serving(router_app(consul)) as fronted:
+        speaks.conform(fronted, timeout=10.0)
+
+
+def _asking(url: str, body: str) -> tuple[int, bytes]:
+    """`body` posted to `url`, as the status and body that came back.
+
+    The refusals below are the point, so this reports a status rather than raising
+    on one — which is the whole difference between it and `speaks._speak`, and the
+    reason it is not that function reused.
+    """
+    request = urllib.request.Request(
+        url,
+        data=body.encode(),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as answered:
+            return answered.status, answered.read()
+    except urllib.error.HTTPError as refused:
+        return refused.code, refused.read()
+
+
+@pytest.mark.parametrize(
+    ("query", "body"),
+    [
+        ("", '{"text": "one two three"}'),
+        ("?output_format=mp3_44100_128", '{"text": "one two three"}'),
+        ("?output_format=pcm_forty-eight-thousand", '{"text": "one two three"}'),
+        ("?output_format=pcm_48000", "not json at all"),
+        ("?output_format=pcm_48000", '["one two three"]'),
+        ("?output_format=pcm_48000", '{"text": ""}'),
+        ("?output_format=pcm_48000", '{"text": "one", "voice_settings": {"speed": 0}}'),
+    ],
+    ids=[
+        "no format",
+        "a format that is not pcm",
+        "a pcm format naming no rate",
+        "a body that is not json",
+        "a body that is not an object",
+        "nothing to say",
+        "a speed that stops time",
+    ],
+)
+def test_a_synthesis_the_stub_cannot_read_is_refused_rather_than_invented(query, body):
+    """[LAW:no-silent-failure] Every unreadable request fails loudly, and here.
+
+    A stub that answered these with a zero-length utterance would be answering
+    them, and `speaks.conform` would report the *router* as having produced no
+    audio — a red naming the one file in the arrangement that was working. The
+    cost of finding that out is a container leg's full timeout and a reader sent
+    to the wrong repository.
+    """
+    with stub_fleet() as base:
+        status, answered = _asking(
+            f"{base}{fleetstub.SPEAK_PREFIX}{fleetstub.VOICE['voice_id']}"
+            f"{fleetstub.STREAM_SUFFIX}{query}",
+            body,
+        )
+
+    assert status == 400
+    assert json.loads(answered)["error"]
+
+
+def test_the_stub_speaks_only_in_the_voice_it_published():
+    """A voice nobody offered is a 404, not an utterance invented on request.
+
+    The failure it rules out is a routing bug wearing a success: a router that
+    asked a backend for a voice that backend never published would be answered
+    anyway, and the mistake would surface — if at all — as audio in the wrong
+    voice, which no conformance check can see.
+    """
+    with stub_fleet() as base:
+        status, _ = _asking(
+            f"{base}{fleetstub.SPEAK_PREFIX}nobody{fleetstub.STREAM_SUFFIX}"
+            f"?output_format=pcm_48000",
+            '{"text": "one two three"}',
+        )
+
+    assert status == 404
 
 
 def test_both_transports_of_one_catalog_answer_a_lookup_the_same_way():

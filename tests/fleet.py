@@ -99,8 +99,8 @@ def engine_app(
     return api.create_app(settings, DeclaredEngine(declaring(capabilities, voices)))
 
 
-def routed(consul_url: str) -> TestClient:
-    """A client on the whole server a routed deployment boots, not just its engine.
+def router_app(consul_url: str) -> FastAPI:
+    """The whole server a routed deployment boots, not just its engine.
 
     [LAW:one-source-of-truth] Written out once. Tests across two files need the
     same `Settings`, and the copies were already drifting toward being edited
@@ -109,6 +109,12 @@ def routed(consul_url: str) -> TestClient:
     `test_smoke` needs the same deployment to ask whether the stub fleet is enough
     to make one healthy, and a test module importing another test module's helper
     is a dependency neither file declares.
+
+    The app rather than a client, because the two callers want different
+    transports over one deployment: a `TestClient` for the tests that assert on
+    status codes, and a real socket for the one that runs `speaks.py` — which
+    speaks HTTP and nothing else, since the thing it exists to be is the same file
+    CI points at a container ([LAW:locality-or-seam]).
     """
     settings = Settings(
         engine=router.configure({router.CONSUL_URL: consul_url}, frozenset(), SERVES),
@@ -120,7 +126,12 @@ def routed(consul_url: str) -> TestClient:
         host="127.0.0.1",
         port=0,
     )
-    return TestClient(api.create_app(settings, settings.engine.open()))
+    return api.create_app(settings, settings.engine.open())
+
+
+def routed(consul_url: str) -> TestClient:
+    """A client on [`router_app`]."""
+    return TestClient(router_app(consul_url))
 
 
 @dataclass

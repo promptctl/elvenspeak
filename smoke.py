@@ -89,6 +89,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 
 import fleetstub
+import speaks
 
 #: How long a container gets to answer `/health` before this gives up. The
 #: image's own HEALTHCHECK allows a 120s start period, and piper reached 200 in
@@ -114,6 +115,15 @@ CLI_TIMEOUT = 120.0
 #: than one still starting — and the image under test still has its own full
 #: budget to spend after it.
 FLEET_TIMEOUT = 30.0
+
+#: How long one *listing* request may take of a server that has already answered
+#: `/health` 200. Distinct from DEFAULT_TIMEOUT for the reason FLEET_TIMEOUT is:
+#: that one is a budget for a container still loading a model, and by the time
+#: conformance runs the loading is over and the questions are answered from a
+#: catalogue held in memory. `speaks.SPEAK_TIMEOUT` covers the slow half — a
+#: synthesis on cpu — and is that file's to decide, because it is the file that
+#: knows which requests those are.
+CONFORM_TIMEOUT = 30.0
 
 #: The variable a router reads to learn where to discover the engines it fronts.
 #: Held equal to `elvenspeak.router.CONSUL_URL` by `tests/test_smoke.py`, because
@@ -657,7 +667,8 @@ def smoke(
         config = _read_config(runtime, image)
         host_port = _free_port()
         name = f"elvenspeak-smoke-{uuid.uuid4().hex[:8]}"
-        url = f"http://127.0.0.1:{host_port}/health"
+        base = f"http://127.0.0.1:{host_port}"
+        url = f"{base}/health"
 
         # `--rm` is not used and must not be added: with `-d` it removes the
         # container the instant it exits, taking the logs of exactly the boot
@@ -702,6 +713,16 @@ def smoke(
                 f"  stderr: {checked.stderr.strip()}"
             )
         print(f"smoke: the image's own HEALTHCHECK exited 0 ({config.healthcheck})", flush=True)
+
+        # Unconditional, and last. Every image gets the same questions asked of it
+        # because `speaks.py` reads what a voice can do from that voice rather than
+        # from a table of engines ([LAW:dataflow-not-control-flow]) — an engine
+        # added tomorrow is conformant here without being named anywhere. Last
+        # because it is the only step that costs inference: an image that does not
+        # boot, or whose own healthcheck disagrees with its endpoint, says so in
+        # seconds rather than after a minute of synthesis.
+        speaks.conform(base, CONFORM_TIMEOUT)
+        print(f"smoke: {image} answered every question `speaks.py` asks", flush=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

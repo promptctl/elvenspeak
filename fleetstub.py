@@ -19,6 +19,18 @@ while it is still constructing itself — `GET /v1/voices` and `GET /v1/models`
 a backend that cannot say which models its voices speak makes `remote._voice`
 raise while the router is still being constructed.
 
+AND IT SPEAKS, because `speaks.py` asks the router every property it asks of every
+other image, and a router synthesizes nothing of its own — each of those answers
+is a backend's, relayed. Nothing here opens a model, and nothing needs to: the
+properties being asked are arithmetic on the *length* of an utterance — more text
+is more audio, twice the speed is half of it, a character alignment that runs
+forward and stops where the audio does — so what a backend has to be able to do is
+return the right number of samples and say truthfully where in them each character
+fell. The samples themselves are zeros. `speaks.py` names audio content as the one
+property it cannot check from bytes, so filling them with a tone would be a
+decoration no reader reads — the rule [`VOICE`] already follows in carrying exactly
+the fields `remote._voice` reads and no others.
+
 ONE PROCESS SERVING BOTH ROLES, which looks like a shortcut and is not. The
 router reaches a backend at whatever address the catalog handed it and has no
 opinion about whether that address is also the agent it asked — so a second
@@ -55,11 +67,13 @@ turned out to be unverified in both.
 from __future__ import annotations
 
 import argparse
+import base64
 import http.server
 import json
 import socket
 import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 
 #: What a service must be tagged with for [`elvenspeak.discovery`] to treat it as
 #: one of ours. Held equal to `discovery.ENGINE_TAG` by `tests/test_smoke.py`: a
@@ -76,6 +90,28 @@ CATALOG_PATH = "/v1/catalog/services"
 HEALTH_PATH = "/v1/health/service/"
 VOICES_PATH = "/v1/voices"
 MODELS_PATH = "/v1/models"
+
+#: Where a synthesis arrives, in the two spellings [`elvenspeak.remote`] builds.
+#: Named here because this file matches them by hand and `remote._spoken_at`
+#: composes them inline, so there is no constant over there to be held equal to —
+#: what holds these right is `tests/test_smoke.py` driving the real client at the
+#: real handler, which is the same arrangement the Consul paths get.
+SPEAK_PREFIX = "/v1/text-to-speech/"
+STREAM_SUFFIX = "/stream"
+TIMED_SUFFIX = "/with-timestamps"
+
+#: Two bytes to a sample, because every `pcm_*` format is signed 16-bit. The same
+#: arithmetic `speaks.py` does from the far side of the wire, and the reason a
+#: byte count there is a sample count.
+BYTES_PER_SAMPLE = 2
+
+#: How long one character takes to say at speed 1.0. Not a measurement of
+#: anything — no model runs here — but the constant that makes the properties
+#: `speaks.py` checks true of this stub. Small enough that the longest utterance
+#: conformance asks for is under three seconds of samples to build, to base64 and
+#: to carry, and large enough that a rounding difference cannot swallow the gap
+#: between two texts a dozen characters apart.
+SECONDS_PER_CHARACTER = 0.04
 
 #: Where this process reports the address a *sibling container* reaches it at.
 #: Not part of any API being imitated — see [`own_ip`] for why the answer has to
@@ -178,30 +214,168 @@ def own_ip() -> str:
         return str(probe.getsockname()[0])
 
 
+class Malformed(Exception):
+    """A synthesis request this stub could not read, carrying its own reason.
+
+    [LAW:no-silent-failure] Raised rather than answered with a zero-length
+    utterance, which is the shape of the mistake this whole file exists to keep
+    out of CI: a stub whose failure is indistinguishable from a working answer
+    costs a leg its full timeout and reports the wrong subject when it expires.
+    """
+
+
+@dataclass(frozen=True)
+class Answer:
+    """One HTTP response: its status, what the bytes are, and the bytes.
+
+    [LAW:types-are-the-program] The catalogue answers JSON and the stream answers
+    raw samples, so a route's media type is a value the route decides rather than
+    a fact the handler already knows. Before this file spoke, every answer was
+    JSON and [`handler`] could encode them all itself; a second handler method for
+    the audio would have been that vanished assumption preserved by copying it.
+    """
+
+    status: int
+    content_type: str
+    body: bytes
+
+
+@dataclass(frozen=True)
+class Synthesis:
+    """One synthesis this stub was asked for: what to say, how fast, at what rate.
+
+    [LAW:parse-dont-validate] Built only by [`asked_for`], which refuses anything
+    it cannot read, so nothing below divides by a text length that might be zero
+    or multiplies by a speed that might be a string. The absent `voice_settings`
+    an ElevenLabs-compatible caller is entitled to omit is resolved to 1.0 there
+    too — at the crossing, once — rather than defaulted again at each place that
+    would otherwise have to wonder.
+    """
+
+    text: str
+    speed: float
+    rate: int
+
+    @property
+    def samples(self) -> int:
+        """How many samples this utterance runs to.
+
+        The one arithmetic in this file that `speaks.py` is really asking about,
+        stated once so that the streamed audio and the alignment measured over it
+        cannot describe two different utterances ([LAW:one-source-of-truth]).
+        """
+        return round(self.rate * len(self.text) * SECONDS_PER_CHARACTER / self.speed)
+
+    @property
+    def pcm(self) -> bytes:
+        """The utterance as signed 16-bit samples — silent ones. See the header."""
+        return bytes(BYTES_PER_SAMPLE * self.samples)
+
+
+def asked_for(query: str, body: bytes) -> Synthesis:
+    """The synthesis `query` and `body` describe, or [`Malformed`].
+
+    The rate comes from `output_format` because that is where a caller states it
+    and there is nowhere else to learn it: `elvenspeak.remote` asks every backend
+    for `pcm_48000` and `speaks.py` asks a server directly for `pcm_22050`, and a
+    stub that answered one fixed rate would be lying to whichever of them it was
+    not built for — undetectably, since every property either one checks is a
+    ratio and survives the wrong rate intact.
+    """
+    formats = urllib.parse.parse_qs(query).get("output_format", [])
+    if len(formats) != 1 or not formats[0].startswith("pcm_"):
+        raise Malformed(f"output_format must be one pcm_<rate>, got {formats!r}")
+    try:
+        rate = int(formats[0].removeprefix("pcm_"))
+    except ValueError as unreadable:
+        raise Malformed(f"{formats[0]!r} does not name a sample rate") from unreadable
+
+    try:
+        asked = json.loads(body)
+    except ValueError as unreadable:
+        raise Malformed(f"the request body is not JSON: {unreadable}") from unreadable
+    if not isinstance(asked, dict):
+        raise Malformed(f"the request body is not an object: {asked!r:.200}")
+    text = asked.get("text")
+    if not isinstance(text, str) or not text:
+        raise Malformed(f"no text to speak: {text!r:.200}")
+
+    settings = asked.get("voice_settings")
+    speed = settings.get("speed", 1.0) if isinstance(settings, dict) else 1.0
+    if not isinstance(speed, (int, float)) or speed <= 0:
+        raise Malformed(f"speed must be a positive number, got {speed!r:.200}")
+    return Synthesis(text=text, speed=float(speed), rate=rate)
+
+
+def _json(payload: object, status: int = 200) -> Answer:
+    """`payload` as the JSON body every route but the stream answers with."""
+    return Answer(status, "application/json", json.dumps(payload).encode("utf-8"))
+
+
+def _measured(spoken: Synthesis) -> dict:
+    """`spoken` in the shape `elvenspeak.remote.speak_timed` reads it.
+
+    Three keys, which is what that parser reads and no more — the rule [`VOICE`]
+    follows for the same reason. `character_start_times_seconds` is published by
+    the real surface and is not here: nothing consumes it, and a field nothing
+    consumes is a second unchecked rendering of `elvenspeak.alignment` free to
+    describe a timeline this file is not producing.
+
+    [LAW:one-source-of-truth] The boundaries are divided out of the *sample count*
+    rather than out of the ideal duration it was rounded from, so the last one
+    lands exactly on the last sample. `remote._timings` clamps timestamps that
+    overshoot the audio, and a stub relying on that clamp would be a stub whose
+    alignment is quietly wrong everywhere the clamp happens to hide it.
+    """
+    samples = spoken.samples
+    ends = [
+        (index + 1) * samples / len(spoken.text) / spoken.rate
+        for index in range(len(spoken.text))
+    ]
+    return {
+        "audio_base64": base64.b64encode(spoken.pcm).decode("ascii"),
+        "alignment": {
+            "characters": list(spoken.text),
+            "character_end_times_seconds": ends,
+        },
+        # What `speak_timed` reads to decide `TimedSpeech.measured`. This stub did
+        # place every character deliberately, so claiming the word-exact fidelity
+        # is the true answer rather than the flattering one.
+        "alignment_fidelity": "word-exact",
+    }
+
+
 def answering(
     base_url: str,
     health: Mapping[str, Sequence[dict]],
     unhealthy: Mapping[str, Sequence[dict]] | None = None,
 ) -> Callable[[str], object]:
-    """The whole fleet as one function from a request target to its JSON answer.
+    """The whole fleet as one function from a request to the answer it gets.
 
     A function rather than a set of handlers because the two roles this process
     plays — the agent that is asked where the engines are, and the engine that is
-    asked what it can say — differ only in which path arrived. `None` means no
-    such route, which no route answers legitimately, so the caller needs no second
+    asked to speak — differ only in which request arrived. `None` means no such
+    route, which no route answers legitimately, so the caller needs no second
     value to tell "not found" from "found nothing".
 
+    [LAW:dataflow-not-control-flow] `body` is a value every route is handed and
+    the catalogue routes ignore, which is what lets one reply path serve both HTTP
+    methods. Taking the body only on the routes that read it would put the request
+    method back into the dispatch, and [`handler`] would need a second copy of
+    itself to supply it.
+
     Dispatch on the path is a branch and stays one: the path *is* the domain's
-    discriminator here, and a table would only spell the same four cases with a
-    prefix match bolted onto its side.
+    discriminator here, and a table would only spell the same seven cases with two
+    prefix matches bolted onto its side.
     """
     catalog = {SERVICE: [ENGINE_TAG]}
     failing = unhealthy or {}
+    spoken_at = f"{SPEAK_PREFIX}{urllib.parse.quote(VOICE['voice_id'], safe='')}"
 
-    def answer(target: str) -> object:
+    def answer(target: str, body: bytes) -> Answer | None:
         path, _, query = target.partition("?")
         if path == CATALOG_PATH:
-            return catalog
+            return _json(catalog)
         if path.startswith(HEALTH_PATH):
             # Unquoted because `discovery` quotes it: a service name is whatever
             # the catalog said, so the lookup encodes it rather than trusting it
@@ -209,13 +383,20 @@ def answering(
             # name merely looked similar.
             name = urllib.parse.unquote(path[len(HEALTH_PATH) :])
             asked = urllib.parse.parse_qs(query).get("passing") == ["true"]
-            return passing_instances(name, asked, health, failing)
+            return _json(passing_instances(name, asked, health, failing))
         if path == VOICES_PATH:
-            return {"voices": [VOICE]}
+            return _json({"voices": [VOICE]})
         if path == MODELS_PATH:
-            return [{"model_id": MODEL_ID}]
+            return _json([{"model_id": MODEL_ID}])
         if path == ADDRESS_PATH:
-            return {"base_url": base_url}
+            return _json({"base_url": base_url})
+        # Matched against the one voice this fleet offers, quoted the way
+        # `remote._spoken_at` quotes it, so that asking for a voice nobody
+        # published is the 404 it is rather than an utterance invented for it.
+        if path == f"{spoken_at}{STREAM_SUFFIX}":
+            return Answer(200, "audio/pcm", asked_for(query, body).pcm)
+        if path == f"{spoken_at}{TIMED_SUFFIX}":
+            return _json(_measured(asked_for(query, body)))
         return None
 
     return answer
@@ -235,17 +416,36 @@ def handler(answer: Callable[[str], object]) -> type[http.server.BaseHTTPRequest
     class Handler(http.server.BaseHTTPRequestHandler):
         # Declared, so that `Content-Length` below is honoured as a message
         # boundary and a client asking several questions is not made to reconnect
-        # between them. The router asks two of every backend.
+        # between them. The router asks two of every backend before it speaks to
+        # any of them, and then speaks to one over the same connection.
         protocol_version = "HTTP/1.1"
 
-        def do_GET(self) -> None:
-            found = answer(self.path)
-            body = json.dumps(found if found is not None else {"error": self.path})
-            self.send_response(404 if found is None else 200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body.encode("utf-8"))))
+        def _reply(self) -> None:
+            # A GET carries no `Content-Length` and so reads no body, which is the
+            # absence itself rather than a special case: an empty request body is
+            # what the catalogue routes are handed and ignore.
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                found = answer(self.path, self.rfile.read(length))
+            except Malformed as unreadable:
+                # [LAW:single-enforcer] Both refusals this process can make are
+                # phrased here, at the one place a reply is written, so a stub that
+                # cannot read a request and a stub that has no such route answer in
+                # one shape and are read by one client path.
+                found = _json({"error": str(unreadable)}, 400)
+            reply = found if found is not None else _json({"error": self.path}, 404)
+            self.send_response(reply.status)
+            self.send_header("Content-Type", reply.content_type)
+            self.send_header("Content-Length", str(len(reply.body)))
             self.end_headers()
-            self.wfile.write(body.encode("utf-8"))
+            self.wfile.write(reply.body)
+
+        # [LAW:dataflow-not-control-flow] One operation, named twice because
+        # `BaseHTTPRequestHandler` dispatches on the method. The method is not a
+        # discriminator of anything this fleet does — the path is — so making it
+        # one here would be inventing a fork the domain does not have.
+        do_GET = _reply
+        do_POST = _reply
 
     return Handler
 
@@ -279,7 +479,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Serve the smallest fleet an elvenspeak router can boot against.",
         epilog=(
             "Answers Consul's catalog and health endpoints for one tagged service, "
-            "and that service's own /v1/voices and /v1/models. Runs until killed."
+            "that service's own /v1/voices and /v1/models, and requests to speak in "
+            "the one voice it publishes. Runs until killed."
         ),
     )
     parser.add_argument(
