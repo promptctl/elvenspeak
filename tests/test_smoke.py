@@ -400,13 +400,19 @@ def test_the_paths_the_stub_answers_are_the_paths_discovery_asks():
 
     def record(url: str, what: str) -> object:
         asked.append(url.removeprefix("http://consul.example"))
-        return {} if url.endswith(fleetstub.CATALOG_PATH) else []
+        if url.endswith(fleetstub.CATALOG_PATH):
+            return {fleetstub.SERVICE: [fleetstub.ENGINE_TAG]}
+        return []
 
     with mock.patch.object(discovery, "_fetch", record):
         discovery.engines("http://consul.example")
 
     answer = fleetstub.answering("http://fleet.example:8500", {})
-    assert asked and all(answer(target) is not None for target in asked)
+    assert {target.partition("?")[0] for target in asked} == {
+        fleetstub.CATALOG_PATH,
+        fleetstub.HEALTH_PATH + fleetstub.SERVICE,
+    }
+    assert all(answer(target) is not None for target in asked)
 
 
 def test_the_voice_the_stub_publishes_is_one_a_router_can_parse():

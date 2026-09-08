@@ -13,7 +13,6 @@ from dataclasses import replace
 
 import pytest
 from fastapi import FastAPI, Response
-from fastapi.testclient import TestClient
 from fleet import (
     Registered,
     cluster,
@@ -26,13 +25,9 @@ from fleet import (
 from conftest import SERVES
 
 from elvenspeak import router
-from elvenspeak.api import create_app
 from elvenspeak.engine import Capability, Prosody, Voice
-from elvenspeak.engines import ENGINES
 from elvenspeak.provisioning import ConfigError
 from elvenspeak.remote import WIRE_RATE, RemoteFailure
-from elvenspeak.settings import Settings
-from elvenspeak.voices import Substitution
 
 EVERYTHING = frozenset(Capability)
 NOTHING: frozenset[Capability] = frozenset()

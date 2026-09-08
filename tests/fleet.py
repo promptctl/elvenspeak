@@ -102,8 +102,8 @@ def engine_app(
 def routed(consul_url: str) -> TestClient:
     """A client on the whole server a routed deployment boots, not just its engine.
 
-    [LAW:one-source-of-truth] Written out once. Four tests across two files need
-    the same `Settings`, and the copies were already drifting toward being edited
+    [LAW:one-source-of-truth] Written out once. Tests across two files need the
+    same `Settings`, and the copies were already drifting toward being edited
     separately — a router's deployment settings are one fact about this project,
     not one per test. Here rather than in `test_router`, where it began, because
     `test_smoke` needs the same deployment to ask whether the stub fleet is enough
