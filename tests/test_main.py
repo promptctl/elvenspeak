@@ -8,23 +8,65 @@ that reporting looks like is `tests/test_settings.py`'s subject; what this file
 checks is that the factory path still goes through it — including for the
 problem that is not discoverable until the engine is open.
 
-The success path does need a real voice, and that is the point of the design it
-covers: `build()` is the composition root, so it opens the engine before handing
-it to the app. A bad deployment therefore fails here, with an exit code, rather
-than inside the first request.
+The success path does need an engine that really opens, and that is the point of
+the design it covers: `build()` is the composition root, so it opens the engine
+before handing it to the app. A bad deployment therefore fails here, with an exit
+code, rather than inside the first request.
+
+That engine is `router`, which is a shipped entry in `elvenspeak.engines` like
+any other and the one whose assets are other servers rather than a model file. It
+is not a stand-in smuggled into the registry: `main.build()` looks the name up in
+the real table, parses the real variable and opens the real engine — the whole of
+what this file is about — and what it costs is a pair of loopback servers, one
+elvenspeak deployment and the Consul that finds it, instead of ~60 MB of Piper. `piper-pipeline-4mx` made the swap; before it, these
+four tests were four of the reasons the suite downloaded a model at all.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
-from conftest import INSTALLED_VOICE as VOICE
-from conftest import MODELS_DIR as MODELS
+from conftest import DECLARED_VOICES
 from fastapi import FastAPI
+from fleet import cluster
 
 import main
 from elvenspeak import memory as main_memory
+from elvenspeak import router
+from elvenspeak.engine import Capability
 from elvenspeak.engines import ENGINES
 from elvenspeak.settings import Settings, unsized
+
+#: A voice the fleet below really offers, for the tests that need a fallback that
+#: names something. Its opposite — a fallback naming nothing — is spelled at the
+#: one test that is about it.
+OFFERED = DECLARED_VOICES[0].id
+
+
+@pytest.fixture(scope="module")
+def fleet() -> Iterator[str]:
+    """One discoverable elvenspeak server, which is all a router needs to open.
+
+    Module-scoped because every test here builds a deployment over the same
+    fleet and none of them change it: what varies between them is the
+    environment, and that is per-test.
+    """
+    with cluster(("declared", DECLARED_VOICES, frozenset(Capability))) as consul:
+        yield consul
+
+
+def deploying(monkeypatch, fleet: str) -> None:
+    """The environment of a deployment with nothing yet wrong in it.
+
+    Written once because every test below is about exactly one thing being wrong,
+    and a per-test copy of the good half is a copy free to drift into being wrong
+    in a second way nothing names ([LAW:one-source-of-truth]). `conftest`'s
+    `_ENVIRONMENT` has already cleared every variable this service reads, so what
+    is set here is the whole of what the process sees.
+    """
+    monkeypatch.setenv("ELVENSPEAK_ENGINE", "router")
+    monkeypatch.setenv(router.CONSUL_URL, fleet)
 
 
 def test_the_factory_entry_point_exits_the_same_way(monkeypatch, capsys):
@@ -38,8 +80,9 @@ def test_the_factory_entry_point_exits_the_same_way(monkeypatch, capsys):
     assert "PORT" in capsys.readouterr().err
 
 
-@pytest.mark.usefixtures("piper_installed")
-def test_a_fallback_naming_no_offered_voice_exits_the_same_way(monkeypatch, capsys):
+def test_a_fallback_naming_no_offered_voice_exits_the_same_way(
+    monkeypatch, capsys, fleet
+):
     """The one configuration problem that cannot be found while parsing.
 
     Whether the fallback names a voice the engine offers is only answerable once
@@ -54,12 +97,8 @@ def test_a_fallback_naming_no_offered_voice_exits_the_same_way(monkeypatch, caps
     thing that was broken was the path, not the check: asserting on `Catalog`
     alone would have stayed green throughout.
     """
-    monkeypatch.setenv("PIPER_VOICES", VOICE)
-    monkeypatch.setenv("PIPER_MODELS_DIR", str(MODELS))
-    monkeypatch.setenv("PIPER_ALLOW_DOWNLOAD", "0")
-    monkeypatch.setenv("ELVENSPEAK_WITHHOLD", "timestamps")
+    deploying(monkeypatch, fleet)
     monkeypatch.setenv("ELVENSPEAK_FALLBACK_VOICE", "en_GB-nonexistent-medium")
-    monkeypatch.delenv("ELVENSPEAK_ENGINE", raising=False)
 
     with pytest.raises(SystemExit) as raised:
         main.build()
@@ -68,20 +107,15 @@ def test_a_fallback_naming_no_offered_voice_exits_the_same_way(monkeypatch, caps
     assert "en_GB-nonexistent-medium" in capsys.readouterr().err
 
 
-@pytest.mark.usefixtures("piper_installed")
-def test_a_good_environment_builds_an_application(monkeypatch):
+def test_a_good_environment_builds_an_application(monkeypatch, fleet):
     """The success path, so the failure tests are not the only thing exercised.
 
-    Against the installed voice with downloading off, because that is what a
-    deployment looks like: the entry point opens the engine, so this covers the
-    wiring from environment through to a server that could actually speak.
+    Against a fleet that is really answering, because that is what a deployment
+    looks like: the entry point opens the engine, so this covers the wiring from
+    environment through to a server that could actually speak.
     """
-    monkeypatch.setenv("PIPER_VOICES", VOICE)
-    monkeypatch.setenv("PIPER_MODELS_DIR", str(MODELS))
-    monkeypatch.setenv("PIPER_ALLOW_DOWNLOAD", "0")
-    monkeypatch.delenv("ELVENSPEAK_ENGINE", raising=False)
-    monkeypatch.delenv("ELVENSPEAK_FALLBACK_VOICE", raising=False)
-    monkeypatch.delenv("ELVENSPEAK_API_KEY", raising=False)
+    deploying(monkeypatch, fleet)
+    monkeypatch.setenv("ELVENSPEAK_FALLBACK_VOICE", OFFERED)
     monkeypatch.setenv("PORT", "5001")
     monkeypatch.setenv("ELVENSPEAK_WITHHOLD", "timestamps")
 
@@ -89,9 +123,8 @@ def test_a_good_environment_builds_an_application(monkeypatch):
     assert isinstance(app, FastAPI)
 
 
-@pytest.mark.usefixtures("piper_installed")
 def test_a_confined_deployment_that_named_no_ceiling_exits_rather_than_serving(
-    monkeypatch, capsys
+    monkeypatch, capsys, fleet
 ):
     """The refusal reaches an operator through the same door every other one does.
 
@@ -104,11 +137,7 @@ def test_a_confined_deployment_that_named_no_ceiling_exits_rather_than_serving(
     The confinement is stated rather than read, since a developer machine is
     unconfined and this test would otherwise pass by never reaching the code.
     """
-    monkeypatch.setenv("PIPER_VOICES", VOICE)
-    monkeypatch.setenv("PIPER_MODELS_DIR", str(MODELS))
-    monkeypatch.setenv("PIPER_ALLOW_DOWNLOAD", "0")
-    monkeypatch.delenv("ELVENSPEAK_ENGINE", raising=False)
-    monkeypatch.delenv("ELVENSPEAK_CONCURRENT_SYNTHESES", raising=False)
+    deploying(monkeypatch, fleet)
     monkeypatch.setattr(main_memory, "limit", lambda *_: 2048 * 1048576)
 
     with pytest.raises(SystemExit) as raised:
@@ -118,8 +147,7 @@ def test_a_confined_deployment_that_named_no_ceiling_exits_rather_than_serving(
     assert "ELVENSPEAK_CONCURRENT_SYNTHESES" in capsys.readouterr().err
 
 
-@pytest.mark.usefixtures("piper_installed")
-def test_the_refusal_does_not_reach_the_bake_step(monkeypatch):
+def test_the_refusal_does_not_reach_the_bake_step(monkeypatch, fleet):
     """The reason the check is not in the shared parse.
 
     `python -m elvenspeak.bake` runs inside the image build and synthesizes
@@ -141,11 +169,7 @@ def test_the_refusal_does_not_reach_the_bake_step(monkeypatch):
     value under that very limit — so the confinement cannot be a number the test
     merely mentions.
     """
-    monkeypatch.setenv("PIPER_VOICES", VOICE)
-    monkeypatch.setenv("PIPER_MODELS_DIR", str(MODELS))
-    monkeypatch.setenv("PIPER_ALLOW_DOWNLOAD", "0")
-    monkeypatch.delenv("ELVENSPEAK_ENGINE", raising=False)
-    monkeypatch.delenv("ELVENSPEAK_CONCURRENT_SYNTHESES", raising=False)
+    deploying(monkeypatch, fleet)
 
     confined = 2048 * 1048576
     monkeypatch.setattr(main_memory, "limit", lambda *_: confined)

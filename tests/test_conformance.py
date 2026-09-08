@@ -1,4 +1,19 @@
-"""Every property the seam promises, asked of every engine there is.
+"""Every property the seam promises, asked of every engine built in memory.
+
+Half of a pair. The other half is `speaks.py`, which asks these same properties
+over HTTP of the artifact `smoke.py` has just started — and that is where the
+engines that own a model answer them now. Nothing was dropped in the move: the
+subject changed from the *program* to the *image*, and the image is the thing
+that gets deployed. What that bought was the suite's runtime, which was 22m54s on
+gitea run 40 and gated all four publish legs behind ~3.4 GB of downloads to make
+noises on a runner's cpu.
+
+The split is by what a subject costs to build rather than by what it is, and the
+line falls where the interface says it should: an engine assembled in memory is
+asked here, in milliseconds, and an engine that has to fetch and open a model is
+asked there, against the image that already baked it. `piper-pipeline-4mx` moved
+the second set; the properties themselves are stated twice on purpose, once per
+transport, and `speaks.py` says so from its side.
 
 [LAW:verifiable-goals] An interface with one implementation is an untested
 claim. [`elvenspeak.engine`] states its promises in prose — a stable voice list,
@@ -35,16 +50,21 @@ disagree with itself across. That the property collapsed into an identity is a
 fact about the interface being right, and it is worth more stated here than it
 would be as a test that cannot fail.
 
-# No real engine here is deterministic
+# The margins stay, though every subject here is now deterministic
 
-Piper is a VITS model sampling from a noise distribution, and the same sentence
-three times gave 36352, 37888 and 37376 samples — a spread of about 4%.
-Chatterbox is an autoregressive sampler and is noisier still: six syntheses of
-[`LONG`] in one voice ranged 158400 to 177600 samples, a spread of about 12%.
-Every comparison below between two syntheses is therefore made across a margin
-that dwarfs it: a text ten times longer, a speed four times apart. A property
-that needed the two calls to agree exactly would be tested against one buffer
-instead, and there is no such property here.
+Every comparison below between two syntheses is made across a margin that dwarfs
+a sampler's noise: a text ten times longer, a speed four times apart. That was
+required when Piper and Chatterbox were subjects here — the same sentence three
+times gave Piper 36352, 37888 and 37376 samples, a 4% spread, and six syntheses
+of [`LONG`] ranged 158400 to 177600 on Chatterbox, 12% — and every subject that
+remains makes its noise arithmetically, so nothing here needs the margin today.
+
+It stays because the properties are the *seam's* and not this file's roster of
+subjects. Tightening them to what a deterministic engine can hold would write
+today's subject list into the assertions, and the next engine to arrive would
+fail on a property it satisfies. `speaks.py` states the same margins from the
+other side for exactly the engines that need them, which is the honest place for
+the measurement to live.
 
 That margin must be *declared*, not merely intended. A bare `a < b` between two
 syntheses reads like a comparison across a margin and is none: for an engine
@@ -56,19 +76,10 @@ first place that mattered.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext
 
 import pytest
-from conftest import (
-    declaring,
-    chatterbox_prepared,
-    DECLARED_VOICES,
-    INSTALLED_VOICE,
-    MODELS_DIR,
-    DeclaredEngine,
-    kokoro_prepared,
-    piper_prepared,
-)
+from conftest import DECLARED_VOICES, DeclaredEngine, declaring
 from fleet import cluster
 
 from elvenspeak import router
@@ -91,67 +102,6 @@ LONG = (
 _PACE_CHANGED = 0.7
 
 
-#: [LAW:composability] The real engines fetch what they need by opening with
-#: downloading on, rather than the `subject` fixture depending on an
-#: asset-installing one. A fixture would have gated every parametrization on
-#: every engine's assets — so `declares-everything` and `declares-nothing`, which
-#: need no model, no network and no espeak-ng, would have waited on ~200 MB of
-#: downloads to make a noise in memory. Provisioning is something an engine that
-#: has assets does for itself, which is also what `Prepared.open` means.
-def piper_engine() -> AbstractContextManager[Engine]:
-    """The real thing, opened exactly as `main.build` opens it.
-
-    Timings on, because a subject that declined the capability would take the
-    conformance suite's most interesting property with it — and what an operator
-    can turn off is not what the interface is being tested about.
-    """
-    return nullcontext(
-        piper_prepared(
-            MODELS_DIR, voices=(INSTALLED_VOICE,), timings=True, allow_download=True
-        ).open()
-    )
-
-
-def kokoro_engine() -> AbstractContextManager[Engine]:
-    """The second real engine, opened exactly as `main.build` opens it.
-
-    The default export, which reports durations. The export that does not is the
-    subject of `test_kokoro.py`, because what it demonstrates is a capability
-    being withheld — and this suite is about engines living up to what they
-    declared, whichever set that is.
-    """
-    return nullcontext(kokoro_prepared(MODELS_DIR, allow_download=True).open())
-
-
-def chatterbox_engine() -> AbstractContextManager[Engine]:
-    """The third real engine, and by a wide margin the most expensive subject here.
-
-    It is registered anyway, and the expense is the argument for it rather than
-    against it: every other subject either makes its noise in memory or opens an
-    ONNX session under 150 MB, so until this one arrived the suite had never held
-    an engine to the contract that could not answer instantly. What it adds is a
-    0.5B autoregressive model whose audio takes longer to make than to play, and
-    the properties below — a stable voice list, whole samples, a longer text
-    making more audio — are exactly the ones a slow engine is tempted to fake.
-
-    What it costs, measured: ~3.06 GiB of checkpoints fetched once, a 4.69 GiB
-    resident load with a matching 4.69 GiB peak, and synthesis at 8-33x real
-    time on `cpu` — so the handful of utterances below are minutes rather than
-    seconds.
-    `conftest.CHATTERBOX_DEVICE` is how a machine with an accelerator says so and
-    gets the same tests several times faster.
-
-    One speaker and one language, so this subject offers a single voice. The
-    voice *product* — that `<speaker>-<language>` is the id and that two ids can
-    be the same person — is this engine's own property rather than the seam's,
-    and `test_chatterbox.py` asserts it from descriptions instead of by
-    synthesizing a second voice nothing here would ask a different question of.
-    """
-    return nullcontext(
-        chatterbox_prepared(MODELS_DIR, allow_download=True).open()
-    )
-
-
 @contextmanager
 def router_engine() -> Iterator[Engine]:
     """The router over a real elvenspeak server, opened as `main.build` opens it.
@@ -170,8 +120,10 @@ def router_engine() -> Iterator[Engine]:
         yield router.configure({router.CONSUL_URL: consul}, frozenset(), frozenset({"router"})).open()
 
 
-#: Every engine this project can put behind the API surface, and the suite below
-#: is what each of them has to pass. A new engine is a line here.
+#: Every engine this project can put behind the API surface *without opening a
+#: model*, and the suite below is what each of them has to pass. A new engine of
+#: that kind is a line here; one that owns a model is a row of the publish
+#: matrix, and `speaks.py` asks it the same questions against its image.
 #:
 #: The two declared engines are the same class twice, differing only in the value
 #: they were built with, which is the interface's own argument for capabilities
@@ -208,9 +160,6 @@ ENGINES = [
         ),
         id="voices-differ",
     ),
-    pytest.param(piper_engine, id="piper"),
-    pytest.param(kokoro_engine, id="kokoro"),
-    pytest.param(chatterbox_engine, id="chatterbox"),
     pytest.param(router_engine, id="router"),
 ]
 
@@ -219,10 +168,10 @@ ENGINES = [
 def subject(request) -> Iterator[Engine]:
     """One engine under test, built once for the whole module.
 
-    Building is the expensive part for a real one — Piper opens a 60 MB ONNX
-    session, Kokoro a 114 MB one — and it is also the part the interface
-    promises happens before anything is served, so paying it once here is
-    faithful as well as cheap.
+    Module-scoped even though no subject here is expensive to build any more,
+    because building before serving is what the interface promises happens — and
+    a fixture that rebuilt per test would be quietly testing an engine on its
+    first request, which is not the state a server is ever in.
 
     Entered rather than merely called, because the router's engines are other
     processes and stopping them is part of building it. Every subject is entered
@@ -252,9 +201,8 @@ def one_per_claim(subject: Engine) -> tuple[Voice, ...]:
     The properties below are about what an engine does with the claim it was
     handed, so two voices making the same claim exercise one path twice. An
     engine whose voices are alike therefore costs exactly what a single voice
-    cost before — kokoro's pace check alone is fifteen seconds of real synthesis —
-    while one whose voices differ is measured on every claim it makes, which is
-    the only place the property is falsifiable at all.
+    cost before, while one whose voices differ is measured on every claim it
+    makes, which is the only place the property is falsifiable at all.
 
     [LAW:dataflow-not-control-flow] The data decides how many syntheses happen,
     not a branch on which engine this is.

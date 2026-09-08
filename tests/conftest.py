@@ -19,6 +19,7 @@ import gc
 import json
 import os
 from collections.abc import Callable, Iterator
+from itertools import groupby
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -652,13 +653,21 @@ class DeclaredEngine:
         )
 
     def speak_timed(self, voice: Voice, text: str, prosody: Prosody) -> TimedSpeech:
-        """One stretch covering the whole utterance, for an engine that measures.
+        """One stretch per word and per gap, for an engine that measures.
 
         [LAW:no-silent-failure] Refuses outright without the capability, rather
         than returning something plausible. The server promises never to ask —
         the timestamp endpoints answer 501 first — and a stand-in that quietly
         obliged anyway would leave that promise resting on a gate no test failure
         would ever be traced back to.
+
+        `measured=True` because it is true: this engine decided where each word
+        ends, which is the whole of what the flag claims. It reported one
+        undivided stretch and left the flag at its default until
+        `piper-pipeline-4mx`, which was the same engine claiming
+        [`Capability.TIMESTAMPS`] and then handing back the answer of an engine
+        that had measured nothing — honest in neither direction, and the reason
+        the API's word-exact header had to be checked against a real Piper.
         """
         if Capability.TIMESTAMPS not in voice.capabilities:
             raise AssertionError(
@@ -669,7 +678,8 @@ class DeclaredEngine:
         return TimedSpeech(
             pcm=b"".join(_silence(samples)),
             sample_rate=_DECLARED_RATE,
-            timings=(Timing(samples=samples, separates_words=False),),
+            timings=_stretches(text, samples),
+            measured=True,
         )
 
     def _length(self, voice: Voice, text: str, prosody: Prosody) -> int:
@@ -716,6 +726,34 @@ class DeclaredPrepared:
 
     def open(self) -> DeclaredEngine:
         return DeclaredEngine(declaring(self.capabilities))
+
+
+def _stretches(text: str, samples: int) -> tuple[Timing, ...]:
+    """`text` carved into the word and gap stretches a measuring engine reports.
+
+    The carve is by whitespace and nothing else, which is what makes this a
+    stand-in for an engine that never heard of phonemes: `elvenspeak.alignment`
+    asks only where the words are and how long each stretch ran, and an engine
+    that answers those two questions at word level gets per-character timings out
+    of the surface. `tests/test_supplied_engine.py` makes that same point from
+    outside the package.
+
+    [LAW:one-source-of-truth] Every boundary is a fraction of the *sample count*
+    rather than a duration accumulated stretch by stretch, so the durations sum
+    to exactly `samples` however the rounding falls — which is the promise
+    `TimedSpeech` makes and the property `test_conformance` reads back.
+    """
+    runs = ["".join(run) for _, run in groupby(text, key=str.isspace)]
+    timings: list[Timing] = []
+    consumed = previous = 0
+    for run in runs:
+        consumed += len(run)
+        boundary = round(samples * consumed / len(text))
+        timings.append(
+            Timing(samples=boundary - previous, separates_words=run[0].isspace())
+        )
+        previous = boundary
+    return tuple(timings)
 
 
 def _silence(samples: int) -> Iterator[bytes]:

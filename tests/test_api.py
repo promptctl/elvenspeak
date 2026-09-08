@@ -1,11 +1,20 @@
-"""The HTTP surface, against a real voice.
+"""The HTTP surface, against a real encoder.
 
-Installed rather than mocked, and fetched rather than skipped. A mocked Piper
-would prove the handlers call something, which is not the property under test —
-what matters is that the bytes coming back are in the format the caller asked
-for, and only a real encode can show that. A machine without the voice gets it
-downloaded, because a skip reads as a pass in a summary and would withdraw this
-whole module on exactly the machines least likely to have run it.
+The engine behind it is [`conftest.DeclaredEngine`], and the distinction that
+makes this honest is which half of the request is real. What the tests here
+assert is the *surface*: that the bytes come back in the format the caller asked
+for, that a foreign voice id substitutes and says so, that a `model_id` this
+deployment does not run is refused rather than quietly answered by the one it
+does. Every one of those is decided between the request and the engine, and the
+encode below them is a real encode — a stand-in engine hands over genuine signed
+16-bit PCM at a stated rate, and MP3 is MP3 or the magic bytes say otherwise.
+
+It ran against a real Piper voice until `piper-pipeline-4mx`, and what that
+bought was ~60 MB of assets and an ONNX session for a property none of these
+tests are about: no assertion here reads the *content* of the audio, only its
+container, its length and its headers. What a real model does answer for is asked
+of the published image instead — `speaks.py`, run by `smoke.py` against every
+engine the workflow publishes.
 """
 
 from __future__ import annotations
@@ -14,10 +23,13 @@ import base64
 import json
 
 import pytest
-from conftest import declaring, DECLARED_VOICES, DeclaredEngine
-from conftest import INSTALLED_VOICE as VOICE
-from conftest import MODELS_DIR as MODELS
-from conftest import piper_prepared
+from conftest import (
+    DECLARED_MODELS,
+    DECLARED_VOICES,
+    DeclaredEngine,
+    DeclaredPrepared,
+    declaring,
+)
 from fastapi.testclient import TestClient
 
 from elvenspeak import create_app
@@ -27,12 +39,16 @@ from elvenspeak.engine import Capability
 from elvenspeak.engines import ENGINES
 from elvenspeak.settings import Settings
 
-#: Every test here synthesizes with the real Piper voice, so the whole module
-#: depends on the assets being installed rather than skipping when they are not.
-pytestmark = pytest.mark.usefixtures("piper_installed")
+#: The voice these tests address when they mean "one this deployment offers".
+#: The first of the two the stand-in engine publishes, so that a listing has more
+#: than one entry to get the order of.
+VOICE = DECLARED_VOICES[0].id
 
-#: An ElevenLabs voice id from `elvenspeak/aliases/piper.toml`. Used to prove
-#: substitution, which is the behaviour openconv depends on.
+#: An ElevenLabs voice id — a real one, from `elvenspeak/aliases/piper.toml` —
+#: that this deployment does not offer. Used to prove substitution, which is the
+#: behaviour openconv depends on. Its being ElevenLabs-shaped is the point: what
+#: makes it foreign here is that nothing this server publishes answers to it, and
+#: that is exactly the state a stock client arrives in.
 FOREIGN_ID = "21m00Tcm4TlvDq8ikWAM"
 
 
@@ -49,8 +65,12 @@ def settings_for(timings: bool = True, **overrides) -> Settings:
     would hand every test the job of remembering to say it twice.
     """
     fields = {
-        "engine": piper_prepared(MODELS, voices=(VOICE,), timings=timings),
-        "engine_name": "piper",
+        "engine": DeclaredPrepared(
+            frozenset(Capability)
+            if timings
+            else frozenset(Capability) - {Capability.TIMESTAMPS}
+        ),
+        "engine_name": "declared",
         "withheld": frozenset(),
         "fallback": VOICE,
         "api_key": None,
@@ -299,7 +319,9 @@ def test_discovery_does_not_substitute(client):
 
 def test_voices_listing_has_the_elevenlabs_shape(client):
     body = client.get("/v1/voices").json()
-    assert [v["voice_id"] for v in body["voices"]] == [VOICE]
+    assert [v["voice_id"] for v in body["voices"]] == [
+        voice.id for voice in DECLARED_VOICES
+    ]
     assert body["voices"][0]["name"]
     assert "labels" in body["voices"][0]
 
@@ -316,9 +338,12 @@ def test_models_listing_has_the_elevenlabs_shape(client):
     body = client.get("/v1/models").json()
 
     assert isinstance(body, list)
+    # The engine's own name first, then every foreign id its voices answer to.
+    # Read off the voices this deployment publishes rather than off a literal, so
+    # the shape is what is asserted and not this fixture's roster.
     assert [entry["model_id"] for entry in body] == [
-        "piper",
-        *sorted(model_ids("piper")),
+        "declared",
+        *sorted(DECLARED_MODELS - {"declared"}),
     ]
     assert body[0]["can_do_text_to_speech"] is True
 
@@ -583,40 +608,6 @@ def test_ascii_safe_escapes_everything_outside_the_printable_range():
     assert "65e5" in _ascii_safe("日")
 
 
-def test_one_voice_serves_concurrent_requests():
-    """Synthesis runs on worker threads against a single cached PiperVoice.
-
-    Piper serializes espeak-ng behind its own module-level lock and ONNX Runtime
-    supports concurrent Run() on one session, so no lock is needed here — but
-    that is a claim about someone else's code, and this is what makes it checked
-    rather than asserted. A regression would show up as an exception or as empty
-    audio from one of the two calls.
-
-    Byte equality is not asserted: Piper samples from a noise distribution, so
-    the same sentence differs run to run. Length and non-emptiness are the
-    properties that separate corruption from that ordinary variance.
-    """
-    from concurrent.futures import ThreadPoolExecutor
-
-    from elvenspeak.engine import Prosody
-
-    engine = piper_prepared(MODELS, voices=(VOICE,)).open()
-    voice = engine.voices()[0]
-    text = "The quick brown fox jumps over the lazy dog."
-
-    def synth():
-        return b"".join(engine.speak(voice, text, Prosody(speed=1.0)).audio)
-
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = [f.result() for f in [pool.submit(synth) for _ in range(4)]]
-
-    assert all(len(pcm) > 0 for pcm in results)
-    # Same sentence, same voice: lengths vary with sampling but not by orders of
-    # magnitude. A corrupted or truncated concurrent run shows up here.
-    shortest, longest = min(map(len, results)), max(map(len, results))
-    assert longest < shortest * 2
-
-
 def test_an_ignored_field_name_containing_a_comma_stays_one_name(client):
     """The separator cannot be forged by a field name.
 
@@ -676,18 +667,6 @@ def test_a_voice_id_with_a_backslash_round_trips_unambiguously(client):
     )
     assert response.status_code == 200
     assert response.headers["x-elvenspeak-voice-requested"] == "back\\x5cslash"
-
-
-def test_multi_speaker_voices_are_reported_in_the_listing(client):
-    """Read from the sidecar and now said out loud.
-
-    There is no ElevenLabs field to select a speaker with, so a multi-speaker
-    model always speaks as its default — better stated in the listing than
-    discovered by listening.
-    """
-    body = client.get("/v1/voices").json()
-    assert body["voices"]
-    assert all("speakers" in voice["labels"] for voice in body["voices"])
 
 
 @pytest.mark.parametrize("sent", ["", "   ", "-"])
