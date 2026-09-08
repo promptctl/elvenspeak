@@ -108,6 +108,13 @@ PROBE_INTERVAL = 2.0
 #: a wedged daemon surfaces as a named failure instead of a hung job.
 CLI_TIMEOUT = 120.0
 
+#: How long the stub fleet gets to answer. Distinct from DEFAULT_TIMEOUT, which is
+#: sized for a container loading a model: this one binds a socket and answers from
+#: memory, so a wait longer than this is a fleet the runner cannot route to rather
+#: than one still starting — and the image under test still has its own full
+#: budget to spend after it.
+FLEET_TIMEOUT = 30.0
+
 #: The variable a router reads to learn where to discover the engines it fronts.
 #: Held equal to `elvenspeak.router.CONSUL_URL` by `tests/test_smoke.py`, because
 #: this file cannot import it: a stub filling a variable the image no longer reads
@@ -548,7 +555,11 @@ def _fleet_address(url: str) -> str:
     """
     try:
         with urllib.request.urlopen(url, timeout=PROBE_INTERVAL) as answer:
-            return str(json.load(answer)["base_url"])
+            found = json.load(answer)["base_url"]
+            # Into the handler below, so a wrong answer and no answer fail alike.
+            if not isinstance(found, str) or not found:
+                raise TypeError(f"base_url was {found!r}")
+            return found
     # The same four names `_read_config` crosses on, plus the two a socket fails
     # with. `TypeError` is the one that looks redundant and is not: an answer that
     # is a JSON list or string takes a string subscript and raises it, not the
@@ -568,9 +579,7 @@ def _fleet_address(url: str) -> str:
 
 
 @contextmanager
-def _serving_fleet(
-    runtime: Runtime, image: str, platform: str | None, timeout: float
-) -> Iterator[str]:
+def _serving_fleet(runtime: Runtime, image: str, platform: str | None) -> Iterator[str]:
     """Run [`fleetstub`] beside the image, yielding the env entry that finds it.
 
     STARTED FROM THE IMAGE UNDER TEST, with its entrypoint replaced by the
@@ -612,7 +621,7 @@ def _serving_fleet(
 
     print(f"smoke: {runtime.name} running the stub fleet as {name}", flush=True)
     with _container(runtime, name, argv):
-        _await_serving(runtime, name, probe, timeout)
+        _await_serving(runtime, name, probe, FLEET_TIMEOUT)
         found = _fleet_address(probe)
         print(f"smoke: the stub fleet reports itself at {found}", flush=True)
         yield f"{CONSUL_URL_VAR}={found}"
@@ -640,7 +649,7 @@ def smoke(
     """
     with ExitStack() as running:
         supplied = (
-            [running.enter_context(_serving_fleet(runtime, image, platform, timeout))]
+            [running.enter_context(_serving_fleet(runtime, image, platform))]
             if fleet
             else []
         )
