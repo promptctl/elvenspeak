@@ -1041,16 +1041,20 @@ jobs:
             # costs nothing at this gate.
             chatterbox) boot=(--env CHATTERBOX_DEVICE=cpu) ;;
 
-            # Named, and given nothing, because what this leg needs is not an env var.
-            # Pointing ROUTER_CONSUL_URL at a reachable stub would not turn it green: a
-            # fleet with nothing in it is not refused (`elvenspeak/router.py`), so the
-            # router boots, has no voices, and answers /health 503 by design while
-            # `smoke.py` waits for 200 -- trading a 43-second config error for a
-            # 180-second timeout. It needs a stub Consul with a backend registered in it,
-            # which is a second container and therefore piper-build-b4h.4. THIS LEG IS
-            # RED ON EVERY PUBLISH UNTIL THAT LANDS, and the fleet's four service-version
-            # keys cannot move together while it is.
-            router)     boot=() ;;
+            # The router synthesizes nothing, so what it needs is not a setting but
+            # something to discover. `--fleet` runs `fleetstub.py` in a second container
+            # -- started from the image being smoked, so nothing is built or pulled --
+            # and points ROUTER_CONSUL_URL at it.
+            #
+            # An env var alone was tried first and is not enough, which is the whole of
+            # piper-build-b4h.4: a fleet with nothing in it is not refused
+            # (`elvenspeak/router.py`), so a reachable but empty stub gets a router that
+            # boots correctly, has no voices, and answers /health 503 by design while
+            # `smoke.py` waits for a 200 -- trading run 38's 43-second config error for a
+            # 180-second timeout that reads like a hang. Since piper-routing-7e2.17 the
+            # backend must also answer /v1/models, because the router asks each one which
+            # models its voices speak while it is still constructing itself.
+            router)     boot=(--fleet) ;;
 
             *)          boot=() ;;
           esac
