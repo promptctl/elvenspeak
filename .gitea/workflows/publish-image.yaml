@@ -400,11 +400,13 @@ jobs:
     env:
       RSS_CURVE_OUT: ${{ github.workspace }}/rss-curve.csv
 
-    # The suite fetches ~3.4 GB of models on a cold cache and synthesizes real audio on
-    # cpu; the same suite measures 12m20s on GitHub's runner. This is the "something
-    # hung" bound, not the expected duration, and it is longer than GitHub's 30 because
-    # there is no model cache on this side (see below) and this host has half the cpu.
-    timeout-minutes: 45
+    # SINCE piper-pipeline-4mx THIS SUITE FETCHES NOTHING AND LOADS NO MODEL. The 45
+    # was read off a job that did both -- ~3.4 GB cold against 12m20s on GitHub's
+    # larger runner -- and the download is what made the two sides differ, since this
+    # one deliberately had no model cache to miss. What is left is 3m49s of pure cpu,
+    # so this stays above GitHub's only for the reason that survives: half the cores.
+    # The "something hung" bound, not the expected duration.
+    timeout-minutes: 20
 
     steps:
       - name: Check out the commit under test
@@ -485,13 +487,11 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
-      # NO MODEL CACHE HERE, DELIBERATELY, and that is why the timeout above is 45.
-      # GitHub's workflow caches `models` to spare a required check from depending on
-      # HuggingFace being reachable. This job would rather pay the download: a cache is
-      # a second copy of the asset set, and the failure it hides -- serving a stale set
-      # to a suite that asked for a new one, and reporting it as a pass -- is precisely
-      # the one thing a PUBLISH gate must never do. A slow honest gate beats a fast one
-      # that can go green over the wrong models.
+      # NO MODEL CACHE, AND SINCE piper-pipeline-4mx NOTHING LEFT TO CACHE: this suite
+      # fetches no checkpoint and opens no model. What those runs proved -- that the
+      # model really speaks -- moved DOWN this pipeline rather than sideways, onto
+      # `speaks.py` against the running artifact, where the checkpoints are the ones
+      # the image actually baked.
       #
       # NOTHING RETRIES, for the reason `.github/workflows/tests.yml` spells out at
       # length: roughly one full-suite run in five has been seen to abort at
@@ -617,6 +617,11 @@ jobs:
     # of the chatterbox engine, died in `tests` four and a half minutes in at 23% with no
     # traceback of any kind, and every publish leg skipped behind it. The peak was 6.68
     # GiB then, on a runner the ops node reports 6925 MiB free on.
+    # THAT RUN CANNOT REPRODUCE AND THE RISK IS UNCHANGED, which is why the evidence
+    # stays rather than being retired with it: piper-pipeline-4mx took the models out of
+    # `tests`, so the job that was killed no longer loads one. The bake below still does
+    # — it clones from the model, which is the whole reason the figure above exists — so
+    # what moved is which job spends the 4.69 GiB, not whether this runner has it.
     # Enforcing it needs a mechanism act_runner actually reads — the
     # workflow-level `concurrency` group below is the only one proved on this runner, and
     # it scopes across runs rather than within one. Deliberately not replaced with an

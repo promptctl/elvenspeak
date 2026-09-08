@@ -33,11 +33,20 @@ this engine reads off `ChatterboxMultilingualTTS`, which are a `conds` slot it
 writes and a `generate` it calls.
 
 Two of them are not, and they went to `speaks.py` rather than being weakened
-here. That a real utterance comes back as audio and not as silence, and that two
-callers at once are each answered in their own voice, are claims about the model
-and about the machine it runs on — a stand-in agrees with them by construction,
-which is the same as not asking. They are asked of the published image instead,
+here. That a real utterance comes back as audio and not as silence is a claim
+about the model, and a stand-in agrees with it by construction — which is the
+same as not asking — so it is asked of every voice the published image offers,
 where the answer means something.
+
+The second was split rather than moved, and the split is the honest part.
+`speaks.py` puts two callers inside the real engine at once and establishes that
+each is answered in full — no refusal, no deadlock, no truncated or crossed body.
+It cannot establish whose voice answered: a swapped identity comes back fluent
+and the right length, and separating it from a correct answer over PCM would take
+a speaker embedding. So that half stays here, where the conditionals are objects
+a stand-in can tell apart and each result is compared against the same voice's
+uncontended one. Neither file holds the whole claim; between them none of it was
+dropped.
 
 One import survives, and it is stated rather than skipped past: the concurrency
 test imports torch, because the code it exercises builds its samples through

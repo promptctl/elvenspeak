@@ -25,6 +25,7 @@ whole point of the move this file exists to protect.
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
 from collections.abc import Iterator
@@ -80,6 +81,25 @@ class Fake:
     #: An odd byte count, which is not a whole number of 16-bit samples.
     odd_bytes: bool = False
 
+    #: A text answered with no audio at all. Kokoro's measured zero-sample defect
+    #: on short input, in the shape it would reach a caller if `Silence` did not
+    #: catch it first: a 200 carrying nothing.
+    silent_on: str | None = None
+
+    #: Texts answered at another text's length — `{sent: measured_as}`. The
+    #: crossed response, which is what a caller reading somebody else's answer
+    #: off a shared socket receives.
+    answers_as: dict[str, str] = field(default_factory=dict)
+
+    #: The fraction of the utterance the timeline claims to cover. 1.0 is a
+    #: timeline that ends where the audio ends; anything less is one that stops
+    #: short, which is the drift `elvenspeak/alignment.py` closes deliberately.
+    covers: float = 1.0
+
+    #: Whether the timestamps body arrives without the audio its timeline
+    #: measured, leaving the numbers with nothing to be checked against.
+    omits_audio: bool = False
+
     #: Status for the timestamps endpoint; 501 is the refusal a voice that does
     #: not measure owes.
     timestamps_status: int = 200
@@ -95,25 +115,56 @@ class Fake:
             return {"voices": self.voices_again}
         return {"voices": self.voices}
 
-    def audio(self, text: str, speed: float | None) -> bytes:
+    def samples(self, text: str, speed: float | None) -> int:
+        """How many samples one synthesis of `text` runs to.
+
+        [LAW:one-source-of-truth] The streamed audio, the audio inside the
+        timestamped body and the timeline measured over it are three renderings
+        of one utterance, so all three are divided out of this. Stated apart they
+        drifted by construction — the alignment ran 2.4s over 0.109s of audio,
+        which no server could return and which the accounting `speaks.py` now
+        checks could never have been asserted against.
+        """
+        measured = self.answers_as.get(text, text)
         count = (
             self.fixed_samples
             if self.fixed_samples is not None
-            else len(text) * self.samples_per_character
+            else len(measured) * self.samples_per_character
         )
         if speed is not None:
             count = int(count * self.speed_effect)
-        return b"\x00" * (count * speaks.BYTES_PER_SAMPLE + (1 if self.odd_bytes else 0))
+        return 0 if text == self.silent_on else count
 
-    def alignment(self, text: str) -> dict:
-        ends = self.ends if self.ends is not None else [
-            round(0.1 * (index + 1), 3) for index in range(len(text))
+    def audio(self, text: str, speed: float | None) -> bytes:
+        return b"\x00" * (
+            self.samples(text, speed) * speaks.BYTES_PER_SAMPLE
+            + (1 if self.odd_bytes else 0)
+        )
+
+    def timed(self, text: str) -> dict:
+        """The body `/with-timestamps` returns: the audio and its timeline.
+
+        The boundaries are divided out of the *sample count* so the last lands
+        exactly on the last sample, the same arithmetic `fleetstub.py` does and
+        for the same reason — a fake that relied on the slack `speaks.py` allows
+        would be a fake whose alignment is quietly wrong wherever the slack hides it.
+        """
+        samples = self.samples(text, None)
+        spread = [
+            self.covers * (index + 1) * samples / len(text) / speaks.SAMPLE_RATE
+            for index in range(len(text))
         ]
+        carried = {} if self.omits_audio else {
+            "audio_base64": base64.b64encode(self.audio(text, None)).decode("ascii")
+        }
         return {
+            **carried,
             "alignment": {
                 "characters": list(text),
-                "character_end_times_seconds": ends,
-            }
+                "character_end_times_seconds": (
+                    self.ends if self.ends is not None else spread
+                ),
+            },
         }
 
 
@@ -148,7 +199,7 @@ def _handler(fake: Fake) -> type[BaseHTTPRequestHandler]:
                     self._send(fake.timestamps_status, b'{"detail":"no"}',
                                {"content-type": "application/json"})
                     return
-                payload = json.dumps(fake.alignment(text)).encode()
+                payload = json.dumps(fake.timed(text)).encode()
                 self._send(200, payload, {"content-type": "application/json"})
                 return
 
@@ -253,6 +304,20 @@ def test_more_text_that_does_not_make_more_audio_is_refused():
     assert "more text did not make more audio" in message
 
 
+def test_a_voice_that_goes_silent_on_a_short_utterance_is_refused():
+    """The one defect a paragraph-length check cannot see.
+
+    Kokoro returned nothing for 15 of 16 one- and two-word Spanish lines while
+    reading a paragraph perfectly, so a conformance that only ever asked for
+    `TEXT` would have called that engine conformant. The refusal has to name the
+    text as well as the voice — "answered with nothing" sends a reader to the
+    voice, and the fault is in what it was asked to say.
+    """
+    message = refusal(Fake(silent_on=speaks.SHORT_TEXT))
+    assert repr(speaks.SHORT_TEXT) in message
+    assert "no audio at all" in message
+
+
 def test_a_declared_speed_that_does_nothing_is_refused():
     """The silent drop the declaration exists to rule out."""
     message = refusal(Fake(speed_effect=1.0))
@@ -320,6 +385,30 @@ def test_an_empty_alignment_is_refused():
     assert "empty alignment" in message
 
 
+def test_a_timeline_that_stops_short_of_its_audio_is_refused():
+    """The check that reads the alignment against the audio rather than itself.
+
+    `engine.TimedSpeech` promises its timings sum to the audio's sample count and
+    `elvenspeak/alignment.py` ends the last character exactly there, so a
+    half-length timeline is a broken promise — and one that every other check
+    here passes, because non-empty and ascending are both true of it. It is also
+    the defect with a downstream: `/stream/with-timestamps` lays each sentence
+    after where the last one said it ended, so the shortfall compounds.
+    """
+    message = refusal(Fake(covers=0.5))
+    assert "does not account for the utterance it describes" in message
+
+
+def test_an_alignment_answered_without_the_audio_it_measured_is_refused():
+    """A timeline handed over with nothing to check it against.
+
+    Refused as a malformed answer rather than surfacing as a `KeyError` inside
+    the accounting check, which is the same rule the catalogue is parsed under.
+    """
+    message = refusal(Fake(omits_audio=True))
+    assert "decodable audio" in message
+
+
 # ------------------------------------------------------------- the transport itself
 
 
@@ -339,3 +428,34 @@ def test_a_listing_without_the_fields_it_promises_is_refused():
     """A malformed catalogue is reported as that, not as a KeyError later on."""
     message = refusal(Fake(voices=[{"voice_id": "able"}]))
     assert "capabilities" in message
+
+
+# ------------------------------------------------------- what contention proves
+
+
+def test_two_voices_asked_at_once_are_each_answered():
+    """The positive control for the concurrent section, on the shape it targets.
+
+    Every other happy-path test here offers one voice, so `subjects` is that
+    voice twice and the two-different-speakers case — the one Chatterbox's
+    `conds` write makes dangerous — never runs. Two voices puts it under the
+    check that is supposed to cover it.
+    """
+    fake = Fake(voices=[dict(EVERYTHING), {"voice_id": "other", "capabilities": ["speed", "timestamps"]}])
+    with serving(fake) as url:
+        speaks.conform(url, timeout=5.0)
+
+
+def test_a_concurrent_caller_answered_at_the_wrong_length_is_refused():
+    """The crossed response: a plausible utterance that is not the one asked for.
+
+    Served on every request rather than only the concurrent ones, and that is
+    deliberate. `_conform_concurrently` is the only place in `speaks.py` where
+    these two lengths are read against each other, so a fake that misbehaved
+    only while two callers overlapped would be asserting its own timing rather
+    than the refusal — and would go green whenever the overlap it depends on
+    failed to happen ([LAW:no-ambient-temporal-coupling]).
+    """
+    message = refusal(Fake(answers_as={speaks.SHORT_TEXT: speaks.TEXT}))
+    assert "callers at once" in message
+    assert "crossed or truncated" in message

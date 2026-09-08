@@ -39,13 +39,22 @@ checkable is every consequence that shows up as arithmetic, and `pcm_*` is
 requested precisely so that arithmetic is available: raw signed 16-bit
 little-endian samples at a rate named in the format itself, with no container to
 subtract and no codec to make the byte count mean something else.
+
+Which speaker the audio is in belongs to the same list, and is stated because the
+concurrency check below is otherwise easy to read as proving it. An utterance
+returned in the wrong person's voice is fluent, the right length, and identical
+under every arithmetic here to a correct one. Separating those needs a speaker
+embedding, which is a model — the thing this file exists to do without.
+[`_conform_concurrently`] says what it does establish instead.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,9 +64,26 @@ from typing import Any
 PCM_FORMAT = "pcm_22050"
 BYTES_PER_SAMPLE = 2
 
+#: The rate every duration below is read at, taken out of the format that asks
+#: for it rather than written beside it. A second literal would be a second
+#: clock, and the one free to drift is the one no request ever carries.
+SAMPLE_RATE = int(PCM_FORMAT.removeprefix("pcm_"))
+
 #: Long enough that a rate change moves the length well outside any per-request
 #: jitter, and ordinary enough that no engine needs a pronunciation dictionary.
 TEXT = "One two three four five."
+
+#: A whole utterance in four characters, asked of every voice beside [`TEXT`].
+#: Kokoro has a measured zero-sample defect on short text — `ef_dora` returned
+#: nothing for 15 of 16 one- and two-word Spanish lines, which is why no Kokoro
+#: Spanish voice is baked (elvenspeak/chatterbox.py). Chatterbox produced healthy
+#: audio for every short line measured, and asserting that is not a courtesy to
+#: the engine that passes: whatever eventually renders mixed language feeds these
+#: engines spans this short, and one that goes silent on them is useless for it
+#: however well it reads a paragraph. The server refuses a silent synthesis with
+#: `Silence` rather than a 200 of nothing, so the defect arrives here as a named
+#: status on a named text.
+SHORT_TEXT = "Yes."
 
 #: Strictly longer than [`TEXT`], and longer by whole words rather than by
 #: punctuation: a trailing "!" is not reliably more audio in any engine here.
@@ -72,6 +98,16 @@ FASTER = 2.0
 #: to frames, pad, and trail off — but far enough below 1.0 that "the parameter
 #: was quietly dropped" cannot pass. Matches `test_speed_actually_changes_the_audio`.
 PACE_CHANGED = 0.75
+
+#: How far the end of the timeline may sit from the end of the audio it
+#: describes. The only legitimate error is the ffmpeg pass that resamples the
+#: engine's native rate into [`PCM_FORMAT`], which preserves a duration to within
+#: a sample or two — tens of microseconds — so this is three orders of magnitude
+#: looser than anything correct can need. It stays far tighter than the defect it
+#: rules out: a timeline stopping short of its audio makes the streaming endpoint
+#: lay the next sentence over the difference, sliding further with every sentence
+#: (elvenspeak/alignment.py).
+ACCOUNTED_SLACK = 0.05
 
 #: Seconds to wait on one synthesis. Chatterbox runs at 8-33x real time on cpu
 #: (elvenspeak/chatterbox.py:556) and these utterances are a couple of seconds
@@ -132,7 +168,12 @@ class Utterance:
     """What one synthesis returned: the audio, and what the server said about it."""
 
     audio: bytes
-    ignored: str
+    #: Empty for an answer that carried no such header, which is also what the
+    #: timestamp endpoint's body amounts to — it returns its audio inside JSON
+    #: and names nothing ignored, so [`_conform_timings`] builds one of these
+    #: from the decoded bytes and is held to the same bar as every other
+    #: synthesis rather than to a second, laxer reading of the same format.
+    ignored: str = ""
 
     @property
     def samples(self) -> int:
@@ -142,6 +183,11 @@ class Utterance:
         count *is* whole reads this and has to be able to see the bad case.
         """
         return len(self.audio) // BYTES_PER_SAMPLE
+
+    @property
+    def seconds(self) -> float:
+        """How long the audio runs, at the rate [`PCM_FORMAT`] asked for."""
+        return self.samples / SAMPLE_RATE
 
 
 def _speak(base_url: str, voice: str, text: str, speed: float | None = None) -> Utterance:
@@ -175,6 +221,33 @@ def _speak(base_url: str, voice: str, text: str, speed: float | None = None) -> 
         raise ConformanceFailure(
             f"speaking {text!r} in {voice!r} did not answer: {unreachable}"
         ) from unreachable
+
+
+def _audible(voice_id: str, text: str, spoken: Utterance) -> None:
+    """Refuse an answer that is not a whole utterance of the format asked for.
+
+    [LAW:single-enforcer] Every synthesis in this file arrives here, so what a
+    well-formed answer looks like is decided once and the concurrent callers are
+    held to exactly the bar the serial ones are. A second, local reading of the
+    same two rules is how contention becomes the one condition under which a
+    broken answer passes.
+
+    The text is named rather than only the voice, because a voice is asked for
+    more than one utterance now and the short one is where an engine is known to
+    go silent. "`ef_dora` answered with nothing" sends a reader to the voice;
+    "`ef_dora` was asked to say 'Yes.'" sends them to the defect.
+    """
+    if not spoken.audio:
+        raise ConformanceFailure(
+            f"{voice_id!r} was asked to say {text!r} and answered 200 with no "
+            "audio at all"
+        )
+    if len(spoken.audio) % BYTES_PER_SAMPLE:
+        raise ConformanceFailure(
+            f"{voice_id!r} said {text!r} in {len(spoken.audio)} bytes of "
+            f"{PCM_FORMAT}, which is not a whole number of 16-bit samples — the "
+            "audio is not the format it was asked for"
+        )
 
 
 def _voices(base_url: str, timeout: float) -> tuple[SpokenVoice, ...]:
@@ -238,19 +311,19 @@ def conform(base_url: str, timeout: float) -> None:
 
     # ------------------------------------------------------- what speaking proves
 
+    # [LAW:dataflow-not-control-flow] The short utterance is another value in the
+    # texts this loop speaks, never a second pass with a check of its own. Both
+    # lengths reach the same request, the same refusals and the same log line, so
+    # an engine that goes silent on four characters fails the check every voice
+    # already passes rather than one bolted on beside it.
     for voice in voices:
-        spoken = _speak(base_url, voice.id, TEXT)
-        if not spoken.audio:
-            raise ConformanceFailure(
-                f"{voice.id!r} is on offer and answered 200 with no audio at all"
+        for text in (TEXT, SHORT_TEXT):
+            spoken = _speak(base_url, voice.id, text)
+            _audible(voice.id, text, spoken)
+            print(
+                f"speaks: {voice.id} said {text!r} in {spoken.samples} samples",
+                flush=True,
             )
-        if len(spoken.audio) % BYTES_PER_SAMPLE:
-            raise ConformanceFailure(
-                f"{voice.id!r} returned {len(spoken.audio)} bytes of "
-                f"{PCM_FORMAT}, which is not a whole number of 16-bit samples — "
-                "the audio is not the format it was asked for"
-            )
-        print(f"speaks: {voice.id} spoke {spoken.samples} samples", flush=True)
 
     # Every property below is a comparison between two utterances, so it is asked
     # of one voice rather than all of them: what is under test is the engine's
@@ -258,12 +331,14 @@ def conform(base_url: str, timeout: float) -> None:
     # every voice on offer can be spoken in at all.
     subject = voices[0]
 
-    shorter = _speak(base_url, subject.id, TEXT)
-    longer = _speak(base_url, subject.id, LONGER_TEXT)
-    if longer.samples <= shorter.samples:
+    # Named for the texts and not for the audio: with [`SHORT_TEXT`] in the file,
+    # a `shorter` holding [`TEXT`]'s utterance reads as the wrong one of the two.
+    less_text = _speak(base_url, subject.id, TEXT)
+    more_text = _speak(base_url, subject.id, LONGER_TEXT)
+    if more_text.samples <= less_text.samples:
         raise ConformanceFailure(
-            f"{subject.id!r} made {longer.samples} samples of "
-            f"{len(LONGER_TEXT)} characters and {shorter.samples} of "
+            f"{subject.id!r} made {more_text.samples} samples of "
+            f"{len(LONGER_TEXT)} characters and {less_text.samples} of "
             f"{len(TEXT)} — more text did not make more audio, so the engine is "
             "not speaking what it was given"
         )
@@ -304,6 +379,10 @@ def conform(base_url: str, timeout: float) -> None:
     # ------------------------------------------- what a measured utterance owes
 
     _conform_timings(base_url, subject)
+
+    # --------------------------------------------- what holds under contention
+
+    _conform_concurrently(base_url, voices)
 
 
 def _conform_timings(base_url: str, voice: SpokenVoice) -> None:
@@ -360,8 +439,118 @@ def _conform_timings(base_url: str, voice: SpokenVoice) -> None:
             f"{voice.id!r} returned character end times that go backwards — a "
             "timeline that is not monotonic cannot describe an utterance"
         )
+
+    # The audio the timeline is a timeline OF, which is in the body beside it and
+    # was going unread. Without it every check above is internal to the
+    # alignment: an engine that measured a different utterance, or measured half
+    # of this one, satisfies "non-empty and ascending" completely.
+    try:
+        measured = Utterance(base64.b64decode(body["audio_base64"], validate=True))
+    except (KeyError, TypeError, ValueError) as malformed:
+        raise ConformanceFailure(
+            f"{voice.id!r} answered timestamps without decodable audio beside "
+            f"them: {malformed}"
+        ) from malformed
+    _audible(voice.id, TEXT, measured)
+
+    # `engine.TimedSpeech` promises its timings sum to the audio's sample count —
+    # every sample accounted for, whether or not the engine said what produced it
+    # — and `elvenspeak.alignment` ends the last character exactly there. So this
+    # is that seam invariant asked of the artifact, and it is the one check here
+    # that reads the audio and the timeline against each other rather than each
+    # against itself.
+    if abs(ends[-1] - measured.seconds) > ACCOUNTED_SLACK:
+        raise ConformanceFailure(
+            f"{voice.id!r} measured {len(ends)} characters ending at "
+            f"{ends[-1]:.3f}s against {measured.samples} samples of "
+            f"{PCM_FORMAT}, which run {measured.seconds:.3f}s — the timeline does "
+            "not account for the utterance it describes, so a caller laying the "
+            "next one after it slides by the difference every time"
+        )
     print(
         f"speaks: {voice.id} measured {len(ends)} characters ending at "
-        f"{ends[-1]:.2f}s",
+        f"{ends[-1]:.2f}s across {measured.seconds:.2f}s of audio",
+        flush=True,
+    )
+
+
+def _conform_concurrently(base_url: str, voices: tuple[SpokenVoice, ...]) -> None:
+    """Callers inside the engine at once are each answered in full.
+
+    The engines behind this seam are not reentrant, and one of them says so in
+    its own code: Chatterbox selects a speaker by WRITING to the model object and
+    then reading it back (`elvenspeak/chatterbox.py`, `_synthesized`), so two
+    unserialised callers can have the second one's write land between the first
+    one's write and its read. The server calls engines off the event loop, so two
+    requests naming two voices really are inside `speak` at the same time. This
+    is the shape that puts them there — against the real model, in the real
+    process, which a stand-in agrees with by construction.
+
+    WHAT THIS CANNOT SEE, stated because what is asserted below is otherwise easy
+    to read as more than it is: which speaker answered. A swapped identity comes
+    back fluent, the right length, in the wrong person, and no arithmetic over
+    PCM separates it from a correct answer — the module header lists it beside
+    mono and rate for that reason. `tests/test_chatterbox.py` proves the lock
+    that prevents it at the level of that engine's own code, where the
+    conditionals are objects that can be told apart.
+
+    WHAT IT DOES ESTABLISH is everything else contention breaks, none of which
+    any other check in this file would survive: a caller refused, a deadlock, a
+    truncated body, two responses interleaved on one socket, an answer that is
+    somebody else's length. Whether the two overlapped at all is the deployment's
+    `speaking_at_once` bound to decide and is not observable from out here; a
+    server that serialises them keeps every promise below, which is correct —
+    `tests/test_concurrency.py` owns the bound itself.
+
+    Two voices and not one, because a single-voice pair never writes two
+    different speakers. The first and the last of the offer rather than a slice,
+    so a deployment offering exactly one voice is asked the same question twice
+    instead of being quietly skipped ([LAW:dataflow-not-control-flow]).
+    """
+    subjects = (voices[0], voices[-1])
+    lengths = (SHORT_TEXT, TEXT)
+    callers_at_once = len(subjects) * len(lengths)
+
+    with ThreadPoolExecutor(max_workers=callers_at_once) as callers:
+        # Every caller submitted before any result is taken, which is the whole
+        # mechanism: resolving each future as it was created would run these one
+        # after another and prove nothing this file does not already know.
+        # `.result()` re-raises, so a caller refused under contention arrives as
+        # the `ConformanceFailure` `_speak` already built ([LAW:no-silent-failure]).
+        #
+        # Kept as a list of pairs and never keyed by voice: a deployment offering
+        # one voice makes `subjects` that voice twice, and a dictionary would
+        # have silently collapsed four answers into two — with the two it
+        # discarded being the ones nothing then checked.
+        started = [
+            (voice, [callers.submit(_speak, base_url, voice.id, text) for text in lengths])
+            for voice in subjects
+        ]
+        answered = [
+            (voice, tuple(caller.result() for caller in pair)) for voice, pair in started
+        ]
+
+    for voice, pair in answered:
+        for text, spoken in zip(lengths, pair, strict=True):
+            _audible(voice.id, text, spoken)
+
+    # Compared inside one voice and never across two. Across, this would be
+    # arithmetic on two speaking rates, and that two voices of one engine speak
+    # at comparable rates is not a property any engine here promises — a check
+    # resting on it would go red on a legitimately slow voice and read as a
+    # concurrency defect.
+    for voice, (short, whole) in answered:
+        if whole.samples <= short.samples:
+            raise ConformanceFailure(
+                f"under {callers_at_once} callers at once, {voice.id!r} answered "
+                f"{len(TEXT)} characters with {whole.samples} samples and "
+                f"{len(SHORT_TEXT)} with {short.samples} — each answer is a "
+                "plausible utterance and they are not the ones that were asked "
+                "for, which is what a crossed or truncated response looks like "
+                "from here"
+            )
+    print(
+        f"speaks: {callers_at_once} callers at once across "
+        f"{len({voice.id for voice, _ in answered})} voices were each answered in full",
         flush=True,
     )
