@@ -28,6 +28,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -106,6 +107,18 @@ class Fake:
 
     #: End times served for the alignment, when one is served at all.
     ends: list[float] | None = None
+
+    #: Seconds one synthesis occupies the engine, which is held to a single
+    #: caller at a time — `ELVENSPEAK_CONCURRENT_SYNTHESES=1`, a correct and
+    #: common deployment, in the smallest shape that reproduces it. At 0.0 the
+    #: engine is occupied for no time, so the serialisation is unobservable and
+    #: every other test here is answered as immediately as before.
+    engine_seconds: float = 0.0
+
+    #: The engine itself: one caller inside it at a time. Taken unconditionally
+    #: ([LAW:dataflow-not-control-flow]) so there is no second code path that
+    #: only the timing test runs.
+    engine: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     _calls: int = 0
 
@@ -193,6 +206,9 @@ def _handler(fake: Fake) -> type[BaseHTTPRequestHandler]:
             body = json.loads(self.rfile.read(length) or b"{}")
             text = body.get("text", "")
             speed = (body.get("voice_settings") or {}).get("speed")
+
+            with fake.engine:
+                time.sleep(fake.engine_seconds)
 
             if "/with-timestamps" in self.path:
                 if fake.timestamps_status != 200:
@@ -459,3 +475,27 @@ def test_a_concurrent_caller_answered_at_the_wrong_length_is_refused():
     message = refusal(Fake(answers_as={speaks.SHORT_TEXT: speaks.TEXT}))
     assert "callers at once" in message
     assert "crossed or truncated" in message
+
+
+def test_concurrent_callers_are_not_held_to_one_requests_budget(monkeypatch):
+    """A deployment that answers one caller at a time still conforms.
+
+    `_conform_concurrently` puts four requests in flight, and a deployment that
+    answers one caller at a time makes the last one admitted wait out the other
+    three before its own work starts. Held to the budget of a request that waits
+    behind nothing, that deployment fails conformance and blocks its own publish
+    for being what it is ([LAW:no-ambient-temporal-coupling]).
+
+    Not hypothetical, which is why this test exists rather than a comment:
+    elvenspeak-chatterbox:2026.09.08.1 answered every serial synthesis of a smoke
+    run and then timed out here on `builtin-es` saying "Yes." — four characters,
+    the shortest thing asked of it anywhere. Nothing in the image was wrong.
+
+    The budget is shrunk rather than the delay grown, because what is under test
+    is a ratio: four serialised syntheses outlast one request's budget and stay
+    well inside four of them. Growing the delay to the same ratio against the
+    real 180s would cost twelve minutes to assert the same thing.
+    """
+    monkeypatch.setattr(speaks, "SPEAK_TIMEOUT", 0.5)
+    with serving(Fake(engine_seconds=0.15)) as url:
+        speaks.conform(url, timeout=5.0)

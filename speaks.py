@@ -109,13 +109,14 @@ PACE_CHANGED = 0.75
 #: (elvenspeak/alignment.py).
 ACCOUNTED_SLACK = 0.05
 
-#: Seconds to wait on one synthesis. Chatterbox runs at 8-33x real time on cpu
-#: (elvenspeak/chatterbox.py:556) and these utterances are a couple of seconds
-#: of speech, so the slowest engine's worst case is around a minute. Its own
-#: constant rather than a reuse of `smoke.DEFAULT_TIMEOUT`: that one covers a
-#: container that may be loading a model, this covers a request to a server that
-#: has already loaded one, and collapsing the two is what turned a wedged fleet
-#: stub into a 360s hang before `FLEET_TIMEOUT` was split out.
+#: Seconds to wait on one synthesis that waits behind nothing. Chatterbox runs
+#: at 8-33x real time on cpu (elvenspeak/chatterbox.py:556) and these utterances
+#: are a couple of seconds of speech, so the slowest engine's worst case is
+#: around a minute. Its own constant rather than a reuse of
+#: `smoke.DEFAULT_TIMEOUT`: that one covers a container that may be loading a
+#: model, this covers a request to a server that has already loaded one, and
+#: collapsing the two is what turned a wedged fleet stub into a 360s hang
+#: before `FLEET_TIMEOUT` was split out.
 SPEAK_TIMEOUT = 180.0
 
 
@@ -190,12 +191,27 @@ class Utterance:
         return self.samples / SAMPLE_RATE
 
 
-def _speak(base_url: str, voice: str, text: str, speed: float | None = None) -> Utterance:
+def _speak(
+    base_url: str,
+    voice: str,
+    text: str,
+    speed: float | None = None,
+    *,
+    timeout: float,
+) -> Utterance:
     """One synthesis of `text` in `voice`, as raw PCM.
 
     `speed` is sent only when a caller asked for one, so an engine that does not
     honour it is not handed a `voice_settings` it would then name in
     `x-elvenspeak-ignored` and make the pace check unreadable.
+
+    [LAW:no-ambient-temporal-coupling] `timeout` is required and deliberately
+    has no default. How long a request may take is not a fact about synthesis;
+    it is a fact about how many callers the caller has in flight, and only the
+    caller knows that. A default of [`SPEAK_TIMEOUT`] would read as correct at
+    a contended call site while handing it the bound of a request that waits
+    behind nothing — the failure [`_conform_concurrently`] records against a
+    real image. The caller computes its bound; nothing here inherits one.
     """
     body: dict[str, Any] = {"text": text}
     if speed is not None:
@@ -207,7 +223,7 @@ def _speak(base_url: str, voice: str, text: str, speed: float | None = None) -> 
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=SPEAK_TIMEOUT) as answer:
+        with urllib.request.urlopen(request, timeout=timeout) as answer:
             return Utterance(
                 audio=answer.read(),
                 ignored=answer.headers.get("x-elvenspeak-ignored", ""),
@@ -318,7 +334,7 @@ def conform(base_url: str, timeout: float) -> None:
     # already passes rather than one bolted on beside it.
     for voice in voices:
         for text in (TEXT, SHORT_TEXT):
-            spoken = _speak(base_url, voice.id, text)
+            spoken = _speak(base_url, voice.id, text, timeout=SPEAK_TIMEOUT)
             _audible(voice.id, text, spoken)
             print(
                 f"speaks: {voice.id} said {text!r} in {spoken.samples} samples",
@@ -333,8 +349,8 @@ def conform(base_url: str, timeout: float) -> None:
 
     # Named for the texts and not for the audio: with [`SHORT_TEXT`] in the file,
     # a `shorter` holding [`TEXT`]'s utterance reads as the wrong one of the two.
-    less_text = _speak(base_url, subject.id, TEXT)
-    more_text = _speak(base_url, subject.id, LONGER_TEXT)
+    less_text = _speak(base_url, subject.id, TEXT, timeout=SPEAK_TIMEOUT)
+    more_text = _speak(base_url, subject.id, LONGER_TEXT, timeout=SPEAK_TIMEOUT)
     if more_text.samples <= less_text.samples:
         raise ConformanceFailure(
             f"{subject.id!r} made {more_text.samples} samples of "
@@ -348,8 +364,8 @@ def conform(base_url: str, timeout: float) -> None:
     # symmetric: an engine that silently drops a speed it declared, and one that
     # applies a speed it disclaimed, are the same defect seen from two sides, and
     # a check that only looked at declared voices would see one of them.
-    paced = _speak(base_url, subject.id, TEXT, speed=FASTER)
-    unpaced = _speak(base_url, subject.id, TEXT)
+    paced = _speak(base_url, subject.id, TEXT, speed=FASTER, timeout=SPEAK_TIMEOUT)
+    unpaced = _speak(base_url, subject.id, TEXT, timeout=SPEAK_TIMEOUT)
     changed = paced.samples < unpaced.samples * PACE_CHANGED
     if subject.paces and not changed:
         raise ConformanceFailure(
@@ -510,6 +526,20 @@ def _conform_concurrently(base_url: str, voices: tuple[SpokenVoice, ...]) -> Non
     subjects = (voices[0], voices[-1])
     lengths = (SHORT_TEXT, TEXT)
     callers_at_once = len(subjects) * len(lengths)
+    # [LAW:no-ambient-temporal-coupling] Each caller's bound is computed from how
+    # many are in flight, never inherited from a constant sized for a request
+    # that waits behind nothing. The four below share one deployment's cpus, and
+    # its `speaking_at_once` may serialise them outright, so the last one to be
+    # answered waits out the other three's work either way — the same total
+    # either way, which is what makes the widening exactly this and not a guess.
+    #
+    # Measured, not reasoned: elvenspeak-chatterbox:2026.09.08.1 answered every
+    # serial synthesis of that run and then failed here, on `builtin-es` saying
+    # 'Yes.' — the shortest utterance this file asks for anywhere, timing out at
+    # 180s because three other callers were in front of it. A conformant image,
+    # refused a publish by the clock it was held to rather than by anything it
+    # did.
+    contended = SPEAK_TIMEOUT * callers_at_once
 
     with ThreadPoolExecutor(max_workers=callers_at_once) as callers:
         # Every caller submitted before any result is taken, which is the whole
@@ -523,7 +553,15 @@ def _conform_concurrently(base_url: str, voices: tuple[SpokenVoice, ...]) -> Non
         # have silently collapsed four answers into two — with the two it
         # discarded being the ones nothing then checked.
         started = [
-            (voice, [callers.submit(_speak, base_url, voice.id, text) for text in lengths])
+            (
+                voice,
+                [
+                    callers.submit(
+                        _speak, base_url, voice.id, text, timeout=contended
+                    )
+                    for text in lengths
+                ],
+            )
             for voice in subjects
         ]
         answered = [
