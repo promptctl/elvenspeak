@@ -28,6 +28,7 @@ from conftest import (
     DECLARED_VOICES,
     DeclaredEngine,
     DeclaredPrepared,
+    declared,
     declaring,
 )
 from fastapi.testclient import TestClient
@@ -493,12 +494,53 @@ def test_api_key_is_enforced_when_configured():
 
 
 def test_timestamps_disabled_refuses_rather_than_inventing(client):
-    """[LAW:no-silent-failure] 501 beats plausible numbers derived from nothing."""
+    """[LAW:no-silent-failure] 501 beats plausible numbers derived from nothing.
+
+    The body is asserted as well as the status, because the two ways this gate
+    fails are a caller who cannot act on the refusal and a refusal that carried
+    the invented numbers anyway. The sentence comes from [`Capability`] itself, so
+    the endpoint names no engine and no environment variable — an operator reads
+    what the deployment cannot do rather than which of its parts said so.
+    """
     with served(settings_for(timings=False)) as plain:
         response = plain.post(
             f"/v1/text-to-speech/{VOICE}/with-timestamps", json={"text": "hello"}
         )
         assert response.status_code == 501
+        assert Capability.TIMESTAMPS.value in response.json()["detail"]
+        # No alignment anywhere in the body: a 501 that still carried a character
+        # timeline would be the invented numbers under a different status code.
+        assert "alignment" not in response.text
+
+
+def test_a_capability_the_deployment_withheld_is_refused_even_when_the_engine_kept_it(
+    client,
+):
+    """Withholding is an offer, and the server enforces it whether or not it is taken.
+
+    An engine may decline: Kokoro's durations come out of the one session it opens
+    either way, so there is no cheaper session for it to open instead and it goes
+    on declaring TIMESTAMPS truthfully. The deployment's answer is not its to give,
+    and this is the half of the setting that holds when an engine ignores it —
+    where `test_supplied_engine.py` holds the half that reaches an engine which
+    takes the offer up.
+
+    Both are asserted because either alone is satisfied by a bug: an engine that
+    quietly dropped the capability would pass the refusal, and a server that
+    filtered nothing would pass the declaration.
+    """
+    withholding = settings_for(withheld=frozenset({Capability.TIMESTAMPS}))
+    assert Capability.TIMESTAMPS in declared(withholding.engine.open())
+
+    with served(withholding) as guarded:
+        assert guarded.post(
+            f"/v1/text-to-speech/{VOICE}/with-timestamps", json={"text": "hello"}
+        ).status_code == 501
+        # Still a working deployment: this is one capability withheld, not a
+        # server that has stopped answering.
+        assert guarded.post(
+            f"/v1/text-to-speech/{VOICE}", json={"text": "hello"}
+        ).status_code == 200
 
 
 @pytest.mark.parametrize("text", ["   ", "\t\n ", " "])

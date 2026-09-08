@@ -1,10 +1,11 @@
 """Kokoro's own configuration, and the capability it is entitled not to have.
 
-`tests/test_conformance.py` already asks this engine every question the seam
-asks of all of them. What is left here is what only this engine can be asked:
-the environment it parses for itself, the voice ids it reads a language out of,
-and — the reason this engine was chosen — that whether it can place phonemes in
-time follows the export it was given rather than its name.
+`speaks.py` asks this engine every question the seam asks of all of them, and it
+asks the published image rather than an import. What is left here is what only
+this engine can be asked: the environment it parses for itself, the voice ids it
+reads a language out of, and — the reason this engine was chosen — that whether
+it can place phonemes in time follows the export it was given rather than its
+name.
 
 That last one is the ticket's subject and is worth stating plainly, because it
 is not what the ticket assumed. Kokoro was picked as an engine with no phoneme
@@ -13,52 +14,253 @@ not in others: `kokoro_onnx` decides it as `"duration" in session.get_outputs()`
 the `model-files-v1.0` export emits only `audio`, and every `model-files-v1.1`
 export emits `waveform` and `duration`. So the honest engine derives the
 capability from the session, and both halves of that are checked below.
+
+# Nothing in this file opens an export
+
+No test here downloads a model or opens an ONNX session, and the two stand-ins
+that make that possible are load-bearing in opposite directions.
+
+[`_pack`] is *real*: a style pack this file writes with numpy, holding the ids it
+was asked for and a vector too small to speak with. `_install` reads it the way
+it reads the published one — parses it, looks for each configured voice, reports
+what it offers — so the install path is exercised rather than skipped, and the
+~26 MB of published vectors were never what any of these tests were reading.
+
+[`_Session`] is a *stand-in*: the four things this engine reads off
+`kokoro_onnx.Kokoro`, and nothing else. It answers with the spans and the sample
+count it was handed, which is how a timeline whose arithmetic is checkable to the
+sample gets asserted at all — a real export reports what it reports, and the old
+tests could only ask whether the sum came out right.
+
+The cost of a stand-in is that the library may move underneath it, so it is held
+against the real class in `test_the_stand_in_answers_the_calls_this_engine_makes`
+— the one test here that imports `kokoro_onnx` for its own sake. With no real
+session anywhere in the suite, a renamed `create_timed` would otherwise be found
+by a caller and not by this file, which is the failure a stand-in earns.
+
+What no stand-in can answer — that the published export really loads, that its
+graph really reports durations, that a voice really speaks — is asked of the
+built image by `speaks.py`, against the artifact a deployment would run rather
+than against a session this machine happened to build.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass, field, fields
 
 import pytest
 from conftest import (
     SERVES,
     declared,
     serves,
-    KOKORO_MODEL,
-    KOKORO_TIMELESS_MODEL,
     KOKORO_VOICES,
-    MODELS_DIR,
     kokoro_prepared,
 )
 
 from elvenspeak import kokoro
-from elvenspeak.engine import Capability, Prosody
+from elvenspeak.engine import Capability, Prosody, Timing
 from elvenspeak.engines import ENGINES
 from elvenspeak.provisioning import ConfigError
 
 TEXT = "Compatibility is measurable, and this sentence is long enough to measure."
 
+#: The rate `_Session` reports, and the one every expected sample count below is
+#: arithmetic against. Not Kokoro's own 24 kHz: a stand-in that answered with the
+#: real constant would let a `sample_rate` read off the library instead of off the
+#: session agree with every assertion here by coincidence.
+#:
+#: A power of two, which is the whole reason for this number. Kokoro reports spans
+#: in floating-point seconds, so an expected sample count is a product of a float
+#: and this — and at 10000 a span written as `0.00015` multiplies out to
+#: 1.4999999999999998, which rounds the other way and makes the assertions below
+#: read as arbitrary. Here every span used is a dyadic fraction, every product is
+#: exact, and a boundary landing on a half sample does so because the test says so.
+RATE = 8192
 
-@pytest.fixture(scope="module")
-def engine(kokoro_installed):
-    """The engine as a default deployment opens it, built once for the module."""
-    return kokoro_prepared().open()
+
+def _span(phoneme: str, start: float, end: float) -> "kokoro_onnx.Timing":
+    """One phoneme's span, in the library's own type.
+
+    [LAW:one-source-of-truth] `kokoro_onnx.Timing` rather than a namedtuple of the
+    same three fields: `_stretches` reads `.start`, `.end` and `.phoneme` off
+    whatever it is handed, so a local description of that shape would be a second
+    map of the library's, free to keep agreeing with these tests after the library
+    had stopped agreeing with either.
+    """
+    from kokoro_onnx import Timing
+
+    return Timing(phoneme=phoneme, start=start, end=end)
+
+
+@dataclass
+class _Session:
+    """`kokoro_onnx.Kokoro`, reduced to the four things this engine reads off it.
+
+    An engine test needs a session that answers *chosen* audio and *chosen*
+    spans. A real export answers what it answers, so the timeline it produces can
+    only be checked for self-consistency — every old measurement test here summed
+    the durations and compared them to the audio, which is the one property that
+    holds just as well when every boundary is in the wrong place. Handed spans,
+    the whole timeline is arithmetic, and the assertions below are exact.
+
+    Honest about what it cannot do. `has_timings` is the flag the engine reads to
+    decide whether this export can measure, and a session that reports `False`
+    returns no spans — the pairing is a fact about the library, and a stand-in
+    free to claim one without the other would let `measured` be read back off the
+    capability rather than off what came back.
+
+    [LAW:no-shared-mutable-globals] `asked` records the calls this session
+    received, which is how forwarding is asserted directly instead of inferred
+    from the length of the audio. It is per-instance because the engine under test
+    owns exactly one.
+    """
+
+    #: How many samples every synthesis answers with. The audio is silence: this
+    #: file asserts where the boundaries fall, and `test_encoding.py` is where
+    #: sample values mean anything.
+    samples: int = 0
+    #: The per-phoneme spans `create_timed` reports, in seconds.
+    spans: tuple = ()
+    has_timings: bool = True
+    asked: list[dict] = field(default_factory=list)
+
+    def create(self, text, voice, speed=1.0, lang="en-us"):
+        return self._answer("create", text, voice, speed, lang)[:2]
+
+    def create_timed(self, text, voice, speed=1.0, lang="en-us"):
+        return self._answer("create_timed", text, voice, speed, lang)
+
+    def _answer(self, call, text, voice, speed, lang):
+        import numpy
+
+        self.asked.append(
+            {"call": call, "text": text, "voice": voice, "speed": speed, "lang": lang}
+        )
+        spans = list(self.spans) if self.has_timings else []
+        return numpy.zeros(self.samples, dtype=numpy.float32), RATE, spans
+
+
+def _speaking(session: _Session, *keys: str) -> kokoro.KokoroEngine:
+    """`session` as the engine a deployment naming `keys` would be serving.
+
+    Built the way `_Prepared.open` builds it — the voices described from their
+    ids, then put through `_declaring` so they carry what this session can do —
+    because an engine assembled any other way could serve a voice claiming a
+    capability its session does not have, which is the state this module is
+    arranged to make unreachable.
+    """
+    installed = {key: kokoro._describe(key, SERVES) for key in keys}
+    return kokoro.KokoroEngine(
+        session, kokoro._declaring(session, installed), sample_rate=RATE
+    )
+
+
+def _pack(models_dir, *keys: str):
+    """A style pack holding exactly `keys`, and an export file beside it.
+
+    Real npz rather than a monkeypatched `numpy.load`: `_install` opens this file,
+    reads its member names and reports what it offers, so writing one keeps that
+    whole path under test at the cost of a few hundred bytes. The vectors are a
+    single zero — nothing here speaks, and the pack's only job in this engine is
+    to answer whether a configured id is in it.
+
+    The export is a placeholder for the same reason `_fetch` is satisfied by any
+    file at the name: nothing in this file opens it. What proves a real export
+    loads is `speaks.py`, against the image that baked it.
+    """
+    import numpy
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    voices = models_dir / kokoro._VOICES_FILE
+    with voices.open("wb") as handle:
+        numpy.savez(handle, **{key: numpy.zeros(1, dtype=numpy.float32) for key in keys})
+    (models_dir / kokoro.DEFAULT_MODEL).write_bytes(b"not opened here")
+    return models_dir
+
+
+@pytest.fixture
+def opens(monkeypatch):
+    """`kokoro_onnx.Kokoro` answered by [`_Session`], and every session it opened.
+
+    The lifecycle methods reach the library by name at call time — `_open` does
+    its own `from kokoro_onnx import ...` — so replacing the attribute is enough,
+    and everything above it runs for real: the assets are fetched, the pack is
+    parsed, the voices are found, `_declaring` reads the session. What is skipped
+    is the ~145 MB parse of a graph nothing here asks a question of.
+
+    Yields the list rather than one session because `acquire` and `open` each open
+    their own, and "how many were opened" is a property one of the tests below is
+    about.
+    """
+    import kokoro_onnx
+
+    opened: list[_Session] = []
+
+    def _session(_model_path, _voices_path):
+        opened.append(_Session())
+        return opened[-1]
+
+    monkeypatch.setattr(kokoro_onnx, "Kokoro", _session)
+    return opened
+
+
+# ---------------------------------------------- the stand-in, held to the library
+
+
+def test_the_stand_in_answers_the_calls_this_engine_makes():
+    """[LAW:one-source-of-truth] `_Session` is a map of `Kokoro`; this redraws it.
+
+    Every other test in this file speaks to the stand-in, so the library is free
+    to rename a method or reorder a return without a single one of them going
+    red — the engine would keep passing here and fail on the first request an
+    image served. This is the only thing standing in that gap, which is why it
+    imports the real class rather than reading the stand-in back.
+
+    Names and parameters rather than behaviour: what `create_timed` *does* is the
+    library's business and is proved against the artifact by `speaks.py`. What
+    this engine depends on is that it exists, that it accepts these four
+    arguments by these names, and that a session carries `has_timings` — every
+    one of which is a promise the stand-in makes on the library's behalf.
+    """
+    import inspect
+
+    import kokoro_onnx
+
+    for call in ("create", "create_timed"):
+        real = inspect.signature(getattr(kokoro_onnx.Kokoro, call)).parameters
+        # By name, because the engine passes them by name. A library that made
+        # `lang` positional-only would leave this file green and every synthesis
+        # a TypeError.
+        assert {"text", "voice", "speed", "lang"} <= set(real), call
+        stood_in = inspect.signature(getattr(_Session, call)).parameters
+        assert set(stood_in) - {"self"} == {"text", "voice", "speed", "lang"}, call
+
+    # Read out of the source because `has_timings` is settled per instance, from
+    # the graph's outputs, and there is no instance here to ask — which is the
+    # whole point of the file. Textual and therefore weak, and still the only
+    # thing between a renamed attribute and an `AttributeError` in `_declaring`
+    # on the first boot of an image.
+    assert "self.has_timings" in inspect.getsource(kokoro_onnx.Kokoro)
+
+    assert [f.name for f in fields(kokoro_onnx.Timing)] == ["phoneme", "start", "end"]
 
 
 # ------------------------------------------------- the capability and its source
 
 
-def test_the_export_that_reports_durations_declares_it(engine):
+def test_the_export_that_reports_durations_declares_it():
     """The default deployment, whose export carries a `duration` output."""
+    speaking = _speaking(_Session(has_timings=True), *KOKORO_VOICES)
+
     # Per voice, not merely somewhere in the union: `open()` claims every voice
     # this export speaks carries the same set, and a stamp applied to only one of
-    # the voices this fixture loads would satisfy `declared()` while leaving the
+    # the voices a deployment loads would satisfy `declared()` while leaving the
     # rest silently incapable.
-    assert all(Capability.TIMESTAMPS in v.capabilities for v in engine.voices())
-    assert all(Capability.SPEED in v.capabilities for v in engine.voices())
+    assert all(Capability.TIMESTAMPS in v.capabilities for v in speaking.voices())
+    assert all(Capability.SPEED in v.capabilities for v in speaking.voices())
 
 
-def test_the_export_without_durations_does_not_declare_the_capability(
-    kokoro_timeless_installed,
-):
+def test_the_export_without_durations_does_not_declare_the_capability():
     """[LAW:one-source-of-truth] The capability follows the session, not the name.
 
     The same engine, the same voices, the same code — one older export — and it
@@ -66,132 +268,54 @@ def test_the_export_without_durations_does_not_declare_the_capability(
     module it would have been right for whichever export was current when it was
     written and quietly wrong for the other, and wrong in the expensive
     direction: a server reporting character timings it never measured.
-    """
-    engine = kokoro_prepared(model=KOKORO_TIMELESS_MODEL).open()
 
-    assert Capability.TIMESTAMPS not in declared(engine)
+    Asked of a session rather than of the two published exports, which is what
+    `_declaring` actually reads: the file name never reached it, and downloading
+    145 MB of `model-files-v1.0` to set one boolean was the long way round to
+    setting it.
+    """
+    speaking = _speaking(_Session(has_timings=False), *KOKORO_VOICES)
+
+    assert Capability.TIMESTAMPS not in declared(speaking)
     # Still a working engine, so this is a capability absent rather than a
     # deployment broken — the distinction the whole negotiation rests on.
-    assert Capability.SPEED in declared(engine)
-    assert engine.voices()
+    assert Capability.SPEED in declared(speaking)
+    assert speaking.voices()
 
 
-def test_an_engine_that_cannot_measure_says_so_rather_than_inventing_a_timeline(
-    kokoro_timeless_installed,
-):
+def test_an_engine_that_cannot_measure_says_so_rather_than_inventing_a_timeline():
     """The claim `speak_timed`'s `measured` makes, checked where it is hardest.
 
-    The server never reaches this: the 501 gate above refuses first, and that
-    gate is the single enforcer. But the engine's answer is written to be true
-    on its own — `measured` is read off whether timings really came back, not
-    off the capability that gated the call — and a `measured=True` written there
-    by habit would be invisible to every other test in this suite, since nothing
-    else ever asks a non-measuring engine to measure.
+    The server never reaches this: the 501 gate refuses first, and that gate is
+    the single enforcer. But the engine's answer is written to be true on its own
+    — `measured` is read off whether timings really came back, not off the
+    capability that gated the call — and a `measured=True` written there by habit
+    would be invisible to every other test in this suite, since nothing else ever
+    asks a non-measuring engine to measure.
 
     So this is the one place that asks. The timeline still spans the whole
     utterance, because `TimedSpeech` requires that of everyone; what changes is
     that it stops claiming the boundaries were measurements, which is what
     downstream reads to choose `Fidelity.INTERPOLATED`.
-    """
-    engine = kokoro_prepared(model=KOKORO_TIMELESS_MODEL).open()
-    voice = engine.voices()[0]
 
-    spoken = engine.speak_timed(voice, TEXT, Prosody())
+    One stretch and not merely "every stretch separates words": with nothing
+    attributed to anything there is nothing to divide the utterance at, so an
+    answer of several separators would be boundaries invented and then marked as
+    gaps — the same fabrication in a costume the weaker assertion accepts.
+    """
+    speaking = _speaking(_Session(samples=RATE, has_timings=False), *KOKORO_VOICES)
+
+    spoken = speaking.speak_timed(speaking.voices()[0], TEXT, Prosody())
 
     assert spoken.measured is False
+    assert spoken.timings == (Timing(samples=RATE, separates_words=True),)
     assert sum(timing.samples for timing in spoken.timings) * 2 == len(spoken.pcm)
-    assert all(timing.separates_words for timing in spoken.timings)
-
-
-def test_a_timestamps_request_is_refused_rather_than_answered_with_invented_numbers(
-    kokoro_timeless_installed,
-):
-    """The property this engine was added to prove, end to end through the API.
-
-    An engine that cannot measure must produce a refusal a caller can read, not
-    an alignment derived from nothing. The refusal is assembled from
-    [`Capability`]'s own sentence, so the endpoint names no engine and no
-    environment variable — this is the whole 501 gate, exercised for the first
-    time by an engine that really cannot do the thing.
-    """
-    from fastapi.testclient import TestClient
-
-    from elvenspeak import create_app
-    from elvenspeak.settings import Settings
-
-    prepared = kokoro_prepared(model=KOKORO_TIMELESS_MODEL)
-    settings = Settings(
-        engine=prepared,
-        engine_name="kokoro",
-        known_engines=frozenset(ENGINES),
-        withheld=frozenset(),
-        fallback=KOKORO_VOICES[0],
-        api_key=None,
-        host="127.0.0.1",
-        port=0,
-    )
-    client = TestClient(create_app(settings, prepared.open()))
-
-    response = client.post(
-        f"/v1/text-to-speech/{KOKORO_VOICES[0]}/with-timestamps",
-        json={"text": "Hello there."},
-    )
-
-    assert response.status_code == 501
-    detail = response.json()["detail"]
-    assert "how long each part of an utterance took" in detail
-    # No alignment anywhere in the body: a 501 that still carried a character
-    # timeline would be the invented numbers under a different status code.
-    assert "alignment" not in response.text
-
-
-def test_a_deployment_that_withheld_timestamps_is_obeyed_by_this_engine_too(
-    kokoro_installed,
-):
-    """The defect this setting was made for, against the engine that had it.
-
-    Switching timestamps off was `ELVENSPEAK_TIMESTAMPS` and only Piper read it,
-    so this engine — whose export really does report durations — answered the
-    timestamp endpoints anyway, silently, for an operator who had used the
-    documented name and could see nothing wrong. Driven from an environment
-    rather than from a constructed `Settings`, because the parse is half of what
-    broke: the setting has to be the server's and reach whichever engine ran.
-    """
-    from fastapi.testclient import TestClient
-
-    from elvenspeak import create_app
-    from elvenspeak.engines import ENGINES
-    from elvenspeak.settings import Settings
-
-    settings = Settings.from_env(
-        ENGINES,
-        {
-            "ELVENSPEAK_ENGINE": "kokoro",
-            "ELVENSPEAK_WITHHOLD": "timestamps",
-            "KOKORO_VOICES": ",".join(KOKORO_VOICES),
-            "KOKORO_MODELS_DIR": str(MODELS_DIR),
-            "KOKORO_MODEL": KOKORO_MODEL,
-            "KOKORO_ALLOW_DOWNLOAD": "0",
-        },
-    )
-    opened = settings.engine.open()
-
-    # The engine still declares it: the export has a `duration` output and
-    # saying otherwise would be this engine lying about itself. What changes is
-    # what the server offers, which is the deployment's answer and not its.
-    assert Capability.TIMESTAMPS in declared(opened)
-
-    client = TestClient(create_app(settings, opened))
-    assert client.post(
-        f"/v1/text-to-speech/{KOKORO_VOICES[0]}/with-timestamps",
-        json={"text": "Hello there."},
-    ).status_code == 501
 
 
 # ------------------------------------------------------------ what it speaks in
 
 
-def test_the_offered_order_is_the_configured_order(engine):
+def test_the_offered_order_is_the_configured_order(tmp_path, opens):
     """[LAW:one-source-of-truth] The first voice offered is the default voice.
 
     `Engine.voices` makes this order load-bearing: a deployment naming no
@@ -200,13 +324,20 @@ def test_the_offered_order_is_the_configured_order(engine):
     — or sorted for tidiness — would hand every such deployment `af_alloy`
     instead of the voice its operator listed first. Piper shipped exactly that
     bug and it was caught in review rather than by a test, so this is the test.
+
+    Driven through `open` rather than by constructing the engine, because the
+    order is set where the voices are described from the configured keys and an
+    engine handed a dict already in the right order would agree with any
+    arrangement of that code at all.
     """
-    assert [voice.id for voice in engine.voices()] == list(KOKORO_VOICES)
+    _pack(tmp_path, *KOKORO_VOICES)
+
+    ordered = kokoro_prepared(tmp_path).open()
+    assert [voice.id for voice in ordered.voices()] == list(KOKORO_VOICES)
 
     reversed_order = tuple(reversed(KOKORO_VOICES))
-    assert [
-        voice.id for voice in kokoro_prepared(voices=reversed_order).open().voices()
-    ] == list(reversed_order)
+    reversed_engine = kokoro_prepared(tmp_path, voices=reversed_order).open()
+    assert [voice.id for voice in reversed_engine.voices()] == list(reversed_order)
 
 
 @pytest.mark.parametrize(
@@ -268,91 +399,139 @@ def test_every_language_the_map_names_is_one_espeak_accepts():
     assert "zh" not in supported
 
 
-def test_a_voice_outside_the_default_english_speaks_through_its_own_phonemizer(
-    kokoro_installed,
-):
-    """The language map, exercised end to end rather than through a label.
-
-    `bf_emma` is en-gb and ships in `DEFAULT_VOICES`, so a default deployment
-    speaks a voice that no test spoke while the suite only ever synthesized the
-    two `a`-prefixed ones. That left the whole non-`en-us` half of the map
-    resting on the description path, which never reaches the phonemizer at all.
-    """
-    speaking = kokoro_prepared(voices=("bf_emma",)).open()
-
-    spoken = speaking.speak(speaking.voices()[0], TEXT, Prosody())
-    audio = b"".join(spoken.audio)
-
-    assert spoken.sample_rate == 24000
-    assert len(audio) > 0
-
-
-def test_every_measurement_accounts_for_every_sample(engine):
-    """[`TimedSpeech`]'s invariant, on the arithmetic most likely to break it.
+def test_every_measurement_accounts_for_every_sample():
+    """The whole timeline, to the sample, from spans chosen to produce all of it.
 
     Kokoro reports floating-point seconds and covers only the phonemes — the
-    lead-in before the first and the run-out after the last belong to none. The
-    derivation rounds each boundary once and takes differences, so the rounding
-    telescopes; rounding each duration on its own drifts by a sample per phoneme
-    and leaves a timeline slowly parting company with the audio it describes.
+    lead-in before the first and the run-out after the last belong to none — so
+    three separate things have to come out of one derivation: the run-up is a gap
+    rather than the start of the first word, a space between phonemes is a gap
+    too, and every sample is accounted for exactly once.
+
+    Asserted as the tuple rather than as three properties of it, which is what
+    the stand-in bought. Against a real export the spans are whatever the model
+    said, so the only checkable claim was the sum — and the sum holds just as
+    well when every boundary inside it is in the wrong place. Here the spans are
+    chosen, so each of the five stretches below is a number with a reason:
+
+        1024   the lead-in, before the first phoneme, marked as a gap
+        1024   the phoneme itself, which is not a gap
+        1024   the space between the two, which is
+        2048   the second phoneme
+        3072   the run-out, after the last phoneme, marked as a gap
+
+    A different implementation of the same contract has no freedom here; there is
+    exactly one timeline that describes these spans over this many samples.
     """
-    spoken = engine.speak_timed(engine.voices()[0], TEXT, Prosody())
+    session = _Session(
+        samples=RATE,
+        spans=(
+            _span("h", 0.125, 0.25),
+            _span(" ", 0.25, 0.375),
+            _span("ə", 0.375, 0.625),
+        ),
+    )
+    speaking = _speaking(session, *KOKORO_VOICES)
+
+    spoken = speaking.speak_timed(speaking.voices()[0], TEXT, Prosody())
 
     assert spoken.measured is True
-    assert spoken.timings
+    assert spoken.timings == (
+        Timing(samples=1024, separates_words=True),
+        Timing(samples=1024, separates_words=False),
+        Timing(samples=1024, separates_words=True),
+        Timing(samples=2048, separates_words=False),
+        Timing(samples=3072, separates_words=True),
+    )
     assert sum(timing.samples for timing in spoken.timings) * 2 == len(spoken.pcm)
 
 
-def test_the_lead_in_is_reported_as_a_gap_and_not_as_the_first_sound(engine):
-    """The audio before the first phoneme belongs to no word, and says so.
+def test_the_rounding_telescopes_rather_than_drifting_a_sample_per_phoneme():
+    """The reason boundaries are rounded once and durations are differences.
 
-    Kokoro's spans start a tenth of a second in; the audio before that is the
-    model's run-up. Folded into the first phoneme it would make the first word of
-    every utterance start early and last longer than it was measured to — a
-    caption that leads the speech, which is the failure that looks like taste
-    rather than a bug. The alternative that also keeps the samples adding up is
-    to absorb the lead-in silently, so the sum is not the property that catches
-    this; the first stretch's own answer is.
+    Every span here is one and a half samples wide, which is the shape the two
+    derivations disagree about. Rounding each *duration* on its own gives four
+    stretches of 2 and a timeline 8 samples long describing 6 samples of audio —
+    green under every sum-free assertion, and a caption drifting further behind
+    the speech with each phoneme. Rounding each *boundary* once and subtracting
+    gives 2, 1, 1, 2: the error cancels at the next boundary instead of
+    accumulating, and the total is exact by construction rather than by luck.
+
+    Six samples rather than a realistic utterance because the drift is one sample
+    per phoneme either way — at this size it is the whole answer, and at a
+    realistic size it is a rounding error nobody would read off a failure.
     """
-    spoken = engine.speak_timed(engine.voices()[0], TEXT, Prosody())
+    step = 3 / (2 * RATE)
+    session = _Session(
+        samples=6,
+        spans=tuple(
+            _span(chr(ord("a") + n), n * step, (n + 1) * step) for n in range(4)
+        ),
+    )
+    speaking = _speaking(session, *KOKORO_VOICES)
 
-    assert spoken.timings[0].separates_words is True
-    assert spoken.timings[0].samples > 0
+    spoken = speaking.speak_timed(speaking.voices()[0], TEXT, Prosody())
+
+    assert spoken.timings == (
+        Timing(samples=2, separates_words=False),
+        Timing(samples=1, separates_words=False),
+        Timing(samples=1, separates_words=False),
+        Timing(samples=2, separates_words=False),
+    )
 
 
-def test_word_gaps_inside_the_utterance_are_marked_too(engine):
-    """[LAW:one-source-of-truth] The one place Kokoro's alphabet is interpreted.
+@pytest.mark.parametrize(
+    "method,reaches,drain",
+    [
+        # Which library call each method reaches, and what it answers with — the
+        # two things the call sites differ in, passed as values rather than
+        # branched on. `speak` hands back an unstarted generator; `speak_timed`
+        # hands back finished bytes.
+        ("speak", "create", lambda spoken: list(spoken.audio)),
+        ("speak_timed", "create_timed", lambda spoken: spoken.pcm),
+    ],
+)
+def test_both_call_sites_hand_the_session_the_speed_and_the_voices_language(
+    method, reaches, drain
+):
+    """The two arguments an engine can drop without producing a single error.
 
-    More than two, which is the number that matters: the lead-in and the run-out
-    are separators whatever `_separates_words` answers, so a test asking only
-    whether *any* stretch separates words passes for an engine that has stopped
-    recognising spaces entirely. `alignment` divides each word's span across its
-    characters, so with no interior gaps every word of a sentence becomes one
-    word and the timeline stops being word-exact while still summing correctly.
+    `speak_timed` is a second call site into the same library and forwards the
+    same prosody, so a `speed` dropped only there returns a correctly-summing
+    timeline of an utterance spoken at the wrong rate — with the response header
+    reporting the speed as honoured. It was checked by comparing the lengths of
+    two utterances, which a `create_timed` that honoured speed while ignoring
+    `lang` also passes.
+
+    `lang` is the other half and the more expensive one: it selects the
+    phonemizer, so a voice whose language never reaches the library is read aloud
+    in English phonemes — fluent, confident, and wrong, with no error anywhere.
+    `bf_emma` is `en-gb` and ships in `DEFAULT_VOICES`, so a default deployment
+    speaks it; that this is a language espeak really accepts is the separate
+    claim `test_every_language_the_map_names_is_one_espeak_accepts` makes against
+    the backend.
+
+    Read off the call the session received rather than off the audio it returned,
+    because the audio is the library's answer and this is a question about what
+    the library was asked.
     """
-    spoken = engine.speak_timed(engine.voices()[0], TEXT, Prosody())
+    session = _Session(samples=RATE, spans=(_span("h", 0.125, 0.25),))
+    speaking = _speaking(session, "bf_emma")
 
-    gaps = [timing for timing in spoken.timings if timing.separates_words]
-    assert len(gaps) > 2
-    assert any(not timing.separates_words for timing in spoken.timings)
+    # Drained rather than merely called: `speak` synthesizes nothing until its
+    # samples are pulled, which is the property `_stream` exists for, so an
+    # undrained answer reaches the library not at all.
+    drain(getattr(speaking, method)(speaking.voices()[0], TEXT, Prosody(speed=2.0)))
 
-
-def test_a_measured_utterance_honours_speed_too(engine):
-    """`speak_timed` is a second call site, and it forwards the same prosody.
-
-    The pace test in the conformance suite drives `speak`, so a `speed` dropped
-    only on this path is invisible to it — and the timestamp endpoints would
-    return a correctly-summing timeline of an utterance spoken at the wrong rate,
-    with the ignored header reporting the speed as honoured.
-    """
-    voice = engine.voices()[0]
-
-    fast = engine.speak_timed(voice, TEXT, Prosody(speed=2.0))
-    slow = engine.speak_timed(voice, TEXT, Prosody(speed=0.5))
-
-    assert len(fast.pcm) < len(slow.pcm)
-    for spoken in (fast, slow):
-        assert sum(t.samples for t in spoken.timings) * 2 == len(spoken.pcm)
+    assert session.asked == [
+        {
+            "call": reaches,
+            "text": TEXT,
+            "voice": "bf_emma",
+            "speed": 2.0,
+            "lang": "en-gb",
+        }
+    ]
 
 
 # --------------------------------------------------------- its own environment
@@ -496,9 +675,7 @@ def test_samples_outside_the_nominal_range_clip_rather_than_wrap(sample, expecte
     assert int.from_bytes(pcm, "little", signed=True) == expected
 
 
-def test_an_export_that_downloaded_whole_and_is_not_a_model_fails_the_bake(
-    tmp_path, kokoro_installed
-):
+def test_an_export_that_downloaded_whole_and_is_not_a_model_fails_the_bake(tmp_path):
     """Presence is not readability, and the build is where that has to be caught.
 
     A `.onnx` can arrive complete, non-empty, and still not be a loadable graph:
@@ -511,14 +688,17 @@ def test_an_export_that_downloaded_whole_and_is_not_a_model_fails_the_bake(
     image that failed at container startup instead. `acquire` opens the session
     and discards it precisely so this fails here, where it is cheap, rather than
     on every container start forever.
+
+    The one test in this file that reaches the real `kokoro_onnx.Kokoro`, and it
+    needs no published export to do it — the property is that a *bad* file is
+    refused, and a bad file is thirty-six bytes. `_pack` supplies the sidecar so
+    the failure has to come from the graph and not from the file beside it.
     """
-    (tmp_path / "voices-v1.0.bin").write_bytes(
-        (kokoro_installed / "voices-v1.0.bin").read_bytes()
-    )
-    (tmp_path / KOKORO_MODEL).write_bytes(b"complete, non-empty, and not a model")
+    _pack(tmp_path, *KOKORO_VOICES)
+    (tmp_path / kokoro.DEFAULT_MODEL).write_bytes(b"complete, non-empty, and not a model")
 
     with pytest.raises(Exception) as raised:
-        kokoro_prepared(tmp_path, allow_download=False).acquire()
+        kokoro_prepared(tmp_path).acquire()
 
     # Not the empty-file guard and not a missing-file error: those would mean the
     # bake had rejected it for a reason that says nothing about the graph.
@@ -526,14 +706,17 @@ def test_an_export_that_downloaded_whole_and_is_not_a_model_fails_the_bake(
     assert not isinstance(raised.value, FileNotFoundError)
 
 
-def test_acquire_describes_what_it_installed(kokoro_installed):
+def test_acquire_describes_what_it_installed(tmp_path, opens):
     """[LAW:parse-dont-validate] The bake's guarantee is the voices it returns.
 
     An engine that cannot describe what it installed has not installed it, and
     the build is the last moment that failure is cheap.
     """
-    prepared = kokoro_prepared()
+    _pack(tmp_path, *KOKORO_VOICES)
+    prepared = kokoro_prepared(tmp_path)
+
     voices = prepared.acquire()
+    served = prepared.open().voices()
 
     assert [voice.id for voice in voices] == list(KOKORO_VOICES)
 
@@ -542,7 +725,7 @@ def test_acquire_describes_what_it_installed(kokoro_installed):
     # them capability-less while `open` serves them able to measure would be two
     # descriptions of one voice, disagreeing.
     assert {voice.id: voice.capabilities for voice in voices} == {
-        voice.id: voice.capabilities for voice in prepared.open().voices()
+        voice.id: voice.capabilities for voice in served
     }
     assert all(Capability.TIMESTAMPS in voice.capabilities for voice in voices)
 
@@ -552,17 +735,32 @@ def test_acquire_describes_what_it_installed(kokoro_installed):
     # cannot. Compared against the real declaration too, since agreeing on the
     # wrong set is what a dropped argument would also look like.
     assert {voice.id: voice.models for voice in voices} == {
-        voice.id: voice.models for voice in prepared.open().voices()
+        voice.id: voice.models for voice in served
     }
     assert all(voice.models == serves("kokoro") for voice in voices)
 
+    # One session each, and two in all: both lifecycle methods really opened one,
+    # which is what makes the two descriptions above answers from the session
+    # rather than from the filename it was opened by.
+    assert len(opens) == 2
 
-def test_a_voice_that_is_not_in_the_pack_is_caught_at_install(kokoro_installed):
+
+def test_a_voice_that_is_not_in_the_pack_is_caught_at_install(tmp_path, opens):
     """Caught against the file, not against a list this module keeps.
 
     A hard-coded roster of the 54 published voices would be a second map of the
     pack's contents, free to drift the day a pack ships a 55th — and drifting
     towards refusing voices that exist.
+
+    Which is why the pack here holds exactly one voice and the deployment names
+    two. A synthetic pack cannot prove a name the published one really carries —
+    that is `speaks.py`'s question, against an image whose bake really ran — but
+    it proves the only thing this code does with a pack: read what is in it, and
+    refuse what is not.
     """
-    with pytest.raises(ValueError, match="no voice named"):
-        kokoro_prepared(voices=("af_heart", "af_nonexistent")).acquire()
+    _pack(tmp_path, "af_heart")
+
+    with pytest.raises(ValueError, match="no voice named 'af_nonexistent'"):
+        kokoro_prepared(tmp_path, voices=("af_heart", "af_nonexistent")).acquire()
+
+    assert not opens, "the session was opened for a deployment already known bad"

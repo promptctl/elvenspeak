@@ -25,23 +25,26 @@ name; this one proves the empty set is a real answer that the server acts on.
 
 # What costs what
 
-Everything above the `chatterbox_installed` divider runs anywhere, needs no
-network and does not import the library — which is the same seam
-`tests/test_encoding.py` proves from the other side: `configure` parses the
-environment without importing `chatterbox`, so a machine with no accelerator and
-no 3 GiB to spare still checks the decisions this module actually makes.
+Nothing here fetches the checkpoints or loads the model. That used to be a
+divider halfway down this file, with ~3.06 GiB fetched once and ~4.69 GiB
+resident below it, and the whole of that is now gone: the questions those tests
+asked are answered either from configuration, or from [`_Model`] — the two things
+this engine reads off `ChatterboxMultilingualTTS`, which are a `conds` slot it
+writes and a `generate` it calls.
 
-One exception, and it is stated rather than skipped past: the concurrency test
-imports torch, because the code it exercises builds its samples through
+Two of them are not, and they went to `speaks.py` rather than being weakened
+here. That a real utterance comes back as audio and not as silence, and that two
+callers at once are each answered in their own voice, are claims about the model
+and about the machine it runs on — a stand-in agrees with them by construction,
+which is the same as not asking. They are asked of the published image instead,
+where the answer means something.
+
+One import survives, and it is stated rather than skipped past: the concurrency
+test imports torch, because the code it exercises builds its samples through
 `torch.int16`. On an install without the chatterbox extra it errors. That is the
 intended outcome — it is the only test proving the lock that keeps two callers
-from being answered in each other's voice, and a skip is indistinguishable from
-a pass in a summary.
-
-Below the divider the checkpoints are on disk: ~3.06 GiB fetched once, ~4.7 GiB
-resident per model opened, and synthesis at 8-33x real time on `cpu`. No test
-holds two at once — measured, two live models are 8.11 GiB against a build runner
-with 7.9 GB — and the refusals hold none, answerable from a table and a stat.
+from being answered in each other's voice at the level of this engine's own code,
+and a skip is indistinguishable from a pass in a summary.
 """
 
 from __future__ import annotations
@@ -49,21 +52,27 @@ from __future__ import annotations
 import re
 import threading
 import time
+from dataclasses import dataclass, field
 
 import pytest
 from conftest import (
     SERVES,
     chatterbox_prepared,
     declared,
-    reclaim,
     serves,
 )
 
 from elvenspeak import chatterbox
-from elvenspeak.engine import Capability, Prosody
+from elvenspeak.engine import Capability, Prosody, Timing
 from elvenspeak.provisioning import ConfigError
 
 TEXT = "Compatibility is measurable, and this sentence is long enough to measure."
+
+#: The rate [`_Model`] speaks at, and the one every sample count below is
+#: arithmetic against. Not the library's `S3GEN_SR`: a stand-in answering with
+#: the real constant would let a `sample_rate` read off the library instead of
+#: off the opened model agree with these assertions by coincidence.
+RATE = 8192
 
 
 def parsed(**overrides: str):
@@ -538,20 +547,90 @@ def test_the_class_is_left_as_it_was_found_even_when_the_load_raises():
 
 
 # ============================================================================
-# The divider the module docstring names. Below it the checkpoints are on disk;
-# what that costs, and why the refusals down here deliberately do not pay it, is
-# stated there rather than copied here — a second copy of a measured figure is
-# free to drift from the table it came from, and this one had.
+# Where the divider used to be. Below it the checkpoints were on disk and the
+# model was loaded; what that cost, and where the two claims that really needed
+# it went instead, is stated in the module docstring rather than copied here — a
+# second copy of a measured figure is free to drift from the table it came from,
+# and this one had.
 # ============================================================================
 
 
-@pytest.fixture(scope="module")
-def engine(chatterbox_installed):
-    """The engine as a default deployment opens it, built once for the module."""
-    return chatterbox_prepared(languages=("en", "es")).open()
+@dataclass
+class _Model:
+    """`ChatterboxMultilingualTTS`, reduced to the two things this engine uses.
+
+    `conds` is a slot rather than a value, and that is the whole reason this
+    engine has a lock: `generate` reads the speaker off it, so selecting a voice
+    means writing to the model object. A stand-in that took the speaker as an
+    argument would be a friendlier library than the real one and would make the
+    lock look like a precaution.
+
+    [LAW:no-shared-mutable-globals] `asked` records each call with the `conds`
+    that were in the slot when it ran, which is what lets a test ask whether a
+    voice was answered in its own speaker rather than in whoever was written last.
+    """
+
+    #: How many samples every synthesis answers with, as silence: nothing here
+    #: listens, and `test_encoding.py` is where sample values mean anything.
+    samples: int = 0
+    conds: object = "the checkpoints' own identity"
+    asked: list[dict] = field(default_factory=list)
+
+    def generate(self, text, language_id):
+        import torch
+
+        self.asked.append(
+            {"text": text, "language_id": language_id, "conds": self.conds}
+        )
+        return torch.zeros(1, self.samples)
 
 
-def test_the_offered_order_is_the_configured_order(chatterbox_installed):
+def speaking(model: _Model, *voices: tuple[str, str]) -> chatterbox.ChatterboxEngine:
+    """`model` as the engine a deployment naming these `(speaker, language)` pairs
+    would be serving.
+
+    Every voice of one speaker shares that speaker's identity, which is the whole
+    economy of offering 23 languages for the price of one model — so the
+    conditionals here are per speaker too, and a test can tell "answered in the
+    wrong language" apart from "answered in the wrong person".
+    """
+    conditionals = {speaker: f"the identity of {speaker}" for speaker, _ in voices}
+    spoken = {}
+    for speaker, language in voices:
+        item = chatterbox._describe(speaker, language, conditionals[speaker], SERVES)
+        spoken[item.voice.id] = item
+    return chatterbox.ChatterboxEngine(model, spoken, sample_rate=RATE)
+
+
+@pytest.fixture
+def loads(tmp_path, monkeypatch):
+    """`open` with the fetch answered by a snapshot and the load by [`_Model`].
+
+    Everything between those two runs for real — the language table is consulted,
+    the reference recordings are stat'd, `conds.pt` is looked for, the speaker and
+    language loops build the catalogue — which is where every property below
+    lives. What is skipped is the ~3.06 GiB download and the ~4.69 GiB load of
+    weights that no assertion here reads a single number out of.
+
+    Yields the models it loaded, because "how many were loaded" is the shape of
+    the memory ceiling this suite used to be killed by: two live models measured
+    8.11 GiB against a build runner with 7.9 GB.
+    """
+    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+
+    (tmp_path / chatterbox._BUILTIN_CONDITIONALS).write_bytes(b"")
+    loaded: list[_Model] = []
+
+    def _from_local(_checkpoints, _device):
+        loaded.append(_Model())
+        return loaded[-1]
+
+    monkeypatch.setattr(chatterbox, "_fetch", lambda models_dir, allow: tmp_path)
+    monkeypatch.setattr(ChatterboxMultilingualTTS, "from_local", _from_local)
+    return loaded
+
+
+def test_the_offered_order_is_the_configured_order(loads):
     """[LAW:one-source-of-truth] The first voice offered is the default voice.
 
     `Engine.voices` makes this order load-bearing: a deployment naming no
@@ -560,24 +639,14 @@ def test_the_offered_order_is_the_configured_order(chatterbox_installed):
     it — and this one has a second way to get it wrong, since its voices come out
     of a nested loop over two configured lists rather than out of one.
 
-    The one test here that needs two differently configured models, so it owns
-    both and holds them one at a time: measured, a second live model is 8.11 GiB
-    resident against a build runner with 7.9 GB. It takes `chatterbox_installed`
-    rather than `engine` for that reason — the module fixture would still be
-    holding the first while this opened the second.
-
-    [LAW:one-source-of-truth] Released through `reclaim`, which is what "one at a
-    time" always needed and a bare collect never did: collecting makes the first
-    model unreachable, but its pages go back to glibc's arena, and the arena is
-    what the OOM killer counts. Runs 24 through 28 each measured this test peaking
-    near 6.6 GiB with both models resident -- the suite's high-water mark is set
-    here and nowhere else, and it is the test every killed run died inside.
+    Two differently configured deployments, which used to be the most expensive
+    test in this repository: it held two live models one at a time and set the
+    suite's high-water mark near 6.6 GiB, and it is the test every killed run
+    died inside. The order comes out of the loops in `_open` and never out of the
+    weights, so both of those models were paid for to read a dictionary back.
     """
     ordered = chatterbox_prepared(languages=("en", "es")).open()
     assert [voice.id for voice in ordered.voices()] == ["builtin-en", "builtin-es"]
-
-    del ordered
-    reclaim()
 
     reversed_order = chatterbox_prepared(languages=("es", "en")).open()
     assert [voice.id for voice in reversed_order.voices()] == [
@@ -586,13 +655,15 @@ def test_the_offered_order_is_the_configured_order(chatterbox_installed):
     ]
 
 
-def test_the_engine_declares_nothing_it_cannot_do(engine):
+def test_the_engine_declares_nothing_it_cannot_do(loads):
     """The union over the voices on offer, which is how the server asks it.
 
-    The per-voice claim is asserted above without a model; this is the same fact
-    from the side the 501 gate reads, on voices a real `open` really produced.
+    The per-voice claim is asserted above from a description alone; this is the
+    same fact from the side the 501 gate reads, on voices a real `open` really
+    assembled — which is the half that would survive `_describe` staying honest
+    while `_open` stamped something onto the catalogue on its way past.
     """
-    assert declared(engine) == frozenset()
+    assert declared(chatterbox_prepared(languages=("en", "es")).open()) == frozenset()
 
 
 @pytest.fixture
@@ -606,8 +677,8 @@ def unfetched(monkeypatch):
     below would not notice, because a refusal that arrives late is still a
     refusal. This is what makes the ordering a property rather than an accident.
 
-    It is also what lets those two tests take no `chatterbox_installed`: with the
-    fetch refused, they need the library and no checkpoints at all.
+    It is also what lets those two tests need no checkpoints: with the fetch
+    refused, they need the library and nothing it would have downloaded.
     """
 
     def unreached(models_dir, allow_download):
@@ -660,7 +731,7 @@ def test_checkpoints_with_no_builtin_voice_are_refused_before_the_model_loads(
     would spend ~4.69 GiB and a minute of an operator's restart to be told what a
     directory listing already said.
 
-    Takes no `chatterbox_installed`: `_fetch` is answered with an empty directory
+    Needs no checkpoints: `_fetch` is answered with an empty directory
     and `from_local` is the thing that must not run, so the property is provable
     without the 3.06 GiB the fixture downloads. The library itself is needed, for
     the `SUPPORTED_LANGUAGES` the sibling checks read.
@@ -681,78 +752,74 @@ def test_checkpoints_with_no_builtin_voice_are_refused_before_the_model_loads(
     assert chatterbox.BUILTIN_SPEAKER in reported
 
 
-def test_an_engine_that_cannot_measure_says_so_rather_than_inventing_a_timeline(
-    engine,
-):
+def test_an_engine_that_cannot_measure_says_so_rather_than_inventing_a_timeline():
     """The claim `speak_timed`'s `measured` makes, on the engine that cannot measure.
 
     The server never reaches this — no voice declares TIMESTAMPS, so the 501 gate
     refuses first and that gate is the single enforcer. The engine's answer is
     written to be true on its own anyway, and this is the only place that asks:
-    the audio is real, every sample is accounted for, and the whole utterance is
-    one separator because none of it was attributed to anything.
+    every sample is accounted for, and the whole utterance is one separator
+    because none of it was attributed to anything.
 
     Inventing boundaries to fill the tuple is the one thing that must not happen
-    here, and it is the thing that would pass every other test in this suite.
+    here, and it is the thing that would pass every other test in this suite —
+    which is why the tuple is asserted whole rather than summed. A timeline of
+    four invented gaps sums exactly as well as one honest one.
     """
+    engine = speaking(_Model(samples=RATE), ("builtin", "en"))
+
     spoken = engine.speak_timed(engine.voices()[0], TEXT, Prosody())
 
     assert spoken.measured is False
+    assert spoken.timings == (Timing(samples=RATE, separates_words=True),)
     assert sum(timing.samples for timing in spoken.timings) * 2 == len(spoken.pcm)
-    assert all(timing.separates_words for timing in spoken.timings)
-    assert len(spoken.pcm) > 0
 
 
-def test_a_timestamps_request_is_refused_rather_than_answered_with_invented_numbers(
-    engine,
-):
-    """The refusal end to end, assembled from `Capability`'s own sentence.
+def test_an_utterance_that_came_back_empty_is_a_timeline_of_nothing():
+    """The other half of the same arithmetic, and the one with a division in it.
 
-    Kokoro proved this for an engine whose *export* could not measure. This one
-    proves it for an engine that never can, and whose voices therefore declare
-    the empty set — the first deployment here in which no endpoint that needs a
-    capability answers at all.
+    `TimedSpeech` requires the durations to sum to the sample count, and a
+    zero-sample answer meets that with no stretches at all — where a tuple
+    carrying one stretch of zero samples would be a timeline claiming a gap that
+    no audio is under. It is reachable: an engine that produced nothing is a state
+    every other engine here has a named path for, and this one answers it in
+    arithmetic rather than in a branch anybody wrote on purpose.
     """
-    from fastapi.testclient import TestClient
+    engine = speaking(_Model(samples=0), ("builtin", "en"))
 
-    from elvenspeak import create_app
-    from elvenspeak.engines import ENGINES
-    from elvenspeak.settings import Settings
+    spoken = engine.speak_timed(engine.voices()[0], TEXT, Prosody())
 
-    prepared = chatterbox_prepared()
-    settings = Settings(
-        engine=prepared,
-        engine_name="chatterbox",
-        known_engines=frozenset(ENGINES),
-        withheld=frozenset(),
-        fallback="builtin-en",
-        api_key=None,
-        host="127.0.0.1",
-        port=0,
-    )
-    client = TestClient(create_app(settings, engine))
-
-    response = client.post(
-        "/v1/text-to-speech/builtin-en/with-timestamps", json={"text": "Hello there."}
-    )
-
-    assert response.status_code == 501
-    assert Capability.TIMESTAMPS.value in response.json()["detail"]
-    # No alignment anywhere in the body: a 501 still carrying a character
-    # timeline would be the invented numbers under a different status code.
-    assert "alignment" not in response.text
+    assert spoken.pcm == b""
+    assert spoken.timings == ()
+    assert spoken.measured is False
 
 
-def test_a_short_utterance_is_answered_with_audio_rather_than_silence(engine):
-    """The short-utterance property the eventual mixed-language work needs.
+def test_each_voice_is_answered_in_its_own_speaker_and_its_own_language():
+    """[LAW:single-enforcer] Both of the model's mutable slots, read at the call.
 
-    Kokoro has a measured zero-sample defect on short inputs, which is why its
-    Spanish is deliberately not baked. Chatterbox does not: every short utterance
-    measured — three and four characters, in both languages — produced healthy
-    audio. Asserted here because whatever renders mixed language will feed this
-    engine short spans, and an engine that goes silent on them is useless for it
-    however well it reads a paragraph.
+    `generate` reads the speaker off `model.conds`, so selecting a voice means
+    writing to the model — and the language is a plain argument beside it. A voice
+    reaching the library with the wrong one of either is answered fluently, in the
+    wrong person or the wrong accent, with nothing raised anywhere. That is the
+    failure `test_two_voices_spoken_at_once_are_each_answered_in_their_own_voice`
+    proves cannot happen under concurrency; this is the same claim for one caller,
+    which is the version that catches a `conds` never written at all.
+
+    Two speakers and two languages rather than one of each, because the catalogue
+    is their product: with a single speaker, an engine that wrote whichever
+    identity it cloned last passes.
     """
+    model = _Model(samples=RATE)
+    engine = speaking(
+        model, ("builtin", "en"), ("builtin", "es"), ("nobody", "en"), ("nobody", "es")
+    )
+
     for voice in engine.voices():
-        spoken = engine.speak(voice, "Yes.", Prosody())
-        assert len(b"".join(spoken.audio)) > 0, voice.id
+        b"".join(engine.speak(voice, TEXT, Prosody()).audio)
+
+    assert [(call["conds"], call["language_id"]) for call in model.asked] == [
+        ("the identity of builtin", "en"),
+        ("the identity of builtin", "es"),
+        ("the identity of nobody", "en"),
+        ("the identity of nobody", "es"),
+    ]

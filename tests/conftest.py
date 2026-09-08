@@ -5,11 +5,16 @@ voice on disk that no real download produced, and a second copy of "what a
 `.onnx.json` has to contain" would be free to drift from the first — leaving one
 file testing against a sidecar shape the other has stopped believing in.
 
-`DeclaredEngine` and the per-engine asset fixtures — `piper_installed`,
+`DeclaredEngine` is here for the same reason: it is the engine every
+capability test drives, and more than one module drives it.
+
+The per-engine asset fixtures that used to sit beside it — `piper_installed`,
 `kokoro_installed`, `kokoro_timeless_installed`, `chatterbox_installed` — are
-here for the same reason
-from the two other directions a test reaches an engine: the fake one every
-capability test drives, and where the real ones' models are kept.
+gone, and with them the ~3.4 GB the suite fetched to run. Nothing here provisions
+a model any more. What a real model proves about a real deployment is asked of
+the built image by `speaks.py`, which runs the artifact rather than a session
+this machine happened to assemble; each engine's own test module stands in for
+the library at the seam it actually reads.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ from pathlib import Path
 import pytest
 from fastapi.dependencies import models as _fastapi_dependencies
 
-from elvenspeak import chatterbox, memory, router, settings as settings_mod
+from elvenspeak import chatterbox, kokoro, memory, router, settings as settings_mod
 from elvenspeak.engine import (
     Capability,
     Prosody,
@@ -322,19 +327,8 @@ MODELS_DIR = Path(
     os.environ.get("PIPER_MODELS_DIR", Path(__file__).parent.parent / "models")
 )
 
-#: The Kokoro export the suite synthesizes with, and the voices it offers.
-#: `KOKORO_TIMELESS_MODEL` is the published `model-files-v1.0` export, whose ONNX
-#: graph has no `duration` output — the real deployment in which Kokoro cannot
-#: place phonemes in time, and so the subject of the tests about refusing to.
-KOKORO_MODEL = "kokoro-v1.0.int8.onnx"
-KOKORO_TIMELESS_MODEL = "kokoro-v1.0-notimings.onnx"
+#: The Kokoro voices the tests configure a deployment with.
 KOKORO_VOICES = ("af_heart", "am_michael")
-_KOKORO_TIMELESS_URL = (
-    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
-    "model-files-v1.0/kokoro-v1.0.int8.onnx"
-)
-
-
 #: The accelerator the suite opens Chatterbox on, and the one setting this engine
 #: refuses to guess for itself.
 #:
@@ -360,80 +354,6 @@ CHATTERBOX_DEVICE = os.environ.get(chatterbox.DEVICE, "cpu")
 #: engine's own property and is asserted in `test_chatterbox.py` where it costs
 #: one description rather than four minutes of CPU synthesis.
 CHATTERBOX_LANGUAGE = "en"
-
-
-#: [LAW:no-silent-failure] These replaced a `skipif` that removed the tests when
-#: the models were absent. A skip is indistinguishable from a pass in a summary,
-#: so the suite's most expensive claims — that a real engine satisfies the
-#: contract — silently stopped being made on exactly the machines least likely to
-#: have run them before. Provisioning is what the marker should always have done:
-#: the assets are obtainable, so a missing one is a thing to fetch rather than a
-#: reason to assert nothing.
-#:
-#: [LAW:composability] One fixture per engine, rather than one that installs
-#: everything. A module that exercises Piper should not need Kokoro's ~142 MB and
-#: a working espeak-ng, and with a single fixture its asset bill grew every time
-#: an engine was registered. Each is fetched through that engine's own `acquire`,
-#: which is the door the image build uses, so a change that broke provisioning
-#: breaks this too. Idempotent and session-scoped: a warm checkout fetches
-#: nothing.
-
-
-@pytest.fixture(scope="session")
-def piper_installed() -> Path:
-    """The Piper voice the tests that synthesize for real speak in."""
-    piper_prepared(allow_download=True).acquire()
-    return MODELS_DIR
-
-
-@pytest.fixture(scope="session")
-def kokoro_installed() -> Path:
-    """Kokoro's default export and its style pack."""
-    kokoro_prepared(allow_download=True).acquire()
-    return MODELS_DIR
-
-
-@pytest.fixture(scope="session")
-def chatterbox_installed() -> Path:
-    """Chatterbox's checkpoint set: ~3.06 GiB, and the reason it is its own fixture.
-
-    Fifteen times Kokoro's export, so a module that exercises Piper must not pay
-    for it — which is the argument every fixture here is already made under, at
-    the scale that makes it obvious. Fetched through `acquire`, the door the
-    image build uses, so a change that broke provisioning breaks this too.
-
-    `acquire` also *opens* the model, unlike Piper's and Kokoro's: this engine
-    has one model behind every voice, and loading it is the only way to learn
-    that 3 GiB of checkpoints are a model rather than 3 GiB of bytes. So this
-    fixture costs a load and a clone as well as a download.
-    """
-    chatterbox_prepared(allow_download=True).acquire()
-    return MODELS_DIR
-
-
-@pytest.fixture(scope="session")
-def kokoro_timeless_installed(kokoro_installed: Path) -> Path:
-    """The one asset no `acquire` installs: the export reporting no durations.
-
-    Its own fixture, so only the two tests that need this second ~92 MB export
-    pay for it. A deployment chooses one export, so no engine's provisioning has
-    cause to fetch a second — but the property under test is that the capability
-    follows the export rather than the engine's name, and that is unfalsifiable
-    with only the export that reports durations.
-
-    Downloaded through `kokoro._fetch` rather than by a copy of it here. This was
-    a hand-rolled duplicate that had already lost the empty-body check and the
-    partial-file cleanup its original grew, which is the drift a second copy is
-    always free to do — and it would have poisoned the shared `models/` cache
-    with a file every later run treated as installed. Reaching for a private is
-    the smaller evil: there is one implementation of download-verify-rename, and
-    the release this asset comes from is the caller's business, which is why
-    `_fetch` takes the URL.
-    """
-    from elvenspeak import kokoro
-
-    kokoro._fetch(MODELS_DIR / KOKORO_TIMELESS_MODEL, _KOKORO_TIMELESS_URL, True)
-    return MODELS_DIR
 
 
 def serves(name: str) -> frozenset[str]:
@@ -464,7 +384,7 @@ def kokoro_prepared(
     models_dir: Path = MODELS_DIR,
     *,
     voices: tuple[str, ...] = KOKORO_VOICES,
-    model: str = KOKORO_MODEL,
+    model: str = kokoro.DEFAULT_MODEL,
     allow_download: bool = False,
 ):
     """Kokoro configured for a test, through the door a deployment uses.
@@ -474,8 +394,6 @@ def kokoro_prepared(
     some other way would keep passing after the parse it skipped stopped being
     able to produce that value.
     """
-    from elvenspeak import kokoro
-
     return kokoro.configure(
         {
             "KOKORO_VOICES": ",".join(voices),
