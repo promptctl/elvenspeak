@@ -47,6 +47,7 @@ than against a session this machine happened to build.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING
 
 import pytest
 from conftest import (
@@ -59,8 +60,10 @@ from conftest import (
 
 from elvenspeak import kokoro
 from elvenspeak.engine import Capability, Prosody, Timing
-from elvenspeak.engines import ENGINES
 from elvenspeak.provisioning import ConfigError
+
+if TYPE_CHECKING:  # pragma: no cover - import cost is real, the symbol is not
+    import kokoro_onnx
 
 TEXT = "Compatibility is measurable, and this sentence is long enough to measure."
 
