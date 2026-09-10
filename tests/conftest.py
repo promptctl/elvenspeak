@@ -15,21 +15,31 @@ a model any more. What a real model proves about a real deployment is asked of
 the built image by `speaks.py`, which runs the artifact rather than a session
 this machine happened to assemble; each engine's own test module stands in for
 the library at the seam it actually reads.
+
+The reclaim that ran before and after every test went with them, and it went on
+a measurement rather than an argument, because that is what its own docstring
+asked for: 1537 calls cost 116s of cpu, and taking them out — with the file that
+tested them — took the suite from 233s to 147s and moved the peak resident set
+from 590.0 MiB to 601.2 MiB. Eleven mebibytes, against the runner that was
+OOM-killed at 5.5 GiB carrying a 3412 MiB Chatterbox model no test was using.
+Both halves of what it defended against left with the models: `malloc_trim` hands
+back pages a model dirtied, and the FastAPI memos it cleared pin every app the
+suite builds — which now weigh kilobytes apiece, four thousand entries before the
+cache evicts one. `tests/rsscurve.py` still names the test that raises the
+high-water mark, so a model finding its way back into this suite is still legible
+from a killed run.
 """
 
 from __future__ import annotations
 
-import ctypes
-import gc
 import json
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from itertools import groupby
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
-from fastapi.dependencies import models as _fastapi_dependencies
 
 from elvenspeak import chatterbox, kokoro, memory, router, settings as settings_mod
 from elvenspeak.engine import (
@@ -40,158 +50,6 @@ from elvenspeak.engine import (
     Timing,
     Voice,
 )
-
-
-def _heap_trimmer() -> Callable[[], None]:
-    """glibc's `malloc_trim`, or the no-op that stands in for it elsewhere.
-
-    Resolved once into a callable rather than asked per test:
-    [LAW:dataflow-not-control-flow] which platform this is, is a value read at
-    import, and the hook below runs the same single line on every machine.
-    """
-    try:
-        libc = ctypes.CDLL("libc.so.6")
-        libc.malloc_trim.argtypes = [ctypes.c_size_t]
-        libc.malloc_trim.restype = ctypes.c_int
-    except (OSError, AttributeError):
-        # Both ways a platform can lack this, rather than only the one this
-        # project runs on: macOS has no `libc.so.6` at all, and a musl system's
-        # glibc shim loads under that name while missing the symbol. The second
-        # would otherwise raise at conftest import and take the whole collection
-        # down instead of degrading to the no-op named above.
-        return lambda: None
-    return lambda: libc.malloc_trim(0)
-
-
-#: Bound at import, so the hook is one call rather than a platform test.
-_trim_the_heap = _heap_trimmer()
-
-
-@pytest.hookimpl(wrapper=True)
-def pytest_runtest_teardown(item):
-    """Hand a test's memory back to the kernel before the next test starts.
-
-    `free` returns a block to glibc's arena, not to the kernel, and the build
-    runner's OOM killer counts the arena. Run 23 measured exactly that gap:
-    `test_the_offered_order_is_the_configured_order` opened two Chatterbox
-    models, dropped both, and finished holding 5134.6 MiB against the 858.1 MiB
-    it was handed -- 4276 MiB resident with nothing alive to account for it. The
-    job died four minutes later at 5305.8 MiB against 5478 MiB available, having
-    grown 171 MiB in between. It was not killed by what it was doing; it was
-    killed by what it had already finished doing and not given back.
-
-    [LAW:dataflow-not-control-flow] Every test, unconditionally, rather than the
-    two places a model is dropped today. The set of tests that hold something
-    worth reclaiming is not a fact this hook should have to know, and a release
-    that each test has to remember is one a new test will forget -- which is the
-    shape the suite already had, in the `del` and `gc.collect()` that
-    `test_the_offered_order_is_the_configured_order` performs by hand between its
-    two loads. On a heap with nothing to return this costs microseconds.
-
-    [LAW:no-ambient-temporal-coupling] The reclaim has one owner and one moment.
-    Before this, whether the suite survived depended on whether the allocator
-    happened to reuse a dead test's pages for a live test's model -- which run 23
-    got (row 8 grew by 171 MiB for a whole model) and which nothing guarantees,
-    on a runner whose available memory moved 825 MiB across four runs.
-
-    A wrapper, and it has to be. A plain hook here is registered after the
-    builtin ones and therefore runs *before* them, so it would trim a heap whose
-    fixtures had not been torn down yet; yielding first puts the trim after the
-    teardown it exists to collect. `tests/test_reclaim.py` runs the hooks and
-    asserts that ordering, so it is enforced rather than described.
-    """
-    try:
-        return (yield)
-    finally:
-        reclaim()
-
-
-@pytest.hookimpl(wrapper=True)
-def pytest_runtest_setup(item):
-    """And again before a body runs, for whatever setup itself let go.
-
-    Kept on a weaker justification than this docstring used to give, so the
-    weaker one is written down. It claimed a module-scoped fixture is finalized
-    during the setup of the first test of the *next* module. It is not: the
-    builtin teardown calls `SetupState.teardown_exact(nextitem)`, so a scope the
-    next test does not share is released inside the *previous* test's teardown,
-    which the hook above already covers. `tests/test_reclaim.py` prints that
-    order rather than assuming it. It also cited runs 24 and 25 as measuring the
-    need for this hook, which they cannot have: both were dying of the retention
-    [`_endpoint_memos`] describes, which no trim at any moment could return.
-
-    What is left is anything released during setup itself, at microseconds on a
-    heap with nothing to hand back. An unnecessary reclaim is harmless and a
-    missing one is a 137 forty minutes in, so it stays until something measures
-    it needless rather than argues it.
-
-    [LAW:one-source-of-truth] Both moments call [`reclaim`]. Two spellings of
-    "give the memory back" are free to drift into two different ideas of what
-    that means.
-    """
-    try:
-        return (yield)
-    finally:
-        reclaim()
-
-
-def _endpoint_memos() -> tuple[Callable[[], None], ...]:
-    """FastAPI's memos keyed on the endpoint callable, resolved once at import.
-
-    `fastapi.dependencies.models` answers "is this callable a coroutine, a
-    generator, an async generator" out of caches 4096 entries deep, keyed on the
-    callable itself. Every handler [`elvenspeak.api.create_app`] builds is a
-    closure over the engine it serves, so an app the suite has finished with
-    stays reachable from those caches — and the engine it closed over, and that
-    engine's 3412 MiB model, with it.
-
-    That is why runs 24, 25 and 26 trimmed and nothing moved: the model was not
-    free memory glibc was declining to return, it was memory Python could still
-    reach, and no allocator call can hand back a live object. `live=2` on run 27
-    is what finally distinguished the two.
-
-    Found by asking for the attribute rather than by naming the three functions:
-    they are private names in a third-party module, and a rename there should
-    cost a recomputation rather than the whole reclaim. `tests/test_reclaim.py`
-    asserts the property this is here for, so a FastAPI that moved these caches
-    somewhere else fails a test instead of quietly reintroducing the OOM.
-    """
-    return tuple(
-        value.cache_clear
-        for value in vars(_fastapi_dependencies).values()
-        if callable(getattr(value, "cache_clear", None))
-    )
-
-
-#: Bound at import for the same reason [`_trim_the_heap`] is: which memos exist
-#: is a fact about the installed FastAPI, read once, not per test.
-_drop_endpoint_memos = _endpoint_memos()
-
-
-def reclaim():
-    """Let go of what the last test finished with, then hand back its pages.
-
-    Three steps, and no one of them frees anything alone. The memos pin a
-    finished app, so a collect reaches nothing while they still hold it; the app
-    is cyclic, so dropping them only turns it into garbage; and only once that
-    garbage is actually collected has the trim anything to return.
-
-    So the order is load-bearing in one direction: the collect has to follow the
-    drop. Reversed, the drop runs last and leaves a cyclic engine sitting until
-    the *next* reclaim, with this call's trim handing back nothing -- and on a
-    3412 MiB model that one-test lag is exactly what the runner's OOM killer
-    counts. `tests/test_reclaim.py` holds this in its `cyclic` case. Nothing held
-    it before: the stand-in engine is acyclic, and against an acyclic engine both
-    orders free within the call, because the leading collect reaps the app's own
-    cycle and the drop is then releasing the last reference.
-
-    What cost three cycles was the missing drop rather than the sequence;
-    [`_endpoint_memos`] has that story.
-    """
-    for drop in _drop_endpoint_memos:
-        drop()
-    gc.collect()
-    _trim_the_heap()
 
 
 #: Every variable a startup answers for — the server's own and the engines' —

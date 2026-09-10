@@ -5,10 +5,10 @@ This exists because `tests` is being SIGKILLed on the act_runner with no
 traceback, and a whole-process figure cannot say which test raised the mark.
 `ru_maxrss` is monotonic within a process -- it only ever rises -- so the test
 whose `peak_after` exceeds its predecessor's is, exactly, the one that raised it.
-`rss_before` is read at `logstart`, which pytest fires before the setup-side
-reclaim, so it is what the test was *entered* with rather than what it was
-handed: `peak_after - rss_before` brackets that test's transient rather than
-isolating it. It is read there because only `logstart` can name a victim the
+`rss_before` is read at `logstart`, which pytest fires before setup runs, so it
+is what the test was *entered* with rather than what its fixtures handed it:
+`peak_after - rss_before` brackets that test's transient rather than isolating
+it. It is read there because only `logstart` can name a victim the
 killer takes mid-test, and that is worth more here than a cleaner subtraction.
 
 Appended and flushed per test rather than assembled at session finish, because
@@ -113,10 +113,12 @@ def pytest_configure(config):
 
 #: Nodeids that printed an `enter`, so that every one of them also prints a
 #: `peak`. The victim-naming rule reads an `enter` with no `peak` after it as the
-#: test the killer took, and the teardown reclaim this branch added makes a test
-#: able to finish below the floor it started above -- which would close the run
-#: with an unpaired `enter` on a test that survived, and send the reader to
-#: diagnose an OOM that never happened. An unpaired `enter` has to mean a death.
+#: test the killer took, and resident memory falls without being asked -- the
+#: collector runs on its own schedule and the allocator returns pages when it
+#: likes -- so a test can finish below the floor it started above. Unguarded,
+#: that closes the run with an unpaired `enter` on a test that survived and
+#: sends the reader to diagnose an OOM that never happened. An unpaired `enter`
+#: has to mean a death.
 _entered = set()
 
 
