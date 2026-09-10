@@ -1106,7 +1106,7 @@ jobs:
       # indistinguishable from a pass. [LAW:dataflow-not-control-flow]
       #
       # How the image is run — what each engine needs before it can answer, which runtime,
-      # why unconfined — belongs to `smoke-image`, which `prove` calls as well.
+      # under what memory ceiling — belongs to `smoke-image`, which `prove` calls as well.
       # [LAW:one-source-of-truth]
       #
       # The reference is the dated one this leg just built under, handed over by the tag

@@ -103,6 +103,14 @@ LONGER_TEXT = "One two three four five, six seven eight nine ten, eleven twelve.
 #: which a third's spread still leaves 1.7x the longest "Yes.".
 APART = (SHORT_TEXT, LONGER_TEXT)
 
+#: How many callers [`_conform_concurrently`] puts inside a server at once: both
+#: of [`APART`], in each of two voices. A deployment's synthesis width is exercised
+#: here only up to this many, which is why `.gitea/actions/smoke-image` names
+#: exactly this width when it confines an image — a wider one would be a claim
+#: about concurrency nothing here ever tested. `tests/test_workflow.py` holds the
+#: two equal.
+CALLERS_AT_ONCE = 2 * len(APART)
+
 #: The speed to compare against 1.0. The same figure `tests/test_conformance.py`
 #: uses, and for the reason stated there: fast enough that the shortening is
 #: unmistakable, slow enough that no engine refuses it.
@@ -590,6 +598,7 @@ def _conform_concurrently(base_url: str, voices: tuple[SpokenVoice, ...]) -> Non
     """
     subjects = (voices[0], voices[-1])
     callers_at_once = len(subjects) * len(APART)
+    assert callers_at_once == CALLERS_AT_ONCE, "CALLERS_AT_ONCE no longer counts these callers"
     # [LAW:no-ambient-temporal-coupling] Each caller's bound is the work of every
     # caller in flight, never the budget of a request that waits behind nothing.
     # The four below share one deployment's cpus, and its `speaking_at_once` may

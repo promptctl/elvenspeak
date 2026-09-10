@@ -53,9 +53,10 @@ from smoke import (
     _declared_port,
     _docker_image_config,
     _fleet_address,
+    _container,
     _footprint,
+    _print_footprint,
     _read_config,
-    _read_footprint,
     select_runtime,
 )
 
@@ -447,28 +448,67 @@ def test_an_unconfined_limit_is_quoted_as_the_kernel_writes_it():
     assert "against a limit of max," in _footprint(unconfined)
 
 
-@pytest.mark.parametrize(
-    "stdout",
-    [
-        "",
-        "4595712\n",
-        "4595712\n268435456\nanon 49152\n",
-        "4595712\n268435456\nanon\nfile 4308992\n",
-        "a lot\nmax\nanon 49152\nfile 4308992\n",
-    ],
-    ids=["nothing", "no limit line", "no page cache figure", "a counter with no value", "a peak that is not a number"],
-)
-def test_a_cgroup_that_answers_in_an_unreadable_shape_is_refused_not_traced(
-    monkeypatch, stdout
-):
-    """[LAW:no-silent-failure] A footprint nobody can read is a failed smoke, not a traceback.
+def _answering(stdout: str, returncode: int = 0, stderr: str = ""):
+    """An `_attempt` stand-in that answers every call with one result."""
+    return lambda argv: subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr=stderr)
 
-    The same boundary `_read_config` keeps: `_footprint` unpacks and indexes, so
-    each shape here raised past `main`'s handler before it was crossed in one place.
+
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "stderr"),
+    [
+        ("", 0, ""),
+        ("4595712\n", 0, ""),
+        ("4595712\n268435456\nanon 49152\n", 0, ""),
+        ("4595712\n268435456\nanon\nfile 4308992\n", 0, ""),
+        ("a lot\nmax\nanon 49152\nfile 4308992\n", 0, ""),
+        ("", 1, "Error response from daemon: container is not running"),
+    ],
+    ids=[
+        "nothing",
+        "no limit line",
+        "no page cache figure",
+        "a counter with no value",
+        "a peak that is not a number",
+        "a container that is gone",
+    ],
+)
+def test_a_footprint_nobody_can_read_is_printed_with_why_not_raised(
+    monkeypatch, capsys, stdout, returncode, stderr
+):
+    """[LAW:no-silent-failure] Said out loud, and never in place of the verdict.
+
+    The read runs in cleanup, while a failure may already be on its way up, so a
+    raise here would replace that verdict — the same reason `_print_logs` prints a
+    bad `logs` call rather than raising one. The exit and the runtime's own reason
+    travel with it, which is how a container the kernel killed reads.
     """
-    monkeypatch.setattr("smoke._capture", lambda argv: stdout)
-    with pytest.raises(SmokeFailure, match="shape this cannot read"):
-        _read_footprint(DOCKER, "elvenspeak-smoke-abc")
+    monkeypatch.setattr("smoke._attempt", _answering(stdout, returncode, stderr))
+    _print_footprint(DOCKER, "elvenspeak-smoke-abc")
+
+    printed = capsys.readouterr().out
+    assert "elvenspeak-smoke-abc left no memory figure this can read" in printed
+    assert f"`docker exec` exited {returncode}" in printed
+    assert stderr in printed
+
+
+def test_what_a_container_cost_is_printed_when_its_smoke_went_red(monkeypatch, capsys):
+    """The figure is wanted most from the run that failed.
+
+    Gitea run 6276 lost chatterbox's peak, the one number piper-build-b4h.scw needed
+    most, because it was read only after conformance passed and conformance did not.
+    A failure raised inside the container's lifetime must still leave its footprint
+    behind it.
+    """
+    monkeypatch.setattr("smoke._capture", lambda argv: "")
+    monkeypatch.setattr("smoke._attempt", _answering(APPLE_CONFINED_CGROUP))
+
+    with pytest.raises(SmokeFailure, match="crossed"):
+        with _container(DOCKER, "elvenspeak-smoke-abc", ["docker", "run"]):
+            raise SmokeFailure("an answer came back crossed")
+
+    assert "smoke: elvenspeak-smoke-abc peaked at 4 MiB against a limit of 256 MiB" in (
+        capsys.readouterr().out
+    )
 
 
 def test_an_image_that_cannot_speak_is_reported_as_a_failed_smoke_not_traced(
