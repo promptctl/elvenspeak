@@ -739,10 +739,20 @@ jobs:
     # change until the builder can complete a build at all, and a serialisation that
     # silently does nothing is what is already here. [LAW:no-ambient-temporal-coupling]
     #
-    # fail-fast off for the same reason these get separate names and separate service
-    # keys: separate services that share an API surface, not attempts at one thing. One
-    # engine's build failing is not a reason to leave the others' deployments with no
-    # image — the run still goes red, and the legs that could be published are.
+    # fail-fast off, and what that buys stops at this job's edge. Inside it the legs are
+    # independent: one engine's build or smoke going red here cancels no other leg, and
+    # the legs that pass still publish. Before it they are not. `needs: prove` names the
+    # whole matrix, Gitea waits for every leg of it and rolls them into one result that
+    # fails if any leg failed (`AggregateJobStatus` via `FindTaskNeeds`, read in Gitea
+    # 1.27's source), and this job's `if:` carries the implicit `success()` — so one
+    # engine whose proof went red skips every leg here and no engine publishes. Observed
+    # on gitea run 60 (2026-09-10, a dispatch): four red proofs, four publish legs skipped
+    # with no step run, the registry untouched. That run could not tell "any leg" from
+    # "every leg"; the source is what does.
+    #
+    # The fleet-wide block is the right one. The four tags go into home-infra together, in
+    # one commit (CLAUDE.md), so three fresh images beside a fourth that never proved is a
+    # rollout nobody may deploy.
     # ---------------------------------------------------------------------------
     strategy:
       fail-fast: false

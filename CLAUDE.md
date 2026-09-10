@@ -16,10 +16,14 @@ Instead: build in CI from a commit, tag `YYYY.MM.DD.N`, push to the homelab regi
 
 Merging a pull request on GitHub builds nothing and publishes nothing. No mirror, no poller, no schedule, no webhook. GitHub (`origin`) is the development and review surface and knows nothing about images. Nothing that happens on GitHub reaches this network. Images come from exactly two deliberate acts, both performed by a human or an agent, and the first is the one that matters:
 
-    git push gitea master          # the normal path: publishes the dated tag and :latest
+    git push gitea master          # the normal path: publishes the dated tag and :latest,
+                                   # but only if reachability, tests and prove pass — red at
+                                   # any of those publishes no image. Inside publish, a red
+                                   # smoke stops only that engine's push.
 
     # ...and dispatching the workflow by hand on any ref, which publishes that
-    # ref's dated tag. It cannot move :latest — only master does that.
+    # ref's dated tag behind the same gates. Off master it cannot move :latest —
+    # only master does that.
 
 Rehearse the moment, because it is coming: the PR is merged, the checks are green, and you think *"the image should land in a few minutes — I'll go check the registry."* Nothing is coming. No run ever started. You can wait all afternoon and find an empty registry. After every merge to master, push to gitea, or there is no build. The remote is already in this clone — `gitea` → `ssh://git@gitea.sanctuary.gdn:2222/brandon-fryslie/elvenspeak.git` — and it is a build remote only; nothing ever flows back from it to GitHub. Because the trigger is a deliberate push, gitea is allowed to sit behind GitHub's master: that gap is not a mess to tidy up, it means nobody has asked for a build of those commits yet.
 
