@@ -82,6 +82,12 @@ class Fake:
     #: An odd byte count, which is not a whole number of 16-bit samples.
     odd_bytes: bool = False
 
+    #: Bytes a streamed answer promises and never sends: a 200 whose body stops
+    #: short. What an image that cannot encode answers, because the stream's
+    #: headers are out before the encoder is found missing — measured on
+    #: elvenspeak-piper and -router 2026.09.08.1 run with ffmpeg off their PATH.
+    cut_short_by: int = 0
+
     #: A text answered with no audio at all. Kokoro's measured zero-sample defect
     #: on short input, in the shape it would reach a caller if `Silence` did not
     #: catch it first: a 200 carrying nothing.
@@ -188,11 +194,15 @@ def _handler(fake: Fake) -> type[BaseHTTPRequestHandler]:
         def log_message(self, *_args) -> None:
             """Silence: a passing test should not print an access log."""
 
-        def _send(self, status: int, payload: bytes, headers: dict[str, str]) -> None:
+        def _send(
+            self, status: int, payload: bytes, headers: dict[str, str], missing: int = 0
+        ) -> None:
             self.send_response(status)
             for name, value in headers.items():
                 self.send_header(name, value)
-            self.send_header("content-length", str(len(payload)))
+            # Promising `missing` bytes past what is written is how a body that
+            # stops short looks on the wire: the connection closes still owing them.
+            self.send_header("content-length", str(len(payload) + missing))
             self.end_headers()
             self.wfile.write(payload)
 
@@ -238,7 +248,7 @@ def _handler(fake: Fake) -> type[BaseHTTPRequestHandler]:
             )
             if speed is not None and not declares and fake.names_ignored_speed:
                 headers["x-elvenspeak-ignored"] = "voice_settings.speed"
-            self._send(200, fake.audio(voice, text, speed), headers)
+            self._send(200, fake.audio(voice, text, speed), headers, missing=fake.cut_short_by)
 
     return Handler
 
@@ -454,6 +464,21 @@ def test_a_server_that_is_not_there_is_refused_by_name():
     with pytest.raises(speaks.ConformanceFailure) as raised:
         speaks.conform("http://127.0.0.1:1", timeout=2.0)
     assert "/v1/voices" in str(raised.value)
+
+
+def test_a_stream_cut_off_after_its_200_is_refused_by_name_not_traced():
+    """[LAW:no-silent-failure] A body that stops short is a refusal, not a traceback.
+
+    The one failure a smoke of a healthy image that cannot speak actually
+    produces: the status was already 200, so there is no refusal to catch, only
+    a body that ends early — `http.client.IncompleteRead`, which is not an
+    `OSError`. `_speak` caught socket errors alone, and on
+    elvenspeak-piper:2026.09.08.1 with ffmpeg off its PATH `conform` left as a
+    bare traceback naming neither the voice nor the text.
+    """
+    message = refusal(Fake(cut_short_by=1))
+    assert repr(speaks.TEXT) in message
+    assert "IncompleteRead" in message
 
 
 def test_a_listing_without_the_fields_it_promises_is_refused():

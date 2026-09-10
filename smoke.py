@@ -15,13 +15,15 @@ engine does not read, an `open()` that raises on the image's own environment,
 `uv run --no-dev main.py` failing on a dependency present at build and absent at
 runtime, a `USER elvenspeak` that cannot read what root baked.
 
-WHAT IT ASKS THE IMAGE. Two questions, and they are not the same question:
+WHAT IT ASKS THE IMAGE. Three questions, and they are not the same question:
 
   1. Does the service answer `/health` with 200, from outside the container?
   2. Does the image's *own* `HEALTHCHECK` — the command an orchestrator runs —
      exit 0, executed inside the container?
+  3. Does it speak? [`speaks`] asks every property the engine seam promises,
+     over HTTP, of the running container.
 
-Both come from the image rather than from this repository. `PORT` is read from
+The first two are read from the image rather than from this repository. `PORT` is read from
 the image's environment and the healthcheck out of its config, so this file
 holds no second copy of either ([LAW:one-source-of-truth]). Reading them from
 the Dockerfile instead was the obvious shortcut and is the wrong one: it would
@@ -729,9 +731,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run a container image and prove it serves.",
         epilog=(
-            "Exits 0 only when /health answered 200 and the image's own HEALTHCHECK "
-            "exited 0 inside the running container. The container's logs are printed "
-            "either way."
+            "Exits 0 only when /health answered 200, the image's own HEALTHCHECK "
+            "exited 0 inside the running container, and every property speaks.py "
+            "asks held. The container's logs are printed either way."
         ),
     )
     parser.add_argument("image", help="the image reference to run, as the runtime resolves it")
@@ -781,7 +783,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             env=args.env,
             fleet=args.fleet,
         )
-    except SmokeFailure as failure:
+    # Both verdicts, printed one way: `speaks.py` refuses with its own type because
+    # it cannot import this file's, and an image that serves but cannot speak is
+    # the same red to whoever reads this line. [LAW:single-enforcer]
+    except (SmokeFailure, speaks.ConformanceFailure) as failure:
         print(f"smoke: FAILED — {failure}", file=sys.stderr, flush=True)
         return 1
     print("smoke: ok", flush=True)

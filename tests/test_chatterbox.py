@@ -72,7 +72,7 @@ from conftest import (
 )
 
 from elvenspeak import chatterbox
-from elvenspeak.engine import Capability, Prosody, Timing
+from elvenspeak.engine import Prosody, Timing
 from elvenspeak.provisioning import ConfigError
 
 TEXT = "Compatibility is measurable, and this sentence is long enough to measure."

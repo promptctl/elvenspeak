@@ -997,8 +997,9 @@ jobs:
       # clothes. A ceiling guessed low turns a leg red for a reason that has nothing to do
       # with the commit that hit it, which is the failure the rest of this file keeps
       # refusing. Confined is the shape the fleet actually runs and is worth proving; it
-      # is worth proving against measured numbers, and piper-build-b4h.3 is where driving
-      # a real synthesis produces them.
+      # is worth proving against measured numbers, and there are none yet: the smoke below
+      # drives real synthesis, and nothing records what it costs resident. That is
+      # piper-build-b4h.scw.
       #
       # ONE KNOWN FLAKE, WRITTEN DOWN SO NOBODY HUNTS A PHANTOM. `smoke.py` picks its
       # host port by binding :0, reading the number and closing, so there is a small
@@ -1041,9 +1042,9 @@ jobs:
           # arm means "needs nothing" rather than "not looked into".
           # [LAW:dataflow-not-control-flow]
           case "$ENGINE" in
-            # `cpu` because this runner has no accelerator, and nothing here synthesizes
-            # -- the 8-33x real time that makes cpu the wrong choice for a deployment
-            # costs nothing at this gate.
+            # `cpu` because this runner has no accelerator. `speaks.conform` does
+            # synthesize here, at the 8-33x real time that makes cpu the wrong choice
+            # for a deployment, and `speaks.budget` is sized for exactly that.
             chatterbox) boot=(--env CHATTERBOX_DEVICE=cpu) ;;
 
             # The router synthesizes nothing, so what it needs is not a setting but
