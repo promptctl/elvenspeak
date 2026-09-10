@@ -51,11 +51,13 @@ embedding, which is a model — the thing this file exists to do without.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from email.message import Message
 from typing import Any
 
 #: Raw signed 16-bit samples at a rate the name states, so a byte count is a
@@ -180,18 +182,64 @@ class SpokenVoice:
         return "speed" in self.capabilities
 
 
+@dataclass(frozen=True)
+class Reply:
+    """One exchange that ran to the end of its body, whatever its status said.
+
+    [LAW:parse-dont-validate] Built only by [`_exchange`], so holding one is proof
+    the transport finished, and nothing below catches a socket error again.
+    """
+
+    status: int
+    headers: Message
+    body: bytes
+
+
+def _exchange(request: urllib.request.Request, timeout: float, asking: str) -> Reply:
+    """`request` answered to the end, or [`ConformanceFailure`] naming `asking`.
+
+    [LAW:single-enforcer] The one place this file meets the transport, so every
+    request is held to one list of what counts as unanswered. The member easy to
+    leave out is `http.client.IncompleteRead` — not an `OSError` — which is what a
+    stream whose 200 went out before its encoder failed arrives as.
+
+    A refusal is an answer rather than a failed exchange: its status and body come
+    back for the caller to judge, because a 501 is what a voice that measures
+    nothing owes.
+    """
+    try:
+        try:
+            answer = urllib.request.urlopen(request, timeout=timeout)
+        except urllib.error.HTTPError as refused:
+            answer = refused
+        with answer:
+            return Reply(answer.status, answer.headers, answer.read())
+    except (OSError, http.client.HTTPException) as unfinished:
+        raise ConformanceFailure(f"{asking} got no complete answer: {unfinished!r}") from unfinished
+
+
+def _refused(asking: str, reply: Reply) -> ConformanceFailure:
+    """The failure for a request whose answer was not the 200 it needed."""
+    return ConformanceFailure(f"{asking} answered {reply.status}: {reply.body[:400]!r}")
+
+
+def _decoded(asking: str, reply: Reply) -> Any:
+    """`reply`'s body as JSON, or a failure naming the request that answered it."""
+    try:
+        return json.loads(reply.body)
+    except ValueError as unreadable:
+        raise ConformanceFailure(
+            f"{asking} answered a body that is not JSON: {reply.body[:400]!r}"
+        ) from unreadable
+
+
 def _get(base_url: str, path: str, timeout: float) -> Any:
     """`path` decoded as JSON, or a failure that names what answered."""
-    request = urllib.request.Request(f"{base_url}{path}", method="GET")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as answer:
-            return json.loads(answer.read())
-    except urllib.error.HTTPError as refused:
-        raise ConformanceFailure(
-            f"GET {path} answered {refused.code}: {refused.read()[:400]!r}"
-        ) from refused
-    except (urllib.error.URLError, OSError) as unreachable:
-        raise ConformanceFailure(f"GET {path} did not answer: {unreachable}") from unreachable
+    asking = f"GET {path}"
+    reply = _exchange(urllib.request.Request(f"{base_url}{path}", method="GET"), timeout, asking)
+    if reply.status != 200:
+        raise _refused(asking, reply)
+    return _decoded(asking, reply)
 
 
 @dataclass(frozen=True)
@@ -252,21 +300,11 @@ def _speak(
         headers={"content-type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as answer:
-            return Utterance(
-                audio=answer.read(),
-                ignored=answer.headers.get("x-elvenspeak-ignored", ""),
-            )
-    except urllib.error.HTTPError as refused:
-        raise ConformanceFailure(
-            f"speaking {text!r} in {voice!r} answered {refused.code}: "
-            f"{refused.read()[:400]!r}"
-        ) from refused
-    except (urllib.error.URLError, OSError) as unreachable:
-        raise ConformanceFailure(
-            f"speaking {text!r} in {voice!r} did not answer: {unreachable}"
-        ) from unreachable
+    asking = f"speaking {text!r} in {voice!r}"
+    reply = _exchange(request, timeout, asking)
+    if reply.status != 200:
+        raise _refused(asking, reply)
+    return Utterance(audio=reply.body, ignored=reply.headers.get("x-elvenspeak-ignored", ""))
 
 
 def _audible(voice_id: str, text: str, spoken: Utterance) -> None:
@@ -442,21 +480,20 @@ def _conform_timings(base_url: str, voice: SpokenVoice) -> None:
         headers={"content-type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=budget(TEXT)) as answer:
-            body = json.loads(answer.read())
-    except urllib.error.HTTPError as refused:
-        if refused.code == 501 and not voice.measures:
-            print(
-                f"speaks: {voice.id} declares no timestamps and refused them 501",
-                flush=True,
-            )
-            return
+    asking = f"asking {voice.id!r} for timestamps"
+    reply = _exchange(request, budget(TEXT), asking)
+    if reply.status == 501 and not voice.measures:
+        print(
+            f"speaks: {voice.id} declares no timestamps and refused them 501",
+            flush=True,
+        )
+        return
+    if reply.status != 200:
         raise ConformanceFailure(
-            f"asking {voice.id!r} for timestamps answered {refused.code} while it "
+            f"{asking} answered {reply.status} while it "
             f"{'declares' if voice.measures else 'does not declare'} the "
-            f"capability: {refused.read()[:400]!r}"
-        ) from refused
+            f"capability: {reply.body[:400]!r}"
+        )
 
     if not voice.measures:
         raise ConformanceFailure(
@@ -465,6 +502,7 @@ def _conform_timings(base_url: str, voice: SpokenVoice) -> None:
             "way to know that"
         )
 
+    body = _decoded(asking, reply)
     try:
         ends = body["alignment"]["character_end_times_seconds"]
     except (KeyError, TypeError) as malformed:

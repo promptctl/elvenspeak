@@ -361,6 +361,27 @@ def test_a_readable_shape_that_is_still_refused_keeps_its_own_sentence(monkeypat
         _read_config(DOCKER, "registry.example/elvenspeak-piper:2026.09.07.1")
 
 
+def test_an_image_that_cannot_speak_is_reported_as_a_failed_smoke_not_traced(
+    monkeypatch, capsys
+):
+    """`main`'s contract is an exit status and one sentence, whichever file refused.
+
+    `speaks.conform` refuses with its own type, and `main` caught `SmokeFailure`
+    alone, so an image that booted, passed its healthcheck and then could not
+    speak — the failure the smoke asks about last and exists to catch — would
+    leave as a traceback rather than `smoke: FAILED`.
+    """
+
+    def cannot_speak(*_args, **_kwargs):
+        raise speaks.ConformanceFailure("'able' was asked to say 'Yes.' and answered nothing")
+
+    monkeypatch.setattr(smoke, "select_runtime", lambda requested: DOCKER)
+    monkeypatch.setattr(smoke, "smoke", cannot_speak)
+
+    assert smoke.main(["registry.example/elvenspeak-piper:2026.09.07.1"]) == 1
+    assert "smoke: FAILED — 'able' was asked to say" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # The stub fleet (`fleetstub.py`), and the three facts it states that it cannot
 # import.
