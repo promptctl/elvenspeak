@@ -87,10 +87,11 @@ class Fake:
     #: catch it first: a 200 carrying nothing.
     silent_on: str | None = None
 
-    #: Texts answered at another text's length — `{sent: measured_as}`. The
-    #: crossed response, which is what a caller reading somebody else's answer
-    #: off a shared socket receives.
-    answers_as: dict[str, str] = field(default_factory=dict)
+    #: Texts answered at another text's length, per voice —
+    #: `{(voice_id, sent): measured_as}`. The crossed response, which is what a
+    #: caller reading somebody else's answer off a shared socket receives; per
+    #: voice because what two callers cross is the speakers they named.
+    answers_as: dict[tuple[str, str], str] = field(default_factory=dict)
 
     #: The fraction of the utterance the timeline claims to cover. 1.0 is a
     #: timeline that ends where the audio ends; anything less is one that stops
@@ -108,12 +109,13 @@ class Fake:
     #: End times served for the alignment, when one is served at all.
     ends: list[float] | None = None
 
-    #: Seconds one synthesis occupies the engine, which is held to a single
-    #: caller at a time — `ELVENSPEAK_CONCURRENT_SYNTHESES=1`, a correct and
-    #: common deployment, in the smallest shape that reproduces it. At 0.0 the
-    #: engine is occupied for no time, so the serialisation is unobservable and
-    #: every other test here is answered as immediately as before.
-    engine_seconds: float = 0.0
+    #: Seconds each character of text occupies the engine, which is held to a
+    #: single caller at a time — `ELVENSPEAK_CONCURRENT_SYNTHESES=1`, a correct
+    #: and common deployment, in the smallest shape that reproduces it. Per
+    #: character because a real engine's work is the text it was given. At 0.0
+    #: the engine is occupied for no time, so the serialisation is unobservable
+    #: and every other test here is answered as immediately as before.
+    seconds_per_character: float = 0.0
 
     #: The engine itself: one caller inside it at a time. Taken unconditionally
     #: ([LAW:dataflow-not-control-flow]) so there is no second code path that
@@ -128,7 +130,7 @@ class Fake:
             return {"voices": self.voices_again}
         return {"voices": self.voices}
 
-    def samples(self, text: str, speed: float | None) -> int:
+    def samples(self, voice: str, text: str, speed: float | None) -> int:
         """How many samples one synthesis of `text` runs to.
 
         [LAW:one-source-of-truth] The streamed audio, the audio inside the
@@ -138,7 +140,7 @@ class Fake:
         which no server could return and which the accounting `speaks.py` now
         checks could never have been asserted against.
         """
-        measured = self.answers_as.get(text, text)
+        measured = self.answers_as.get((voice, text), text)
         count = (
             self.fixed_samples
             if self.fixed_samples is not None
@@ -148,13 +150,13 @@ class Fake:
             count = int(count * self.speed_effect)
         return 0 if text == self.silent_on else count
 
-    def audio(self, text: str, speed: float | None) -> bytes:
+    def audio(self, voice: str, text: str, speed: float | None) -> bytes:
         return b"\x00" * (
-            self.samples(text, speed) * speaks.BYTES_PER_SAMPLE
+            self.samples(voice, text, speed) * speaks.BYTES_PER_SAMPLE
             + (1 if self.odd_bytes else 0)
         )
 
-    def timed(self, text: str) -> dict:
+    def timed(self, voice: str, text: str) -> dict:
         """The body `/with-timestamps` returns: the audio and its timeline.
 
         The boundaries are divided out of the *sample count* so the last lands
@@ -162,13 +164,13 @@ class Fake:
         for the same reason — a fake that relied on the slack `speaks.py` allows
         would be a fake whose alignment is quietly wrong wherever the slack hides it.
         """
-        samples = self.samples(text, None)
+        samples = self.samples(voice, text, None)
         spread = [
             self.covers * (index + 1) * samples / len(text) / speaks.SAMPLE_RATE
             for index in range(len(text))
         ]
         carried = {} if self.omits_audio else {
-            "audio_base64": base64.b64encode(self.audio(text, None)).decode("ascii")
+            "audio_base64": base64.b64encode(self.audio(voice, text, None)).decode("ascii")
         }
         return {
             **carried,
@@ -206,25 +208,31 @@ def _handler(fake: Fake) -> type[BaseHTTPRequestHandler]:
             body = json.loads(self.rfile.read(length) or b"{}")
             text = body.get("text", "")
             speed = (body.get("voice_settings") or {}).get("speed")
+            voice = self.path.split("/")[3]
 
             with fake.engine:
-                time.sleep(fake.engine_seconds)
+                time.sleep(fake.seconds_per_character * len(text))
 
             if "/with-timestamps" in self.path:
                 if fake.timestamps_status != 200:
                     self._send(fake.timestamps_status, b'{"detail":"no"}',
                                {"content-type": "application/json"})
                     return
-                payload = json.dumps(fake.timed(text)).encode()
+                payload = json.dumps(fake.timed(voice, text)).encode()
                 self._send(200, payload, {"content-type": "application/json"})
                 return
 
             headers = {"content-type": "audio/pcm"}
-            # Named back only when the engine did not act on it, which is the
-            # same rule `elvenspeak/api.py` follows.
-            if speed is not None and fake.speed_effect == 1.0 and fake.names_ignored_speed:
+            # Named back when the voice spoken did not declare it, whatever length
+            # the audio came back — the rule `elvenspeak/api.py` follows, which
+            # decides from the declaration and never from the audio.
+            declares = any(
+                listed["voice_id"] == voice and "speed" in listed["capabilities"]
+                for listed in fake.voices
+            )
+            if speed is not None and not declares and fake.names_ignored_speed:
                 headers["x-elvenspeak-ignored"] = "voice_settings.speed"
-            self._send(200, fake.audio(text, speed), headers)
+            self._send(200, fake.audio(voice, text, speed), headers)
 
     return Handler
 
@@ -340,16 +348,18 @@ def test_a_declared_speed_that_does_nothing_is_refused():
     assert "accepted and did nothing" in message
 
 
-def test_a_speed_honoured_without_being_declared_is_refused():
-    """The same defect from the other side, and the arm a one-sided check misses.
+def test_a_voice_that_declares_no_speed_is_not_judged_by_its_length():
+    """A disclaimed speed owes a name in the ignored header, not a length.
 
-    A voice that applies a parameter it disclaimed cannot be described accurately
-    to any caller, so this is a failure even though the audio "worked".
+    The server withholds it, so the engine is asked the same thing twice and a
+    sampling engine's two answers can land well apart. Chatterbox samples, and
+    elvenspeak-chatterbox:2026.09.08.1 was refused as "does not declare `speed`
+    and yet honoured it" on exactly this shape: the speed withheld and named,
+    one draw shorter than the other.
     """
-    message = refusal(
-        Fake(voices=[dict(NOTHING)], speed_effect=0.5, timestamps_status=501)
-    )
-    assert "honoured it" in message
+    fake = Fake(voices=[dict(NOTHING)], speed_effect=0.6, timestamps_status=501)
+    with serving(fake) as url:
+        speaks.conform(url, timeout=5.0)
 
 
 def test_a_dropped_speed_that_is_not_named_back_is_refused():
@@ -465,37 +475,45 @@ def test_two_voices_asked_at_once_are_each_answered():
 def test_a_concurrent_caller_answered_at_the_wrong_length_is_refused():
     """The crossed response: a plausible utterance that is not the one asked for.
 
-    Served on every request rather than only the concurrent ones, and that is
-    deliberate. `_conform_concurrently` is the only place in `speaks.py` where
-    these two lengths are read against each other, so a fake that misbehaved
-    only while two callers overlapped would be asserting its own timing rather
-    than the refusal — and would go green whenever the overlap it depends on
-    failed to happen ([LAW:no-ambient-temporal-coupling]).
+    Crossed for the last voice on offer, whose short text comes back at the long
+    one's length. Every serial comparison of two lengths is asked of the first
+    voice, so `_conform_concurrently` is the only place in `speaks.py` where the
+    last voice's two lengths are read against each other. Served on every request
+    rather than only the concurrent ones, and that is deliberate: a fake that
+    misbehaved only while two callers overlapped would be asserting its own
+    timing rather than the refusal — and would go green whenever the overlap it
+    depends on failed to happen ([LAW:no-ambient-temporal-coupling]).
     """
-    message = refusal(Fake(answers_as={speaks.SHORT_TEXT: speaks.TEXT}))
+    fake = Fake(
+        voices=[dict(EVERYTHING), {"voice_id": "other", "capabilities": ["speed", "timestamps"]}],
+        answers_as={("other", speaks.SHORT_TEXT): speaks.LONGER_TEXT},
+    )
+    message = refusal(fake)
     assert "callers at once" in message
     assert "crossed or truncated" in message
 
 
-def test_concurrent_callers_are_not_held_to_one_requests_budget(monkeypatch):
-    """A deployment that answers one caller at a time still conforms.
+def test_each_request_is_bounded_by_the_work_in_front_of_it(monkeypatch):
+    """A deployment that answers one caller at a time, slowly, still conforms.
 
-    `_conform_concurrently` puts four requests in flight, and a deployment that
-    answers one caller at a time makes the last one admitted wait out the other
-    three before its own work starts. Held to the budget of a request that waits
-    behind nothing, that deployment fails conformance and blocks its own publish
-    for being what it is ([LAW:no-ambient-temporal-coupling]).
-
-    Not hypothetical, which is why this test exists rather than a comment:
+    Two ways to inherit a bound rather than compute it, and both refuse an image
+    for being what it is ([LAW:no-ambient-temporal-coupling]). One figure for
+    every request is sized for one length: 180s was sized when these texts were a
+    couple of seconds of speech, and `speaks.LONGER_TEXT` took 100s of it on a
+    4-cpu workstation, leaving a 2-cpu runner less than 2x. And a caller among
+    four in flight waits out
+    the other three: held to the budget of a request that waits behind nothing,
     elvenspeak-chatterbox:2026.09.08.1 answered every serial synthesis of a smoke
-    run and then timed out here on `builtin-es` saying "Yes." — four characters,
-    the shortest thing asked of it anywhere. Nothing in the image was wrong.
+    run and then timed out under contention on `builtin-es` saying "Yes.".
 
-    The budget is shrunk rather than the delay grown, because what is under test
-    is a ratio: four serialised syntheses outlast one request's budget and stay
-    well inside four of them. Growing the delay to the same ratio against the
-    real 180s would cost twelve minutes to assert the same thing.
+    The engine here spends 70% of the budget's rate on each character, so every
+    request fits its own budget, `speaks.LONGER_TEXT` overruns `speaks.TEXT`'s,
+    and four serialised callers outlast any one budget while staying inside their
+    sum. Shrunk to fractions of a second, because what is under test is those
+    ratios and not the real figures.
     """
-    monkeypatch.setattr(speaks, "SPEAK_TIMEOUT", 0.5)
-    with serving(Fake(engine_seconds=0.15)) as url:
+    monkeypatch.setattr(speaks, "SECONDS_BEFORE_SPEECH", 0.05)
+    monkeypatch.setattr(speaks, "SECONDS_PER_CHARACTER", 0.01)
+    monkeypatch.setattr(speaks, "HEADROOM", 1.0)
+    with serving(Fake(seconds_per_character=0.007)) as url:
         speaks.conform(url, timeout=5.0)

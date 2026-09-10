@@ -69,8 +69,10 @@ BYTES_PER_SAMPLE = 2
 #: clock, and the one free to drift is the one no request ever carries.
 SAMPLE_RATE = int(PCM_FORMAT.removeprefix("pcm_"))
 
-#: Long enough that a rate change moves the length well outside any per-request
-#: jitter, and ordinary enough that no engine needs a pronunciation dictionary.
+#: Long enough that halving the pace moves the length well outside the jitter of
+#: every engine that declares `speed`, and ordinary enough that no engine needs a
+#: pronunciation dictionary. Not far enough from [`SHORT_TEXT`] to be told apart
+#: from it by length alone — see [`APART`].
 TEXT = "One two three four five."
 
 #: A whole utterance in four characters, asked of every voice beside [`TEXT`].
@@ -85,9 +87,19 @@ TEXT = "One two three four five."
 #: status on a named text.
 SHORT_TEXT = "Yes."
 
-#: Strictly longer than [`TEXT`], and longer by whole words rather than by
-#: punctuation: a trailing "!" is not reliably more audio in any engine here.
+#: Longer by whole words rather than by punctuation: a trailing "!" is not
+#: reliably more audio in any engine here.
 LONGER_TEXT = "One two three four five, six seven eight nine ten, eleven twelve."
+
+#: The two texts every comparison of two utterances' lengths in this file is made
+#: between, far enough apart that no draw of any engine here puts them in the
+#: wrong order. Chatterbox samples, so a bare `<` between two of its answers is a
+#: coin weighted by how far apart the texts are. Measured on
+#: elvenspeak-chatterbox:2026.09.08.1: six syntheses of [`TEXT`] that reached the
+#: engine identical ran 39690 to 59094 samples, and "Yes." has run to 44100 —
+#: past [`TEXT`]'s shortest, so those two overlap. [`LONGER_TEXT`] ran 113778,
+#: which a third's spread still leaves 1.7x the longest "Yes.".
+APART = (SHORT_TEXT, LONGER_TEXT)
 
 #: The speed to compare against 1.0. The same figure `tests/test_conformance.py`
 #: uses, and for the reason stated there: fast enough that the shortening is
@@ -109,15 +121,33 @@ PACE_CHANGED = 0.75
 #: (elvenspeak/alignment.py).
 ACCOUNTED_SLACK = 0.05
 
-#: Seconds to wait on one synthesis that waits behind nothing. Chatterbox runs
-#: at 8-33x real time on cpu (elvenspeak/chatterbox.py:556) and these utterances
-#: are a couple of seconds of speech, so the slowest engine's worst case is
-#: around a minute. Its own constant rather than a reuse of
-#: `smoke.DEFAULT_TIMEOUT`: that one covers a container that may be loading a
-#: model, this covers a request to a server that has already loaded one, and
-#: collapsing the two is what turned a wedged fleet stub into a 360s hang
-#: before `FLEET_TIMEOUT` was split out.
-SPEAK_TIMEOUT = 180.0
+#: What the slowest engine here spends on one synthesis before any of it is
+#: speech, and what each character of text adds, in seconds. A line through the
+#: slowest answers elvenspeak-chatterbox:2026.09.08.1 gave on 4 cpus under
+#: Rosetta — "Yes." in 48s and [`LONGER_TEXT`] in 100s — which puts [`TEXT`] at
+#: 65.4s against the 62s it took.
+SECONDS_BEFORE_SPEECH = 45.0
+SECONDS_PER_CHARACTER = 0.85
+
+#: How far past that line a synthesis may run before it is a wedge rather than a
+#: slow machine. [`TEXT`]'s six answers took 42.5s to 59.5s, 1.4x apart, and the
+#: CI runner has 2 cpus where the line was drawn on 4.
+HEADROOM = 3.0
+
+
+def budget(text: str) -> float:
+    """Seconds to wait on one synthesis of `text` that waits behind nothing.
+
+    [LAW:no-ambient-temporal-coupling] Computed from the text a request carries,
+    because that is what the wait is made of. One figure for every request was
+    sized when these texts were a couple of seconds of speech, and went on
+    holding [`LONGER_TEXT`] — 100s on a 4-cpu workstation — to 180s on a 2-cpu
+    runner. Its own figure rather than `smoke.DEFAULT_TIMEOUT`: that one covers a
+    container that may be loading a model, this a server that has loaded one,
+    and collapsing the two is what turned a wedged fleet stub into a 360s hang
+    before `FLEET_TIMEOUT` was split out.
+    """
+    return HEADROOM * (SECONDS_BEFORE_SPEECH + SECONDS_PER_CHARACTER * len(text))
 
 
 class ConformanceFailure(Exception):
@@ -206,10 +236,10 @@ def _speak(
     `x-elvenspeak-ignored` and make the pace check unreadable.
 
     [LAW:no-ambient-temporal-coupling] `timeout` is required and deliberately
-    has no default. How long a request may take is not a fact about synthesis;
-    it is a fact about how many callers the caller has in flight, and only the
-    caller knows that. A default of [`SPEAK_TIMEOUT`] would read as correct at
-    a contended call site while handing it the bound of a request that waits
+    has no default. How long a request may take is not only a fact about its
+    text; it is also how many callers the caller has in flight, and only the
+    caller knows that. A default of [`budget`] would read as correct at a
+    contended call site while handing it the bound of a request that waits
     behind nothing — the failure [`_conform_concurrently`] records against a
     real image. The caller computes its bound; nothing here inherits one.
     """
@@ -334,7 +364,7 @@ def conform(base_url: str, timeout: float) -> None:
     # already passes rather than one bolted on beside it.
     for voice in voices:
         for text in (TEXT, SHORT_TEXT):
-            spoken = _speak(base_url, voice.id, text, timeout=SPEAK_TIMEOUT)
+            spoken = _speak(base_url, voice.id, text, timeout=budget(text))
             _audible(voice.id, text, spoken)
             print(
                 f"speaks: {voice.id} said {text!r} in {spoken.samples} samples",
@@ -347,38 +377,35 @@ def conform(base_url: str, timeout: float) -> None:
     # every voice on offer can be spoken in at all.
     subject = voices[0]
 
-    # Named for the texts and not for the audio: with [`SHORT_TEXT`] in the file,
-    # a `shorter` holding [`TEXT`]'s utterance reads as the wrong one of the two.
-    less_text = _speak(base_url, subject.id, TEXT, timeout=SPEAK_TIMEOUT)
-    more_text = _speak(base_url, subject.id, LONGER_TEXT, timeout=SPEAK_TIMEOUT)
+    less_text, more_text = (
+        _speak(base_url, subject.id, text, timeout=budget(text)) for text in APART
+    )
     if more_text.samples <= less_text.samples:
         raise ConformanceFailure(
             f"{subject.id!r} made {more_text.samples} samples of "
-            f"{len(LONGER_TEXT)} characters and {less_text.samples} of "
-            f"{len(TEXT)} — more text did not make more audio, so the engine is "
-            "not speaking what it was given"
+            f"{len(APART[1])} characters and {less_text.samples} of "
+            f"{len(APART[0])} — more text did not make more audio, so the engine "
+            "is not speaking what it was given"
         )
 
-    # [LAW:dataflow-not-control-flow] Both arms run the same request and differ
-    # only in what they demand of the answer, because the honest failure is
-    # symmetric: an engine that silently drops a speed it declared, and one that
-    # applies a speed it disclaimed, are the same defect seen from two sides, and
-    # a check that only looked at declared voices would see one of them.
-    paced = _speak(base_url, subject.id, TEXT, speed=FASTER, timeout=SPEAK_TIMEOUT)
-    unpaced = _speak(base_url, subject.id, TEXT, timeout=SPEAK_TIMEOUT)
-    changed = paced.samples < unpaced.samples * PACE_CHANGED
-    if subject.paces and not changed:
+    # [LAW:dataflow-not-control-flow] Both arms run the same two requests and
+    # differ only in what the declaration says the answer owes. A declared speed
+    # owes shorter audio. A disclaimed one owes being named ignored — and not a
+    # length, because the server withholds a speed from a voice that did not
+    # declare it (`api.prosody`), so both requests reach the engine identical and
+    # any difference between them is the engine's own. Chatterbox samples, so two
+    # identical requests need not come back the same length, and reading one short
+    # draw as a speed honoured failed a correct image. [LAW:single-enforcer] That
+    # a disclaimed speed never reaches the engine is held where it is decided, by
+    # test_capabilities.py's test_a_speed_the_engine_cannot_vary_never_reaches_it.
+    paced = _speak(base_url, subject.id, TEXT, speed=FASTER, timeout=budget(TEXT))
+    unpaced = _speak(base_url, subject.id, TEXT, timeout=budget(TEXT))
+    if subject.paces and paced.samples >= unpaced.samples * PACE_CHANGED:
         raise ConformanceFailure(
             f"{subject.id!r} declares `speed` and made {paced.samples} samples at "
             f"{FASTER}x against {unpaced.samples} at 1.0 — the parameter was "
             "accepted and did nothing, which is the silent drop the declaration "
             "exists to rule out"
-        )
-    if not subject.paces and changed:
-        raise ConformanceFailure(
-            f"{subject.id!r} does not declare `speed` and yet honoured it — a "
-            "voice that applies a parameter it disclaimed cannot be described "
-            "accurately to any caller"
         )
     if not subject.paces and "speed" not in paced.ignored:
         raise ConformanceFailure(
@@ -387,8 +414,8 @@ def conform(base_url: str, timeout: float) -> None:
             "and dropped without saying so"
         )
     print(
-        f"speaks: pace {'varies' if subject.paces else 'is fixed'} as declared "
-        f"({unpaced.samples} -> {paced.samples} samples at {FASTER}x)",
+        f"speaks: speed {'varies the pace' if subject.paces else 'is named ignored'} "
+        f"as declared ({unpaced.samples} -> {paced.samples} samples at {FASTER}x)",
         flush=True,
     )
 
@@ -416,7 +443,7 @@ def _conform_timings(base_url: str, voice: SpokenVoice) -> None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=SPEAK_TIMEOUT) as answer:
+        with urllib.request.urlopen(request, timeout=budget(TEXT)) as answer:
             body = json.loads(answer.read())
     except urllib.error.HTTPError as refused:
         if refused.code == 501 and not voice.measures:
@@ -524,14 +551,13 @@ def _conform_concurrently(base_url: str, voices: tuple[SpokenVoice, ...]) -> Non
     instead of being quietly skipped ([LAW:dataflow-not-control-flow]).
     """
     subjects = (voices[0], voices[-1])
-    lengths = (SHORT_TEXT, TEXT)
-    callers_at_once = len(subjects) * len(lengths)
-    # [LAW:no-ambient-temporal-coupling] Each caller's bound is computed from how
-    # many are in flight, never inherited from a constant sized for a request
-    # that waits behind nothing. The four below share one deployment's cpus, and
-    # its `speaking_at_once` may serialise them outright, so the last one to be
-    # answered waits out the other three's work either way — the same total
-    # either way, which is what makes the widening exactly this and not a guess.
+    callers_at_once = len(subjects) * len(APART)
+    # [LAW:no-ambient-temporal-coupling] Each caller's bound is the work of every
+    # caller in flight, never the budget of a request that waits behind nothing.
+    # The four below share one deployment's cpus, and its `speaking_at_once` may
+    # serialise them outright, so the last one to be answered waits out the other
+    # three's work either way — the same total either way, which is what makes
+    # the widening exactly this sum and not a guess.
     #
     # Measured, not reasoned: elvenspeak-chatterbox:2026.09.08.1 answered every
     # serial synthesis of that run and then failed here, on `builtin-es` saying
@@ -539,7 +565,7 @@ def _conform_concurrently(base_url: str, voices: tuple[SpokenVoice, ...]) -> Non
     # 180s because three other callers were in front of it. A conformant image,
     # refused a publish by the clock it was held to rather than by anything it
     # did.
-    contended = SPEAK_TIMEOUT * callers_at_once
+    contended = sum(budget(text) for _ in subjects for text in APART)
 
     with ThreadPoolExecutor(max_workers=callers_at_once) as callers:
         # Every caller submitted before any result is taken, which is the whole
@@ -559,7 +585,7 @@ def _conform_concurrently(base_url: str, voices: tuple[SpokenVoice, ...]) -> Non
                     callers.submit(
                         _speak, base_url, voice.id, text, timeout=contended
                     )
-                    for text in lengths
+                    for text in APART
                 ],
             )
             for voice in subjects
@@ -569,7 +595,7 @@ def _conform_concurrently(base_url: str, voices: tuple[SpokenVoice, ...]) -> Non
         ]
 
     for voice, pair in answered:
-        for text, spoken in zip(lengths, pair, strict=True):
+        for text, spoken in zip(APART, pair, strict=True):
             _audible(voice.id, text, spoken)
 
     # Compared inside one voice and never across two. Across, this would be
@@ -577,12 +603,12 @@ def _conform_concurrently(base_url: str, voices: tuple[SpokenVoice, ...]) -> Non
     # at comparable rates is not a property any engine here promises — a check
     # resting on it would go red on a legitimately slow voice and read as a
     # concurrency defect.
-    for voice, (short, whole) in answered:
-        if whole.samples <= short.samples:
+    for voice, (shorter, longer) in answered:
+        if longer.samples <= shorter.samples:
             raise ConformanceFailure(
                 f"under {callers_at_once} callers at once, {voice.id!r} answered "
-                f"{len(TEXT)} characters with {whole.samples} samples and "
-                f"{len(SHORT_TEXT)} with {short.samples} — each answer is a "
+                f"{len(APART[1])} characters with {longer.samples} samples and "
+                f"{len(APART[0])} with {shorter.samples} — each answer is a "
                 "plausible utterance and they are not the ones that were asked "
                 "for, which is what a crossed or truncated response looks like "
                 "from here"

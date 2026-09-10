@@ -120,9 +120,9 @@ FLEET_TIMEOUT = 30.0
 #: `/health` 200. Distinct from DEFAULT_TIMEOUT for the reason FLEET_TIMEOUT is:
 #: that one is a budget for a container still loading a model, and by the time
 #: conformance runs the loading is over and the questions are answered from a
-#: catalogue held in memory. `speaks.SPEAK_TIMEOUT` covers the slow half — a
-#: synthesis on cpu — and is that file's to decide, because it is the file that
-#: knows which requests those are.
+#: catalogue held in memory. `speaks.budget` covers the slow half — a synthesis
+#: on cpu — and is that file's to decide, because it is the file that knows which
+#: requests those are and what text each one carries.
 CONFORM_TIMEOUT = 30.0
 
 #: The variable a router reads to learn where to discover the engines it fronts.

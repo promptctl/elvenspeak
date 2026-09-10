@@ -62,9 +62,10 @@ remains makes its noise arithmetically, so nothing here needs the margin today.
 It stays because the properties are the *seam's* and not this file's roster of
 subjects. Tightening them to what a deterministic engine can hold would write
 today's subject list into the assertions, and the next engine to arrive would
-fail on a property it satisfies. `speaks.py` states the same margins from the
-other side for exactly the engines that need them, which is the honest place for
-the measurement to live.
+fail on a property it satisfies. `speaks.py` asks the same properties of the
+published images, where Chatterbox still samples, and its `APART` carries the
+margin its length comparisons were measured to need there — the honest place for
+that measurement to live.
 
 That margin must be *declared*, not merely intended. A bare `a < b` between two
 syntheses reads like a comparison across a margin and is none: for an engine
