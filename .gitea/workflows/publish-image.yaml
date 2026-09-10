@@ -581,6 +581,10 @@ jobs:
     # fail-fast off because each leg's verdict is its own news: a broken chatterbox bake says
     # nothing about whether the router boots, and a run that cancelled the router to report
     # chatterbox would take a second run to answer the question it cut short.
+    #
+    # No `max-parallel`: Gitea ignores it (see `publish`'s), so every leg runs at once and
+    # `publish`'s free-RAM warning holds for every push that reaches here, not only master.
+    # Gitea runs 6272, 6273 and 6274 each ran all four legs together with no OOM kill.
     strategy:
       fail-fast: false
       matrix:
