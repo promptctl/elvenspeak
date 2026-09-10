@@ -38,6 +38,7 @@ import re
 from pathlib import Path
 
 import pytest
+from workflows import needs, without_prose
 
 _ROOT = Path(__file__).parent.parent
 
@@ -83,15 +84,6 @@ _SILENCERS = ("continue-on-error", "|| true", "|| :")
 _NARROWERS = (" -k", " -m", " --ignore", " --deselect", ".py", "::")
 
 
-def yaml_without_prose(workflow: Path) -> str:
-    """`workflow`'s YAML with its commentary stripped."""
-    return "\n".join(
-        line
-        for line in workflow.read_text(encoding="utf-8").splitlines()
-        if not line.lstrip().startswith("#")
-    )
-
-
 #: The other channel pytest reads its arguments from. `PYTEST_ADDOPTS` is
 #: prepended to pytest's own argv before any of it is parsed, so a `-k` set here
 #: narrows a run exactly as far as a `-k` on the command does -- while sitting on
@@ -107,7 +99,7 @@ _ADDOPTS = re.compile(r"^\s*PYTEST_ADDOPTS:\s*(.*)$", re.MULTILINE)
 
 def pytest_command_arguments(workflow: Path) -> list[str]:
     """What each pytest invocation in `workflow` passes to pytest on the command."""
-    return _PYTEST.findall(yaml_without_prose(workflow))
+    return _PYTEST.findall(without_prose(workflow))
 
 
 def pytest_addopts(workflow: Path) -> list[str]:
@@ -132,9 +124,9 @@ def pytest_addopts(workflow: Path) -> list[str]:
     the indicator and leaves the arguments themselves on continuation lines this
     pattern cannot see. Both are the reader going blind while still answering,
     which is the one failure this whole file exists to refuse -- so both fail by
-    name, the way [`required_jobs`] fails on a `needs:` it cannot read.
+    name, the way [`workflows.needs`] fails on a `needs:` it cannot read.
     """
-    yaml = yaml_without_prose(workflow)
+    yaml = without_prose(workflow)
     found = _ADDOPTS.findall(yaml)
     assert len(found) == yaml.count("PYTEST_ADDOPTS"), (
         f"this check reads {len(found)} of the {yaml.count('PYTEST_ADDOPTS')} "
@@ -204,7 +196,7 @@ def test_nothing_silences_a_failing_suite(workflow):
     invisible permanent one -- and it would take the real gate down with it,
     since a step that cannot fail cannot block a merge either.
     """
-    yaml = yaml_without_prose(workflow)
+    yaml = without_prose(workflow)
     found = [silencer for silencer in _SILENCERS if silencer in yaml]
     assert not found, (
         f"{workflow.name} silences its own failures with {found} — fix what is "
@@ -221,41 +213,8 @@ def test_nothing_silences_a_failing_suite(workflow):
 #: the word the other pattern starts capturing at.
 _SUITE_COMMAND = re.compile(r"^\s*run:\s*(.*\bpytest\b.*)$", re.MULTILINE)
 
-#: Every `needs:` in the publish workflow. There is one, and the positive control
-#: below fails if that stops being true rather than letting this quietly read the
-#: wrong job's dependencies.
-_NEEDS = re.compile(r"^\s*needs:\s*(.+)$", re.MULTILINE)
-
-
-def required_jobs(workflow: Path) -> frozenset[str]:
-    """The job names `workflow`'s one `needs:` names, as names.
-
-    [LAW:parse-dont-validate] The list is parsed into its members rather than
-    left as the text `"[reachability, tests]"` for callers to search. Asking
-    `"tests" in text` is a weaker theorem than it looks: it is also true of
-    `[reachability, integration-tests]`, so the assertion this whole test exists
-    to make trustworthy -- that `publish` depends on the `tests` job -- could pass
-    on a workflow where that job had been dropped from `needs:` entirely. A gate
-    check that can go green for the wrong reason is the failure it was written
-    against, one level up.
-
-    A `needs:` written as a block sequence puts nothing on the line and matches
-    nothing, which fails the count below by name instead of silently reading an
-    empty dependency list as a satisfied one.
-    """
-    listed = _NEEDS.findall(yaml_without_prose(workflow))
-    assert len(listed) == 1, (
-        f"{workflow.name} has {len(listed)} inline `needs:` lines ({listed}) — "
-        "this check reads the publish job's dependencies and can no longer tell "
-        "which of them it is looking at"
-    )
-    return frozenset(
-        name.strip() for name in listed[0].strip().strip("[]").split(",") if name.strip()
-    )
-
-
 def suite_command(workflow: Path) -> str:
-    found = {command.strip() for command in _SUITE_COMMAND.findall(yaml_without_prose(workflow))}
+    found = {command.strip() for command in _SUITE_COMMAND.findall(without_prose(workflow))}
     assert len(found) == 1, (
         f"{workflow.name} runs the suite {len(found)} different ways ({found}) — "
         "a gate with two spellings of its own command has two answers to what passed"
@@ -296,7 +255,7 @@ def test_the_publish_gate_is_actually_wired_to_the_publish():
     `tests` is the plausible edit: `needs:` goes from a string to a list, and a
     list with one entry in it is a silent loss of the older gate.
     """
-    required = required_jobs(PUBLISH_GATE)
+    required = needs(PUBLISH_GATE, "publish")
     for job in ("reachability", "tests"):
         assert job in required, (
             f"the publish job does not need {job!r} ({sorted(required)}) — a gate "
@@ -307,14 +266,22 @@ def test_the_publish_gate_is_actually_wired_to_the_publish():
 def test_a_job_whose_name_merely_contains_tests_does_not_satisfy_the_gate(tmp_path):
     """The way the check above could have gone green over a dropped gate.
 
-    [LAW:behavior-not-structure] Pinned as a property of `required_jobs` and not
-    of the shipped workflow, because the workflow is correct today and the whole
-    risk is a future edit -- so the case has to be constructible rather than
-    waited for. `[reachability, integration-tests]` names no job called `tests`,
-    and a substring reading of that line says it does.
+    [LAW:behavior-not-structure] Pinned as a property of `workflows.needs` and
+    not of the shipped workflow, because the workflow is correct today and the
+    whole risk is a future edit -- so the case has to be constructible rather
+    than waited for. `[reachability, integration-tests]` names no job called
+    `tests`, and a substring reading of that line says it does.
+
+    A second job with its own `needs:` sits in front of `publish`, because the
+    shipped workflow has one (`prove`), and a reader of the whole file rather
+    than of one job would answer with whichever it met first.
     """
     renamed = tmp_path / "publish-image.yaml"
-    renamed.write_text("  publish:\n    needs: [reachability, integration-tests]\n")
+    renamed.write_text(
+        "jobs:\n"
+        "  prove:\n    needs: [reachability, tests]\n"
+        "  publish:\n    needs: [reachability, integration-tests]\n"
+    )
 
-    assert required_jobs(renamed) == frozenset({"reachability", "integration-tests"})
-    assert "tests" not in required_jobs(renamed)
+    assert needs(renamed, "publish") == frozenset({"reachability", "integration-tests"})
+    assert "tests" not in needs(renamed, "publish")

@@ -5,10 +5,10 @@ name: Publish the elvenspeak images
 # — and refuses to report success until the registry can be read back and shown to hold
 # exactly what was pushed (piper-deploy-gqz).
 #
-# The first job proves the builder; the second uses it. They are separate because the
-# proof is worth having on a commit that will not be published — a Dockerfile change on a
-# branch gets its BuildKit requirements checked here, before merge, rather than at the far
-# end of a cold build on master.
+# `reachability` proves the builder, `tests` the commit and `prove` the image; `publish`
+# pushes what it proves again. The first three run on every ref, because each proof is
+# worth having on a commit that will not be published — a Dockerfile change on a branch is
+# built and booted here, before merge, rather than at the far end of a cold build on master.
 #
 # Why this exists at all: CLAUDE.md bans building this service's image from a working
 # tree, and until this file there was nothing that satisfied the rule — so it was enforced
@@ -185,13 +185,12 @@ jobs:
           # missing jq prints an empty version and passes.
           jq --version
 
-          # The publish job smokes each image with `python3 smoke.py`, so the interpreter
-          # is now as much a build dependency as jq, and this is the job that says so.
-          # Asserted here because `reachability` runs on every ref while `publish` runs on
-          # master and dispatch: a runner without python3 is then a red branch push, rather
-          # than four cold builds of ~10 minutes each discovered to be unsmokeable on the
-          # one ref where someone actually wanted the images. No dated tag is lost either
-          # way — the smoke sits above the push — but the ten minutes per leg are.
+          # Every built image is smoked with `python3 smoke.py`, so the interpreter is as
+          # much a build dependency as jq, and this is the job that says so. Asserted here
+          # because `prove` and `publish` both need this job: a runner without python3 is
+          # red in seconds, rather than after four cold builds that each turn out to be
+          # unsmokeable at the end. No dated tag is lost either way, since every smoke sits
+          # above any push, but the builds are.
           #
           # `--help` rather than `--version`, for the reason the paragraph above gives:
           # this runs the actual script through this actual interpreter, so it proves the
@@ -388,8 +387,8 @@ jobs:
   # suite would report as an unfit builder and send the reader to the wrong machine.
   #
   # It runs on every ref, exactly as `reachability` does. On a branch that is the whole
-  # value — a branch push publishes nothing, so this is where a Dockerfile or workflow
-  # change can be proved without spending a dated tag.
+  # value — a branch push publishes nothing, so this is where a change to the code can be
+  # proved without spending a dated tag, as `prove` below is for a change to the image.
   tests:
     runs-on: ubuntu-latest
 
@@ -538,12 +537,122 @@ jobs:
           echo "--- last 15 rows before the end ---"
           tail -15 "$RSS_CURVE_OUT"
 
-  publish:
-    # Both, and the order of the list is not the order they run: a red suite and an
-    # unfit builder each block the publish on their own, which is the whole point of
-    # 7e2.14. `needs` on a job that is skipped would also skip this one, which is why
-    # `tests` carries no `if:` -- it runs on every ref that reaches this workflow.
+  # ---------------------------------------------------------------------------
+  # THE REAL DOCKERFILE, BUILT AND RUN ON EVERY REF (piper-build-b4h.5).
+  #
+  # Until this job no ref built the real Dockerfile before the run that published it:
+  # `reachability` builds a synthetic busybox probe, and `publish` is gated to master and
+  # dispatch. So a broken `RUN`, a missing apt package, a baked asset the engine cannot read
+  # or an image that will not boot was first met by the build about to push, and proving a
+  # Dockerfile change before merge meant a real dispatch that spends a dated tag whenever
+  # the image is good. This job asks the same questions of the same Dockerfile and pushes
+  # nothing, so the proof costs runner time and nothing permanent.
+  #
+  # NOTHING HERE CAN REACH THE REGISTRY, by construction rather than by care. The image is
+  # named `elvenspeak-<engine>:proof-<run id>`, with no registry host in the name, so no
+  # push of it can land in the homelab registry or take a dated tag's number. There is no
+  # push step to guard, and `tests/test_workflow.py` fails if one appears or if this job
+  # starts naming the registry. [LAW:types-are-the-program]
+  #
+  # No `if:`, no path filter. A proof that runs only when a diff looks relevant is a proof
+  # whose skip reads exactly like its pass, and this project already decided against those;
+  # `tests/test_workflow.py` holds this job to it. The price, measured rather than guessed,
+  # on this runner: a passing chatterbox smoke took 624s (gitea run 53), and a change at or
+  # above the bake cost the chatterbox build 582s (run 55), 538.8s of that a single
+  # `chown -R` filed as piper-build-7uh. [LAW:dataflow-not-control-flow]
+  #
+  # After `tests`, for the reason `publish` waits on it: a red suite is not worth four
+  # builds to hear about, and a build contending with the suite for 2 cpu is the contention
+  # this file's other comments measure.
+  # ---------------------------------------------------------------------------
+  prove:
     needs: [reachability, tests]
+    runs-on: ubuntu-latest
+
+    # The "something hung" bound per leg, for the reason `publish` states at its own: a leg
+    # fetches its engine's assets at build time, and `cancel-in-progress: false` lets one
+    # stalled download hold the concurrency group and every run queued behind it.
+    timeout-minutes: 60
+
+    # [LAW:one-source-of-truth] The same engine list as `publish`'s matrix, written again
+    # because a workflow cannot hand one job's matrix to another. `tests/test_workflow.py`
+    # holds both equal to `elvenspeak.engines.ENGINES`, so neither copy drifts quietly.
+    #
+    # fail-fast off because each leg's verdict is its own news: a broken chatterbox bake says
+    # nothing about whether the router boots, and a run that cancelled the router to report
+    # chatterbox would take a second run to answer the question it cut short.
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [piper, kokoro, chatterbox, router]
+
+    env:
+      ENGINE: ${{ matrix.engine }}
+      # Run-scoped, so no other run can remove it mid-smoke. Unlike `publish`, nothing
+      # shape-checks the engine before it is used, because nothing here needs to: the name's
+      # first use is `docker build --tag`, whose reference parser refuses an empty,
+      # unexpanded or upper-case engine before a layer is built. What `publish`'s check
+      # prevents is a default-engine image published under another engine's name, and
+      # nothing is published from here. [LAW:single-enforcer]
+      IMAGE: elvenspeak-${{ matrix.engine }}:proof-${{ github.run_id }}
+
+    steps:
+      - name: Check out the commit to prove
+        uses: actions/checkout@v4
+
+      # This job builds from its own checkout, so it proves its own provenance, for the
+      # reason `publish` gives at its own copy of this step.
+      - name: Assert the source is the commit the event named
+        uses: ./.gitea/actions/assert-source-is-event-commit
+
+      # The build `publish` runs, minus what only a published image needs: no registry in
+      # the name, no dated tag, no provenance labels.
+      #
+      # `--load` is written out although this runner's builder, the docker driver, loads
+      # into the daemon's store anyway. `smoke-image` reads the image's port and HEALTHCHECK
+      # out of that store, and under a builder switched to another driver the image would
+      # stay in the builder's cache and every leg would go red at `docker image inspect`,
+      # which reads like a broken image and is not one. The flag makes the store a
+      # requirement of this build rather than a property of whichever driver is configured.
+      - name: Build the real Dockerfile into this runner's local store
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build --load --progress=plain \
+            --build-arg "ELVENSPEAK_ENGINE=$ENGINE" \
+            --tag "$IMAGE" \
+            .
+
+      - name: Prove the image serves
+        uses: ./.gitea/actions/smoke-image
+        with:
+          image: ${{ env.IMAGE }}
+          engine: ${{ matrix.engine }}
+
+      # One multi-GiB image per engine per push would otherwise stay on the runner, on the
+      # disk every later build needs. `always()` because a red smoke leaves the same image
+      # behind as a green one. The layer cache is left alone, as `publish` leaves it, because
+      # it is what keeps the next build of an unchanged layer warm.
+      #
+      # [LAW:no-silent-failure] A removal that fails says so beside docker's own reason.
+      - name: Release the image this leg proved
+        if: always()
+        run: |
+          set -euo pipefail
+          docker image rm "$IMAGE" \
+            || echo "note: could not remove $IMAGE — docker's reason is above" >&2
+          df -h / | tail -1
+
+  publish:
+    # All three, and the order of the list is not the order they run: a red suite, an
+    # unfit builder and an image that would not serve each block the publish on their
+    # own, which is the whole point of 7e2.14 and piper-build-b4h.6. `needs` on a job that
+    # is skipped would also skip this one, which is why neither `tests` nor `prove`
+    # carries an `if:` -- both run on every ref that reaches this workflow.
+    #
+    # `prove` is here for a second reason as well: it orders the two building jobs.
+    # Without it a master push starts both matrices together, eight legs on one 2-cpu
+    # runner with a chatterbox smoke in each matrix, both loading the model at once.
+    needs: [reachability, tests, prove]
     runs-on: ubuntu-latest
 
     # The "something hung" bound, per leg. A leg fetches its engine's assets at build
@@ -562,7 +671,8 @@ jobs:
     # because a human choosing a ref by hand is the deliberate act the ban was always
     # about distinguishing from an accident.
     #
-    # Everything else gets `reachability` and no image. `:latest` is kept honest one step
+    # Everything else gets `reachability`, `tests` and `prove`, and publishes no image.
+    # `:latest` is kept honest one step
     # further in, by the tag step: a dispatch on a branch publishes its dated tag and
     # cannot move the alias, so the break-glass `nomad job run` with no `-var` can only
     # land on a build from master.
@@ -802,6 +912,8 @@ jobs:
           echo "publishing $IMAGE as: $refs"
           echo "image-tag=$tag" >> "$GITHUB_OUTPUT"
           echo "refs=$refs" >> "$GITHUB_OUTPUT"
+          # The reference the smoke runs: the dated name, which only this build carries.
+          echo "image=$REGISTRY/$IMAGE:$tag" >> "$GITHUB_OUTPUT"
 
       # ---------------------------------------------------------------------------
       # What the image says about itself.
@@ -976,96 +1088,21 @@ jobs:
       # already decided against checks that can be skipped, because a skip is
       # indistinguishable from a pass. [LAW:dataflow-not-control-flow]
       #
-      # THE IMAGE MUST BE LOCALLY PRESENT, and nothing about the invocation says so out
-      # loud. `smoke.py` reads the port to poll and the HEALTHCHECK to run out of
-      # `docker image inspect`, which resolves the local store and never the registry. The
-      # plain `docker build` above satisfies that for free. Two edits would break it, and
-      # both fail here at the first call rather than anywhere that explains itself: moving
-      # this step below the push and pointing it at a registry reference nothing pulled, or
-      # switching the build to `buildx --push`, which does not populate the local store.
-      #
-      # `--runtime docker` rather than smoke.py's first-installed default, for the same
-      # reason: the image this leg just built exists in that daemon's store and nowhere
-      # else, so a podman arriving on this runner would otherwise move the smoke to a
-      # runtime that cannot see what was built.
-      #
-      # UNCONFINED, DECIDED RATHER THAN DEFAULTED. Passing `--memory` obliges
-      # `--env ELVENSPEAK_CONCURRENT_SYNTHESES=N` — the image refuses to start under a
-      # ceiling nobody chose — and N is a per-engine runtime figure nobody has measured.
-      # Chatterbox's 4.69 GiB is its *bake* peak, which is a different number for a
-      # different phase, and reusing it here would be a guess wearing a measurement's
-      # clothes. A ceiling guessed low turns a leg red for a reason that has nothing to do
-      # with the commit that hit it, which is the failure the rest of this file keeps
-      # refusing. Confined is the shape the fleet actually runs and is worth proving; it
-      # is worth proving against measured numbers, and there are none yet: the smoke below
-      # drives real synthesis, and nothing records what it costs resident. That is
-      # piper-build-b4h.scw.
-      #
-      # ONE KNOWN FLAKE, WRITTEN DOWN SO NOBODY HUNTS A PHANTOM. `smoke.py` picks its
-      # host port by binding :0, reading the number and closing, so there is a small
-      # bounded window before the runtime binds it. `max-parallel: 1` above is declared and
-      # not honoured by this scheduler, so these legs genuinely do run at the same second
-      # and genuinely can race for a port. A leg that goes red on a bind error is this, and
-      # a re-run clears it — it is not a broken image. It was left unfixed deliberately:
-      # holding the socket open would stop the runtime binding at all, and the race-free
-      # form (publish to an ephemeral port and ask the runtime which it got) does not exist
-      # on every runtime `smoke.py` supports. See piper-build-b4h.1's review for the
-      # evidence. [LAW:no-ambient-temporal-coupling]
-      #
-      # No `--timeout`: 180s is `smoke.py`'s own default, chosen as the slowest engine's
-      # model load. Restating it here would be a second copy of a number that belongs to
-      # the script and would drift the first time only one was edited.
+      # How the image is run — what each engine needs before it can answer, which runtime,
+      # why unconfined — belongs to `smoke-image`, which `prove` calls as well.
       # [LAW:one-source-of-truth]
       #
-      # No guard on `TAG`, matching the two verification steps below, which read the same
-      # output the same way and guard it no more than this does. A `TAG` that arrived empty
-      # reaches `smoke.py` as the reference `.../elvenspeak-piper:` and comes back as an
-      # image the runtime cannot resolve — loudly, and on the same exit path as an image
-      # that will not boot. Adding a check here and not there would be a second enforcer of
-      # an invariant, sited at one of its three readers. [LAW:single-enforcer]
+      # The reference is the dated one this leg just built under, handed over by the tag
+      # step. One that arrived empty reaches `smoke.py` as an image the runtime cannot
+      # resolve — loudly, and on the same exit path as an image that will not boot — so it
+      # is guarded here no more than the verification steps below guard the tag they read.
+      # [LAW:single-enforcer]
       # ---------------------------------------------------------------------------
       - name: Prove the image serves before anything is pushed
-        env:
-          TAG: ${{ steps.tag.outputs.image-tag }}
-        run: |
-          set -euo pipefail
-
-          # WHAT EACH ENGINE NEEDS BEFORE IT CAN ANSWER AT ALL, as one table.
-          #
-          # The first run of this step gave every engine an empty environment, and two
-          # legs went red for it on gitea run 38 -- not broken images, but settings with
-          # no default, which is a red that says nothing about the commit. Each printed
-          # its own refusal from inside its own container.
-          #
-          # A table and not a branch: every engine runs the same commands below and only
-          # these values differ. Every engine that needs anything is named, so the `*)`
-          # arm means "needs nothing" rather than "not looked into".
-          # [LAW:dataflow-not-control-flow]
-          case "$ENGINE" in
-            # `cpu` because this runner has no accelerator. `speaks.conform` does
-            # synthesize here, at the 8-33x real time that makes cpu the wrong choice
-            # for a deployment, and `speaks.budget` is sized for exactly that.
-            chatterbox) boot=(--env CHATTERBOX_DEVICE=cpu) ;;
-
-            # The router synthesizes nothing, so what it needs is not a setting but
-            # something to discover. `--fleet` runs `fleetstub.py` in a second container
-            # -- started from the image being smoked, so nothing is built or pulled --
-            # and points ROUTER_CONSUL_URL at it.
-            #
-            # An env var alone was tried first and is not enough, which is the whole of
-            # piper-build-b4h.4: a fleet with nothing in it is not refused
-            # (`elvenspeak/router.py`), so a reachable but empty stub gets a router that
-            # boots correctly, has no voices, and answers /health 503 by design while
-            # `smoke.py` waits for a 200 -- trading run 38's 43-second config error for a
-            # 180-second timeout that reads like a hang. Since piper-routing-7e2.17 the
-            # backend must also answer /v1/models, because the router asks each one which
-            # models its voices speak while it is still constructing itself.
-            router)     boot=(--fleet) ;;
-
-            *)          boot=() ;;
-          esac
-
-          python3 smoke.py "$REGISTRY/$IMAGE:$TAG" --runtime docker "${boot[@]}"
+        uses: ./.gitea/actions/smoke-image
+        with:
+          image: ${{ steps.tag.outputs.image }}
+          engine: ${{ matrix.engine }}
 
       # Nothing here decides whether to push. Reaching this step at all is the decision,
       # taken by the step above by exiting 0.

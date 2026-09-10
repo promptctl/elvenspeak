@@ -1,19 +1,20 @@
-"""What the publish workflow builds, and the order in which it proves it.
+"""What the publish workflow builds, proves and publishes, and in what order.
 
-Two claims about `.gitea/workflows/publish-image.yaml`, both read off the file
+Claims about `.gitea/workflows/publish-image.yaml`, every one read off the file
 because the file is what act_runner executes. The first is the engine set below.
-The second is one step ordering — that no image is pushed before it has been run
-and proved to serve — which is a guarantee made entirely of position and so
-cannot be held by anything except a check on position.
+The rest concern the two jobs that build the real Dockerfile: that `prove` does
+it on every ref and can publish nothing, that `publish` cannot run past a proof
+that failed, and that `publish` pushes nothing before it has run the image and
+seen it serve. Those are guarantees made of position and of names, so they
+cannot be held by anything except checks on position and on names.
 
-The images CI publishes, checked against the engines this package registers.
+The images CI builds, checked against the engines this package registers.
 
-`.gitea/workflows/publish-image.yaml` builds one image per engine, and its build
-matrix is a third map of the engine set — after `elvenspeak.engines.ENGINES`,
-which decides what `ELVENSPEAK_ENGINE` may name, and `pyproject.toml`'s extras,
-which decide what can be installed. `tests/test_packaging.py` already holds those
-two together; this file adds the third, for the same reason and by the same
-means.
+Each building job's matrix is another map of the engine set — after
+`elvenspeak.engines.ENGINES`, which decides what `ELVENSPEAK_ENGINE` may name,
+and `pyproject.toml`'s extras, which decide what can be installed.
+`tests/test_packaging.py` already holds those two together; this file adds the
+matrices, for the same reason and by the same means.
 
 [FRAMING:representation] The failure it makes expressible is a quiet one. An
 engine registered and packaged but missing from the matrix publishes no image and
@@ -33,49 +34,45 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+from workflows import job, needs, without_prose
+
 from elvenspeak.engines import ENGINES
 
 WORKFLOW = Path(__file__).parent.parent / ".gitea" / "workflows" / "publish-image.yaml"
+SMOKE_ACTION = Path(__file__).parent.parent / ".gitea" / "actions" / "smoke-image" / "action.yml"
 ENGINE_SOURCE = Path(__file__).parent.parent / "elvenspeak" / "chatterbox.py"
 DEPLOY_INSTRUCTIONS = Path(__file__).parent.parent / "CLAUDE.md"
+
+#: The jobs that build the real Dockerfile once per engine: `prove` on every
+#: ref, `publish` on the refs that publish. Each declares its own matrix,
+#: because a workflow cannot hand one job's matrix to another, so the engine
+#: list is written once per job and every copy is held to the registry below.
+BUILDERS = ("prove", "publish")
 
 #: An image name, which is also its service key in home-infra — the two are one
 #: string by construction, which is why one pattern finds both.
 _SERVICE_KEY = re.compile(r"elvenspeak-([a-z]+)")
 
-#: The build matrix's one axis. Matched against the file with its comments
+#: A build matrix's one axis. Matched against one job's YAML with its comments
 #: removed — this workflow's comments discuss the engine list at length, and a
 #: check that cannot tell YAML from prose about YAML is the substring-against-
 #: prose mistake `tests/test_dockerfile.py` was already bitten by.
 _MATRIX = re.compile(r"^\s*engine:\s*\[([^\]]*)\]\s*$", re.MULTILINE)
 
 
-def workflow_yaml() -> str:
-    """The workflow with its prose removed, which is the only form worth matching.
-
-    This file discusses its own YAML at length, so a check that cannot tell YAML
-    from prose about YAML matches the discussion and reports on a sentence. Both
-    readers below share this one decision rather than each making it again.
-    """
-    return "\n".join(
-        line
-        for line in WORKFLOW.read_text(encoding="utf-8").splitlines()
-        if not line.lstrip().startswith("#")
-    )
-
-
-def matrix_engines() -> list[str]:
-    """Every engine the publish job is told to build an image for."""
-    yaml = workflow_yaml()
+def matrix_engines(builder: str) -> list[str]:
+    """Every engine the job called `builder` builds an image for."""
     return [
         engine.strip()
-        for listing in _MATRIX.findall(yaml)
+        for listing in _MATRIX.findall(job(WORKFLOW, builder))
         for engine in listing.split(",")
         if engine.strip()
     ]
 
 
-def test_the_workflow_still_declares_a_build_matrix():
+@pytest.mark.parametrize("builder", BUILDERS)
+def test_the_workflow_still_declares_a_build_matrix(builder):
     """Positive control: the reader still reads.
 
     A regex over YAML that quietly stopped matching would make the equivalence
@@ -83,29 +80,34 @@ def test_the_workflow_still_declares_a_build_matrix():
     suite's other static checks have failed before, so the vacuous case is a
     failure here rather than silence.
     """
-    assert matrix_engines(), "parsed no matrix engines — the regex is wrong, not the file"
+    assert matrix_engines(builder), (
+        f"parsed no matrix engines in {builder} — the regex is wrong, not the file"
+    )
 
 
-def test_ci_publishes_an_image_for_every_registered_engine():
-    """[LAW:one-source-of-truth] The registry decides; the matrix follows.
+@pytest.mark.parametrize("builder", BUILDERS)
+def test_ci_builds_an_image_for_every_registered_engine(builder):
+    """[LAW:one-source-of-truth] The registry decides; every matrix follows.
 
     Stated as an equivalence so it fails from both sides. An engine registered
-    without a matrix entry is one no deployment can ever run, because no image of
-    it exists. A matrix entry naming no engine is a build that installs an extra
-    `uv` has never heard of and fails ten minutes in — loudly, but on the runner
-    rather than here.
+    without a `publish` entry is one no deployment can ever run, because no
+    image of it exists; without a `prove` entry, its Dockerfile build goes
+    unchecked until the run that publishes it. A matrix entry naming no engine
+    is a build that installs an extra `uv` has never heard of and fails ten
+    minutes in — loudly, but on the runner rather than here.
     """
-    assert set(matrix_engines()) == set(ENGINES)
+    assert set(matrix_engines(builder)) == set(ENGINES)
 
 
-def test_no_engine_is_built_twice():
-    """A duplicate would publish two images to one name, second overwriting first.
+@pytest.mark.parametrize("builder", BUILDERS)
+def test_no_engine_is_built_twice(builder):
+    """A duplicate would build two images under one name, second overwriting first.
 
     Harmless-looking, and the tell that the list was edited by appending rather
     than by reading — which is exactly how the equivalence above stops being the
     check it looks like.
     """
-    engines = matrix_engines()
+    engines = matrix_engines(builder)
     assert len(engines) == len(set(engines)), engines
 
 
@@ -134,11 +136,11 @@ def test_the_deploy_instructions_name_every_engine_and_no_others():
     assert named == set(ENGINES)
 
 
-#: The publish job's smoke, named by the image argument it takes. The
-#: reachability job runs the same script with `--help` to prove the runner's
-#: interpreter parses it, and that run smokes no image — so the flag is what
-#: tells the proof apart from the proof that the prover works.
-_SMOKE = re.compile(r'^\s*python3 smoke\.py "', re.MULTILINE)
+#: A smoke of a built image, which every building job runs through the one
+#: composite action. The reachability job runs `smoke.py --help` directly to
+#: prove the runner's interpreter parses it, and that run smokes no image — so
+#: the action is what tells the proof apart from the proof that the prover works.
+_SMOKE = re.compile(r"^\s*uses:\s*\./\.gitea/actions/smoke-image\s*$", re.MULTILINE)
 
 #: Every push of a built image to the registry.
 _PUSH = re.compile(r"^\s*docker push ", re.MULTILINE)
@@ -161,13 +163,17 @@ def test_no_image_is_pushed_before_it_has_been_proved_to_run():
     stand between them. Either edit leaves a green suite, a green publish, and no
     proof left in the pipeline at all.
 
+    Held of `publish`'s own smoke, not `prove`'s. `publish` pushes its own
+    build, and a smoke of a different build of the same commit, in another job,
+    proves nothing about the bytes this job is about to push.
+
     Positions rather than presence, and both patterns controlled for: a regex
     that quietly stopped matching would compare nothing against nothing and pass,
     which is how this suite's other static checks have failed before.
     """
-    yaml = workflow_yaml()
-    smoked = [m.start() for m in _SMOKE.finditer(yaml)]
-    pushed = [m.start() for m in _PUSH.finditer(yaml)]
+    publish = job(WORKFLOW, "publish")
+    smoked = [m.start() for m in _SMOKE.finditer(publish)]
+    pushed = [m.start() for m in _PUSH.finditer(publish)]
 
     assert len(smoked) == 1, f"expected one smoke of a built image, found {len(smoked)}"
     assert pushed, "matched no `docker push` — the regex is wrong, not the file"
@@ -177,7 +183,65 @@ def test_no_image_is_pushed_before_it_has_been_proved_to_run():
     )
 
 
-#: The smoke step's boot table — the engines that need something in their
+def test_the_proof_on_every_ref_can_publish_nothing():
+    """A branch push spends no dated tag, and `prove` must not be what changes that.
+
+    `prove` builds and runs the real Dockerfile on every ref, which is safe only
+    because nothing in it reaches the registry: its image name carries no
+    registry host, it pushes nothing, and it never reads `$REGISTRY`. The edit
+    that breaks this sounds like an economy: "the image is already proven, push
+    it from here and spare `publish` its rebuild". After that, every branch push
+    takes a dated tag, and a branch deleted later leaves a published image whose
+    commit no ref names.
+
+    Positive control first: the slice is `prove` and it does smoke, so an empty
+    slice cannot pass the two absences below.
+    """
+    prove = job(WORKFLOW, "prove")
+    assert _SMOKE.search(prove), "prove runs no smoke — the slice or the regex is wrong"
+    assert not _PUSH.search(prove), "prove pushes an image, so every branch push would publish"
+    assert "REGISTRY" not in prove, "prove names the registry, so its image could be pushed there"
+
+
+#: A job-level condition: four spaces in, directly under the job's key. A step's
+#: `if:` sits deeper, and decides whether one step runs rather than the job.
+_JOB_CONDITION = re.compile(r"^    if:", re.MULTILINE)
+
+
+def test_the_proof_runs_on_every_ref():
+    """[LAW:dataflow-not-control-flow] Nothing decides whether an image gets proved.
+
+    A skipped check is indistinguishable from a passing one. A `prove` gated on
+    the ref or on what a diff touched goes green by not running, and `publish`,
+    which needs it, then waits on nothing. The twenty minutes a chatterbox leg
+    costs is exactly the pressure that produces that edit, so it is held here
+    rather than argued in a comment.
+
+    `publish` carries a job-level `if:` by design, which makes it the positive
+    control: if the pattern stopped finding a condition, it would stop finding
+    one on `prove` too.
+    """
+    assert _JOB_CONDITION.search(job(WORKFLOW, "publish")), (
+        "found no job-level `if:` on publish — the pattern is wrong, not the file"
+    )
+    assert not _JOB_CONDITION.search(job(WORKFLOW, "prove")), (
+        "prove has a job-level `if:`, so some refs publish past a proof that never ran"
+    )
+
+
+def test_nothing_publishes_past_a_proof_that_failed():
+    """`publish` needs `prove`, so a ref whose image did not serve publishes nothing.
+
+    A proof is a gate only if the thing it gates depends on it. A `prove` that
+    `publish` does not need goes red on the runs page while the image publishes
+    anyway, with the two facts on different screens. The dependency also orders
+    the two jobs: without it a master push starts both matrices at once, and two
+    chatterbox smokes share one 7.9 GB runner.
+    """
+    assert "prove" in needs(WORKFLOW, "publish")
+
+
+#: The smoke's boot table — the engines that need something in their
 #: environment before the image can answer at all.
 _BOOT_TABLE = re.compile(r"^\s*([a-z][a-z0-9_]*)\)\s*boot=\(", re.MULTILINE)
 
@@ -197,7 +261,7 @@ def test_the_smoke_boot_table_names_only_real_engines():
     settings, and the run that discovers it is the one this table exists to stop
     being surprised by.
     """
-    named = set(_BOOT_TABLE.findall(workflow_yaml()))
+    named = set(_BOOT_TABLE.findall(without_prose(SMOKE_ACTION)))
     assert named, "matched no boot-table entries — the regex is wrong, not the file"
     assert named <= set(ENGINES), f"boot table names non-engines: {named - set(ENGINES)}"
 
