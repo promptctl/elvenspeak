@@ -53,7 +53,9 @@ from smoke import (
     _declared_port,
     _docker_image_config,
     _fleet_address,
+    _footprint,
     _read_config,
+    _read_footprint,
     select_runtime,
 )
 
@@ -359,6 +361,114 @@ def test_a_readable_shape_that_is_still_refused_keeps_its_own_sentence(monkeypat
     )
     with pytest.raises(SmokeFailure, match="only the shell form"):
         _read_config(DOCKER, "registry.example/elvenspeak-piper:2026.09.07.1")
+
+
+#: Verbatim from `container run --rm -m 256m docker.io/library/alpine:3.20 cat
+#: /sys/fs/cgroup/memory.peak /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.stat`
+#: on 2026-09-10 — the argv `_read_footprint` runs, minus the exec. Every line of
+#: `memory.stat` is kept, because the parser has to survive the fifty it ignores.
+APPLE_CONFINED_CGROUP = """\
+4595712
+268435456
+anon 49152
+file 4308992
+kernel 200704
+kernel_stack 0
+pagetables 102400
+sec_pagetables 0
+percpu 112
+sock 0
+vmalloc 0
+shmem 0
+file_mapped 888832
+file_dirty 0
+file_writeback 0
+swapcached 0
+inactive_anon 4096
+active_anon 4096
+inactive_file 2072576
+active_file 2203648
+unevictable 0
+slab_reclaimable 59528
+slab_unreclaimable 31368
+slab 90896
+workingset_refault_anon 0
+workingset_refault_file 530
+workingset_activate_anon 0
+workingset_activate_file 530
+workingset_restore_anon 0
+workingset_restore_file 0
+workingset_nodereclaim 0
+pgdemote_kswapd 0
+pgdemote_direct 0
+pgdemote_khugepaged 0
+pgdemote_proactive 0
+pgscan 0
+pgsteal 0
+pswpin 0
+pswpout 0
+pgscan_kswapd 0
+pgscan_direct 0
+pgscan_khugepaged 0
+pgscan_proactive 0
+pgsteal_kswapd 0
+pgsteal_direct 0
+pgsteal_khugepaged 0
+pgsteal_proactive 0
+pgfault 908
+pgmajfault 3
+pgrefill 0
+pgactivate 1
+pgdeactivate 0
+pglazyfree 0
+pglazyfreed 0
+swpin_zero 0
+swpout_zero 0
+"""
+
+
+def test_a_footprint_reads_the_peak_the_limit_and_what_the_peak_was_made_of():
+    """The line a ceiling is chosen from, read off what a kernel actually printed."""
+    assert _footprint(APPLE_CONFINED_CGROUP) == (
+        "peaked at 4 MiB against a limit of 256 MiB, "
+        "holding 0 MiB anonymous and 4 MiB page cache at the end"
+    )
+
+
+def test_an_unconfined_limit_is_quoted_as_the_kernel_writes_it():
+    """`max` is what cgroup v2 writes for no limit, and it is not a number of anything.
+
+    Composed from the capture above rather than captured: Apple's runtime gives a
+    container without `-m` its VM's size, not `max`, so only `docker` and `podman`
+    print this — which is what the CI runner runs, unconfined, today.
+    """
+    peak, _, *stat = APPLE_CONFINED_CGROUP.splitlines()
+    unconfined = "\n".join([peak, "max", *stat])
+    assert "against a limit of max," in _footprint(unconfined)
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "",
+        "4595712\n",
+        "4595712\n268435456\nanon 49152\n",
+        "4595712\n268435456\nanon\nfile 4308992\n",
+        "a lot\nmax\nanon 49152\nfile 4308992\n",
+    ],
+    ids=["nothing", "no limit line", "no page cache figure", "a counter with no value", "a peak that is not a number"],
+)
+def test_a_cgroup_that_answers_in_an_unreadable_shape_is_refused_not_traced(
+    monkeypatch, stdout
+):
+    """[LAW:no-silent-failure] A footprint nobody can read is a failed smoke, not a traceback.
+
+    The same boundary `_read_config` keeps: `_footprint` unpacks and indexes, so
+    each shape here raised past `main`'s handler before it was crossed in one place.
+    """
+    monkeypatch.setattr("smoke._capture", lambda argv: stdout)
+    with pytest.raises(SmokeFailure, match="shape this cannot read"):
+        _read_footprint(DOCKER, "elvenspeak-smoke-abc")
 
 
 def test_an_image_that_cannot_speak_is_reported_as_a_failed_smoke_not_traced(

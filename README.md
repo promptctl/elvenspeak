@@ -436,7 +436,12 @@ different commits, so reading the source would prove a property of the source
 while claiming to have proved the artifact. It exits 0 only when both questions
 passed, and 1 otherwise. The container's logs are printed on every path, success
 included — on a passing run they are the only account anyone has of what the
-artifact said at boot — and the container is removed either way.
+artifact said at boot — and the container is removed either way. Before it is,
+a passing run prints what the container cost, out of its own cgroup: the kernel's
+high-water mark over its whole life (`memory.peak`), the limit it was held to
+(`memory.max`, which reads `max` when there is none), and how much of it was
+anonymous memory against page cache at the end. That line, not a workstation's
+RSS, is where an engine's memory ceiling is read from.
 
 Standard-library Python 3 only, so `python3 smoke.py <image>` is the whole
 invocation: it imports nothing from `elvenspeak`, and there is no virtualenv to

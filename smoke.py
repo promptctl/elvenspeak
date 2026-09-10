@@ -23,6 +23,11 @@ WHAT IT ASKS THE IMAGE. Three questions, and they are not the same question:
   3. Does it speak? [`speaks`] asks every property the engine seam promises,
      over HTTP, of the running container.
 
+Then it says what answering cost, out of the container's own cgroup: the
+kernel's high-water mark and the limit it was held to. That is a report and not
+a fourth question, because the kernel is the one enforcer of a limit — an image
+that outgrew its ceiling was killed, and never reaches the line that reports it.
+
 The first two are read from the image rather than from this repository. `PORT` is read from
 the image's environment and the healthcheck out of its config, so this file
 holds no second copy of either ([LAW:one-source-of-truth]). Reading them from
@@ -133,6 +138,21 @@ CONFORM_TIMEOUT = 30.0
 #: would present as the empty fleet `--fleet` exists to prevent, and present it as
 #: a timeout rather than as a name that does not match.
 CONSUL_URL_VAR = "ROUTER_CONSUL_URL"
+
+#: What a container cost, as its own cgroup counts it, read from inside it. Every
+#: runtime here gives a container a private cgroup namespace on a cgroup v2 host,
+#: so `/sys/fs/cgroup` inside it is that container's cgroup and nobody else's —
+#: and a runtime that did not would put the host's root cgroup there, which has no
+#: `memory.peak`, so the read fails loudly rather than reporting the host's figure.
+#:
+#: `memory.peak` rather than sampling `stats`: it is the kernel's own high-water
+#: mark over the container's whole life, boot included, and a sampled figure misses
+#: exactly the burst that kills — elvenspeak-piper was OOM-killed at 2048 MiB by an
+#: eight-way burst that sampling every 0.5s never saw above 1773. `memory.stat`
+#: comes with it because the peak counts page cache, which a limit reclaims before
+#: it kills anything: `file` says how much of a peak was model files the kernel was
+#: only caching.
+MEMORY_FILES = ("memory.peak", "memory.max", "memory.stat")
 
 
 class SmokeFailure(Exception):
@@ -519,6 +539,47 @@ def _print_logs(runtime: Runtime, name: str) -> None:
     print(f"--- end {name} logs ---", flush=True)
 
 
+def _mib(counted: str) -> str:
+    """A byte count as the kernel wrote it, in whole mebibytes."""
+    return f"{int(counted) // 1048576} MiB"
+
+
+def _footprint(stdout: str) -> str:
+    """[`MEMORY_FILES`] as `cat` printed them, as one sentence about what they say.
+
+    Positional, because `cat` concatenates: the peak's one line, the limit's one
+    line, then `memory.stat`'s `name value` lines. The limit is quoted as the kernel
+    wrote it when it is `max`, which is how an unconfined container reads — a
+    number there would be a guess at what "no limit" means.
+    """
+    peak, limit, *stat = stdout.splitlines()
+    counters = dict(line.split(" ", 1) for line in stat)
+    return (
+        f"peaked at {_mib(peak)} against a limit of "
+        f"{limit if limit == 'max' else _mib(limit)}, holding {_mib(counters['anon'])} "
+        f"anonymous and {_mib(counters['file'])} page cache at the end"
+    )
+
+
+def _read_footprint(runtime: Runtime, name: str) -> str:
+    """Ask a running container what it cost, and refuse an answer of the wrong shape.
+
+    The crossing `_read_config` makes for an image's config, made for its cgroup:
+    `_footprint` unpacks and indexes, and this is the one place a miss becomes the
+    failure type quoting what was actually printed ([LAW:single-enforcer]).
+    """
+    stdout = _capture(
+        [runtime.binary, "exec", name, "cat", *(f"/sys/fs/cgroup/{f}" for f in MEMORY_FILES)]
+    )
+    try:
+        return _footprint(stdout)
+    except (LookupError, ValueError) as malformed:
+        raise SmokeFailure(
+            f"{name}'s cgroup described its memory in a shape this cannot read "
+            f"({malformed!r}):\n{stdout.strip()}"
+        ) from malformed
+
+
 @contextmanager
 def _container(runtime: Runtime, name: str, argv: Sequence[str]) -> Iterator[None]:
     """Own one container's whole lifetime: start it, then always log it and remove it.
@@ -725,6 +786,12 @@ def smoke(
         # seconds rather than after a minute of synthesis.
         speaks.conform(base, CONFORM_TIMEOUT)
         print(f"smoke: {image} answered every question `speaks.py` asks", flush=True)
+
+        # After conformance, so the high-water mark covers the most this run asks of
+        # the image: a model loaded and four callers inside it at once. Every image,
+        # confined or not, because the unconfined figure is the measurement a ceiling
+        # is chosen from and the confined one is the headroom that ceiling left.
+        print(f"smoke: {image} {_read_footprint(runtime, name)}", flush=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
