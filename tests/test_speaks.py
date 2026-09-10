@@ -204,16 +204,22 @@ def _handler(fake: Fake) -> type[BaseHTTPRequestHandler]:
             self._send(404, b"", {})
 
         def do_POST(self) -> None:  # noqa: N802 - http.server's spelling
+            match self.path.partition("?")[0].split("/"):
+                case ["", "v1", "text-to-speech", voice, ("stream" | "with-timestamps") as endpoint]:
+                    self._synthesize(voice, endpoint)
+                case _:
+                    self._send(404, b"", {})
+
+        def _synthesize(self, voice: str, endpoint: str) -> None:
             length = int(self.headers.get("content-length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
             text = body.get("text", "")
             speed = (body.get("voice_settings") or {}).get("speed")
-            voice = self.path.split("/")[3]
 
             with fake.engine:
                 time.sleep(fake.seconds_per_character * len(text))
 
-            if "/with-timestamps" in self.path:
+            if endpoint == "with-timestamps":
                 if fake.timestamps_status != 200:
                     self._send(fake.timestamps_status, b'{"detail":"no"}',
                                {"content-type": "application/json"})
@@ -512,8 +518,8 @@ def test_each_request_is_bounded_by_the_work_in_front_of_it(monkeypatch):
     sum. Shrunk to fractions of a second, because what is under test is those
     ratios and not the real figures.
     """
-    monkeypatch.setattr(speaks, "SECONDS_BEFORE_SPEECH", 0.05)
-    monkeypatch.setattr(speaks, "SECONDS_PER_CHARACTER", 0.01)
+    monkeypatch.setattr(speaks, "SECONDS_BEFORE_SPEECH", 0.1)
+    monkeypatch.setattr(speaks, "SECONDS_PER_CHARACTER", 0.02)
     monkeypatch.setattr(speaks, "HEADROOM", 1.0)
-    with serving(Fake(seconds_per_character=0.007)) as url:
+    with serving(Fake(seconds_per_character=0.014)) as url:
         speaks.conform(url, timeout=5.0)
