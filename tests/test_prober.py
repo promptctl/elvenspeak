@@ -367,6 +367,29 @@ def test_a_timeout_no_socket_can_take_is_a_usage_error_and_not_a_verdict(
     assert "--timeout" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    "given", ["key\n", "key\r", "key\twith-tab", "k\U0001f511"]
+)
+def test_a_key_no_header_can_carry_is_a_usage_error_and_not_a_verdict(
+    given: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same hole as `--timeout`, through the other word an operator gives.
+
+    A key carrying CR or LF reaches `http.client.putheader` as a `ValueError`
+    and one outside latin-1 as a `UnicodeEncodeError`; `_ask` catches neither,
+    so both propagated past `main` and the shell saw `1` — this project's code
+    for *at least one claim is broken*, spent on a deployment nobody probed. A
+    trailing newline off a key file is the ordinary way in, which is why this is
+    a usage error and not a rare one.
+    """
+    with pytest.raises(SystemExit) as refused:
+        prober.main(["http://127.0.0.1:1", "--key", given, "--timeout", "2"])
+
+    code = refused.value.code
+    assert code == 2, f"--key {given!r} exited {code}"
+    assert "--key" in capsys.readouterr().err
+
+
 # ------------------------------------- the deployments that lie past the parse
 
 
@@ -905,6 +928,106 @@ def test_a_403_guard_is_not_reported_as_a_guard_standing_open() -> None:
     assert "the guard is not closed" in admitting.why
     assert "the guard is not closed" not in refusing.why
     assert "403" in refusing.why and "401" in refusing.why
+
+
+def test_a_guard_admitting_a_wrong_key_with_204_is_still_not_closed() -> None:
+    """Any 2xx is the guard admitting, not 200 alone.
+
+    A deployment waving every non-empty key through with a 204 is exactly as
+    open as one answering 200, and reading only 200 as the admission drops this
+    into the wrong-status arm to be told it did not let the caller in — the
+    reassuring direction, about a deployment anyone can walk into. The fixture
+    is written here rather than given to [`guarded_deployment`] as another
+    parameter, because one test needing a shape is not the shape becoming a
+    mode every other caller has to read past.
+    """
+    app = lying_deployment([WELL_FORMED])
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next: Any) -> Response:
+        sent = request.headers.get("xi-api-key")
+        if sent is None:
+            return Response(
+                content=json.dumps({"detail": "invalid xi-api-key"}).encode(),
+                status_code=401,
+                media_type="application/json",
+            )
+        if sent != "probe-key":
+            return Response(status_code=204)
+        return await call_next(request)
+
+    with serving(app) as base_url:
+        verdict = _verdicts(base_url, key="probe-key")["AUTH-1"]
+
+    assert verdict.word == "broken"
+    assert "the guard is not closed" in verdict.why
+    assert "204" in verdict.why
+
+
+@pytest.mark.parametrize(
+    "path, claim", [("/health", "HEALTH-1"), ("/v1/voices", "DISC-1")]
+)
+def test_a_body_that_is_not_json_breaks_the_claim_whose_subject_it_is(
+    path: str, claim: str
+) -> None:
+    """`unasked` here said "I could not find out" about a deployment caught out.
+
+    Both claims' docstrings call a body with no usable `voices` array this
+    promise *broken*, and `_parsed_voices`/`_parsed_health_voices` return a
+    complaint rather than raising precisely so the claim that owns the body can
+    say so. A body that was not JSON at all never reached them: `Reply.json`
+    raised past both readers, and an ingress serving an HTML error page under a
+    200 came back `unasked` — the word this project keeps for a precondition
+    that failed, reporting a conformance failure as a question nobody asked.
+
+    A proxy answering instead of the deployment was the reason given for the old
+    behaviour, and it does not survive the comparison: a proxy answering
+    `{"error": "bad gateway"}` is JSON, has always been reported `broken`, and
+    is no more the deployment's doing than an HTML page is.
+    """
+    app = lying_deployment([WELL_FORMED])
+
+    @app.middleware("http")
+    async def interpose(request: Request, call_next: Any) -> Response:
+        if request.url.path == path:
+            return Response(
+                content=b"<html><body>502 Bad Gateway</body></html>",
+                status_code=200,
+                media_type="text/html",
+            )
+        return await call_next(request)
+
+    with serving(app) as base_url:
+        verdict = _verdicts(base_url)[claim]
+
+    assert verdict.word == "broken"
+    assert "not JSON" in verdict.why
+
+
+def test_a_refusal_body_that_is_not_json_breaks_auth_1() -> None:
+    """`AUTH-1` promises the detail, so a body that cannot carry one broke it.
+
+    A gateway shutting the caller out with a plain-text 401 is the shape this
+    claim exists to catch: the guard is closed and a caller still cannot tell
+    this refusal from any other, which is the whole of what `AUTH-1` asks.
+    """
+    app = lying_deployment([WELL_FORMED])
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next: Any) -> Response:
+        if request.headers.get("xi-api-key") != "probe-key":
+            return Response(
+                content=b"Forbidden by the gateway",
+                status_code=401,
+                media_type="text/plain",
+            )
+        return await call_next(request)
+
+    with serving(app) as base_url:
+        verdict = _verdicts(base_url, key="probe-key")["AUTH-1"]
+
+    assert verdict.word == "broken"
+    assert "invalid xi-api-key" in verdict.why
 
 
 def test_a_refusal_carrying_another_detail_is_broken() -> None:

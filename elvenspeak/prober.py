@@ -224,21 +224,6 @@ class Reply:
     headers: Message
     body: bytes
 
-    def json(self, asking: str) -> Any:
-        """This body decoded, or [`Blocked`] naming the request that answered it.
-
-        A body that is not JSON blocks the claim rather than breaking it: the
-        prober cannot tell a server that answered wrongly from a proxy that
-        answered instead of it, and guessing between those is how a prober starts
-        reporting on something other than the deployment.
-        """
-        try:
-            return json.loads(self.body)
-        except ValueError as unreadable:
-            raise Blocked(
-                f"{asking} answered a body that is not JSON: {self.body[:200]!r}"
-            ) from unreadable
-
 
 @dataclass(frozen=True)
 class Target:
@@ -326,8 +311,8 @@ class ProbedVoice:
     published: Mapping[str, Any]
 
 
-def _parsed_voices(listing: Any) -> tuple[ProbedVoice, ...] | str:
-    """`listing`'s voices, or the complaint saying why it published none.
+def _parsed_voices(reply: Reply) -> tuple[ProbedVoice, ...] | str:
+    """`reply`'s voices, or the complaint saying why it published none.
 
     Returns the complaint rather than raising it, because the same fact means two
     different things to two readers and only the reader knows which. To `DISC-1`,
@@ -336,7 +321,17 @@ def _parsed_voices(listing: Any) -> tuple[ProbedVoice, ...] | str:
     listing to get at a voice, it is a precondition that failed and the claim goes
     `unasked`. One parser, two readings — which is why the verdict is not decided
     here ([LAW:decomposition]: parsing and judging are two jobs).
+
+    The decode happens here rather than in the caller so a body which is not
+    JSON at all takes the same route as one that is JSON and wrong. It used to
+    raise past every reader instead, which handed `DISC-1` an `unasked` about a
+    deployment it had in fact caught red-handed ([LAW:single-enforcer] — what
+    counts as an unusable listing is decided in this one function).
     """
+    try:
+        listing = json.loads(reply.body)
+    except ValueError:
+        return f"answered a body that is not JSON: {reply.body[:200]!r}"
     try:
         entries = listing["voices"]
     except (KeyError, TypeError):
@@ -411,7 +406,7 @@ class Deployment:
             raise Blocked(
                 f"GET /v1/voices answered {reply.status}: {reply.body[:200]!r}"
             )
-        parsed = _parsed_voices(reply.json("GET /v1/voices"))
+        parsed = _parsed_voices(reply)
         if isinstance(parsed, str):
             raise Blocked(f"GET /v1/voices {parsed}")
         return parsed
@@ -489,8 +484,8 @@ def _counted(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
-def _parsed_health_voices(body: Any) -> tuple[str, ...] | str:
-    """`body`'s voice ids, or the complaint saying why it published none usably.
+def _parsed_health_voices(reply: Reply) -> tuple[str, ...] | str:
+    """`reply`'s voice ids, or the complaint saying why it published none.
 
     Returned rather than raised for the reason [`_parsed_voices`] returns its own:
     to `HEALTH-1`, whose claim *is* the shape of this body, a malformed one is the
@@ -499,7 +494,14 @@ def _parsed_health_voices(body: Any) -> tuple[str, ...] | str:
     in a set, so an unstamped one reaches that set and raises `TypeError`
     ([LAW:parse-dont-validate] — the stamp is what keeps the question from
     arriving inland).
+
+    A body that is not JSON is decoded and complained about here for the same
+    reason, and reaches both readers as the one word each of them owns.
     """
+    try:
+        body = json.loads(reply.body)
+    except ValueError:
+        return f"answered a body that is not JSON: {reply.body[:200]!r}"
     try:
         entries = body["voices"]
     except (KeyError, TypeError):
@@ -517,7 +519,7 @@ def _parsed_health_voices(body: Any) -> tuple[str, ...] | str:
 
 def _health_voices(deployment: Deployment) -> tuple[str, ...]:
     """The ids `/health` published, or [`Blocked`] if it published none usably."""
-    parsed = _parsed_health_voices(deployment.health.json("GET /health"))
+    parsed = _parsed_health_voices(deployment.health)
     if isinstance(parsed, str):
         raise Blocked(f"GET /health {parsed}")
     return parsed
@@ -543,7 +545,7 @@ def probe_health_1(deployment: Deployment) -> Verdict:
             f"GET /health answered {status}, which is neither the 200 of a server "
             "fit for traffic nor the 503 of one that is not"
         )
-    parsed = _parsed_health_voices(deployment.health.json("GET /health"))
+    parsed = _parsed_health_voices(deployment.health)
     if isinstance(parsed, str):
         return Broken(f"GET /health {parsed}")
     voices = parsed
@@ -673,10 +675,14 @@ def probe_auth_1(deployment: Deployment) -> Verdict:
     unusable = ((None, "no xi-api-key"), (key + "-wrong", "a wrong xi-api-key"))
     for sent, described in unusable:
         refused = _ask(deployment.target, "/v1/voices", sent)
-        if refused.status == 200:
+        # Every 2xx and not 200 alone: a guard admitting an unusable key with a
+        # 204 is as open as one answering 200, and reading the narrower surface
+        # would drop it into the arm below to be told it refused — this
+        # claim's own version of the defect the four rounds before it found.
+        if 200 <= refused.status < 300:
             return Broken(
-                f"GET /v1/voices answered 200 to {described} while admitting "
-                "the real one — the guard is not closed"
+                f"GET /v1/voices answered {refused.status} to {described} "
+                "while admitting the real one — the guard is not closed"
             )
         if refused.status != 401:
             # Split from the admission above because one branch could not
@@ -694,7 +700,14 @@ def probe_auth_1(deployment: Deployment) -> Verdict:
                 "the guard is not standing open; what is wrong is the status "
                 "it refuses with"
             )
-        detail = refused.json("GET /v1/voices with an unusable key")
+        # A refusal that is not JSON is judged here rather than raised past this
+        # claim: `AUTH-1` promises the detail, so a body that cannot carry one
+        # is the promise broken, not a precondition that failed. Decoded to the
+        # raw bytes so the complaint below quotes what actually came back.
+        try:
+            detail: Any = json.loads(refused.body)
+        except ValueError:
+            detail = refused.body
         if not isinstance(detail, dict) or detail.get("detail") != INVALID_KEY_DETAIL:
             return Broken(
                 f"GET /v1/voices refused {described} with {detail!r:.200} rather "
@@ -827,7 +840,7 @@ def probe_disc_1(deployment: Deployment) -> Verdict:
             f"GET /v1/voices answered {reply.status} rather than a listing: "
             f"{reply.body[:200]!r}"
         )
-    parsed = _parsed_voices(reply.json("GET /v1/voices"))
+    parsed = _parsed_voices(reply)
     if isinstance(parsed, str):
         return Broken(f"GET /v1/voices {parsed}")
     voices = parsed
@@ -1045,6 +1058,40 @@ def probe(target: Target) -> Report:
     )
 
 
+def _header_safe_key(given: str) -> str:
+    """`given` as a key that can really be sent, or an `argparse` refusal.
+
+    [LAW:parse-dont-validate] The crossing [`_timeout_seconds`] is, for the
+    other word an operator hands this file. A key carrying CR or LF reaches
+    `http.client.putheader` as a `ValueError` and one outside latin-1 as a
+    `UnicodeEncodeError` — neither of them what [`_ask`] catches — so the
+    traceback leaves `main` with exit `1`, the code for a deployment whose
+    claims are broken, spent on the operator's own invocation. A trailing
+    newline off a key file is the ordinary way in.
+
+    Refused rather than stripped: which bytes are the key is the operator's to
+    say, and a prober that quietly edits the credential it was given can report
+    a refusal the real key would not have earned ([LAW:no-silent-failure]).
+
+    Every control character goes, which is wider than the two that crash: the
+    rest are header injection wearing a credential's clothes, and no key this
+    service issues contains one.
+    """
+    unsendable = [c for c in given if ord(c) < 32 or ord(c) == 127]
+    if unsendable:
+        raise argparse.ArgumentTypeError(
+            f"{given!r} carries {unsendable[0]!r}, which cannot be sent in "
+            "a header — strip it rather than let the run blame the deployment"
+        )
+    try:
+        given.encode("latin-1")
+    except UnicodeEncodeError:
+        raise argparse.ArgumentTypeError(
+            f"{given!r} is not latin-1, so it cannot be sent as a header value"
+        ) from None
+    return given
+
+
 def _timeout_seconds(given: str) -> float:
     """`given` as a timeout a socket can really take, or an `argparse` refusal.
 
@@ -1082,6 +1129,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--key",
+        type=_header_safe_key,
         default=None,
         help="the xi-api-key to send; omit for a deployment that configures none",
     )
