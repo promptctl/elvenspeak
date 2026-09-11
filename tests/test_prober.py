@@ -19,7 +19,9 @@ prober from the one the epic exists to avoid building.
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -348,9 +350,14 @@ def test_an_unreachable_url_exits_two_rather_than_reporting_on_a_deployment() ->
 # ------------------------------------- the deployments that lie past the parse
 
 
+#: What `/health` says when nothing is being spoiled: the one id [`WELL_FORMED`]
+#: publishes, so the default fixture is a deployment whose two endpoints agree.
+HEALTHY = {"voices": ["v1"]}
+
+
 def lying_deployment(
     voices: list[dict[str, Any]],
-    health_voices: tuple[str, ...] = ("v1",),
+    health_body: Any = HEALTHY,
     health_status: int = 200,
 ) -> FastAPI:
     """A server answering whatever it is told to, however untrue.
@@ -359,13 +366,18 @@ def lying_deployment(
     to be expressible here is a response this service *cannot* produce. A stand-in
     that could only emit well-formed answers would make every test below pass by
     construction ([LAW:verifiable-goals] — the failure needs a shape it can take).
+
+    `/health` is handed its whole body rather than a list of ids, because
+    `HEALTH-1`'s claim is that body's shape: a payload with no `voices` key, or
+    one whose entries are objects, is a state the claim is *about* and one an id
+    list cannot express.
     """
     app = FastAPI()
 
     @app.get("/health")
-    def health(response: Response) -> dict:
+    def health(response: Response) -> Any:
         response.status_code = health_status
-        return {"voices": list(health_voices)}
+        return health_body
 
     @app.get("/v1/voices")
     def listing() -> dict:
@@ -492,7 +504,8 @@ def test_every_promised_field_is_required(missing: str) -> None:
 
 def test_health_offering_a_voice_the_listing_does_not_have_is_broken() -> None:
     """The fleet-shaped failure: a checker sends traffic for an unaddressable id."""
-    with serving(lying_deployment([WELL_FORMED], health_voices=("v1", "ghost"))) as url:
+    body = {"voices": ["v1", "ghost"]}
+    with serving(lying_deployment([WELL_FORMED], health_body=body)) as url:
         verdicts = _verdicts(url)
 
     assert verdicts["HEALTH-2"].word == "broken"
@@ -506,7 +519,8 @@ def test_health_answering_200_with_no_voices_is_broken() -> None:
     served silence. The status line and the body have to agree, and this is the
     direction that puts a dead deployment into rotation.
     """
-    with serving(lying_deployment([WELL_FORMED], health_voices=())) as base_url:
+    empty = {"voices": []}
+    with serving(lying_deployment([WELL_FORMED], health_body=empty)) as base_url:
         verdicts = _verdicts(base_url)
 
     assert verdicts["HEALTH-1"].word == "broken"
@@ -519,6 +533,60 @@ def test_health_answering_503_while_offering_voices_is_broken() -> None:
     """The other direction: a server withdrawn from rotation that can still speak."""
     with serving(lying_deployment([WELL_FORMED], health_status=503)) as base_url:
         assert _words(base_url)["HEALTH-1"] == "broken"
+
+
+@pytest.mark.parametrize("status", [404, 500])
+def test_health_answering_neither_200_nor_503_is_broken(status: int) -> None:
+    """`HEALTH-1` names two statuses, so a third is the claim failing.
+
+    A build that never routed `/health`, and one whose health handler raised, are
+    both deployments a checker cannot read — and either would have read `held`
+    from a prober that only compared the body against the status it happened to
+    get.
+    """
+    with serving(lying_deployment([WELL_FORMED], health_status=status)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["HEALTH-1"].word == "broken"
+    assert str(status) in verdicts["HEALTH-1"].why
+
+
+def test_a_health_body_with_no_voices_array_is_broken_and_never_unasked() -> None:
+    """The shape of `/health`'s body is `HEALTH-1`'s subject, not its precondition.
+
+    `{"status": "ok"}` is this exact promise broken: a checker reading it learns
+    nothing about which voices loaded. Reporting `unasked` would file the claim's
+    own failure under "I could not find out" — the one confusion the third
+    verdict exists to prevent, arriving through the claim it most applies to.
+    `HEALTH-2` really is only blocked by it, and says so.
+    """
+    ok = {"status": "ok"}
+    with serving(lying_deployment([WELL_FORMED], health_body=ok)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["HEALTH-1"].word == "broken"
+    assert "voices" in verdicts["HEALTH-1"].why
+    assert verdicts["HEALTH-2"].word == "unasked"
+
+
+def test_a_health_voice_that_is_not_a_string_does_not_end_the_run() -> None:
+    """An unaddressable id is a malformed body, and it used to end the run.
+
+    `{"voices": [{"id": "v1"}]}` reached `HEALTH-2`'s set lookup and raised
+    `TypeError: unhashable type: 'dict'` out of `probe`, so every claim died —
+    including the ones with nothing to do with `/health`. A prober that cannot
+    report on a deployment that lies in an unanticipated way is a prober whose
+    green runs mean less than they look like.
+    """
+    objects = {"voices": [{"id": "v1"}]}
+    with serving(lying_deployment([WELL_FORMED], health_body=objects)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["HEALTH-1"].word == "broken"
+    assert verdicts["HEALTH-2"].word == "unasked"
+    # The claims that never read `/health` are still asked and still answer.
+    assert verdicts["DISC-1"].word == "held"
+    assert verdicts["AUTH-2"].word == "held"
 
 
 def test_a_listing_that_answers_an_error_breaks_the_claim_about_the_listing() -> None:
@@ -546,29 +614,47 @@ def test_a_listing_that_answers_an_error_breaks_the_claim_about_the_listing() ->
     assert verdicts["HEALTH-2"].word == "unasked"
 
 
-def partly_guarded_deployment(shut: str) -> FastAPI:
-    """[`lying_deployment`], with `shut` alone refusing a keyless caller 401.
+def guarded_deployment(
+    refuses: Callable[[str, str | None], bool],
+    status: int = 401,
+    detail: str = "invalid xi-api-key",
+) -> FastAPI:
+    """[`lying_deployment`] behind whatever guard `refuses` describes.
 
-    The state `AUTH-2` exists to catch, and the one this service cannot be made
-    to produce: a key covering part of its surface, so `GET /v1/voices` reads as
-    open while something behind it does not. A middleware rather than a route,
-    because the paths worth shutting include the two per-voice reads this fixture
-    deliberately does not serve — refusing before the router is what lets a path
-    be guarded without the fixture pretending to implement it.
+    The states this service cannot be made to produce, and which every
+    authentication claim exists to catch: a key covering part of the surface, a
+    guard that admits the wrong key, a refusal a caller cannot tell from a
+    proxy's. The guard is a predicate over the path and the `xi-api-key` sent
+    rather than a flag per state, so a new state is a value a test passes and not
+    another fixture ([LAW:dataflow-not-control-flow]).
+
+    A middleware rather than a route, because the paths worth guarding include
+    the two per-voice reads this fixture deliberately does not serve — refusing
+    before the router is what lets a path be guarded without the fixture
+    pretending to implement it.
+
+    `detail` is written out rather than read from `prober.INVALID_KEY_DETAIL`,
+    for the reason [`WELL_FORMED`] is: a fixture agreeing with the prober by
+    construction cannot catch the prober changing what it demands.
     """
     app = lying_deployment([WELL_FORMED])
 
     @app.middleware("http")
-    async def refuse_one(request: Request, call_next: Any) -> Response:
-        if request.url.path == shut:
+    async def guard(request: Request, call_next: Any) -> Response:
+        if refuses(request.url.path, request.headers.get("xi-api-key")):
             return Response(
-                content=b'{"detail": "invalid xi-api-key"}',
-                status_code=401,
+                content=json.dumps({"detail": detail}).encode(),
+                status_code=status,
                 media_type="application/json",
             )
         return await call_next(request)
 
     return app
+
+
+def shutting(path: str, status: int = 401) -> FastAPI:
+    """[`guarded_deployment`] refusing `path` alone, whatever key is sent."""
+    return guarded_deployment(lambda asked, _: asked == path, status=status)
 
 
 @pytest.mark.parametrize(
@@ -588,11 +674,11 @@ def test_a_read_guarded_while_the_listing_is_open_breaks_auth_2(shut: str) -> No
     were exactly that gap. Shutting each read in turn is what holds the probed
     set equal to the documented one, including the reads added after this test.
     """
-    with serving(partly_guarded_deployment(shut)) as base_url:
+    with serving(shutting(shut)) as base_url:
         verdicts = _verdicts(base_url)
 
     assert verdicts["AUTH-2"].word == "broken", f"{shut} is never asked keyless"
-    assert shut in verdicts["AUTH-2"].why
+    assert f"GET {shut}" in verdicts["AUTH-2"].why
 
 
 @pytest.mark.parametrize("shut", prober._addressed(prober.DOCUMENTED_SYNTHESES, "v1"))
@@ -605,12 +691,90 @@ def test_a_synthesis_guarded_while_every_read_is_open_breaks_auth_2(shut: str) -
     streaming ones is the same failure one endpoint over: the plain synthesis
     answers, and a prober asking nothing else calls that deployment open.
     """
-    with serving(partly_guarded_deployment(shut)) as base_url:
+    with serving(shutting(shut)) as base_url:
         verdicts = _verdicts(base_url)
 
     assert verdicts["AUTH-2"].word == "broken", f"{shut} is never asked keyless"
-    assert "synthesis" in verdicts["AUTH-2"].why
-    assert shut in verdicts["AUTH-2"].why
+    assert f"POST {shut}" in verdicts["AUTH-2"].why
+
+
+@pytest.mark.parametrize("status", [403, 500])
+def test_a_read_answering_any_other_status_keyless_breaks_auth_2(status: int) -> None:
+    """A keyless caller got no answer, whatever status said so.
+
+    `AUTH-2` promises every documented endpoint answers without a key, and only a
+    404 is exempt — a path this build does not route is a different promise. A
+    prober judging 401 alone reads a 403 from a proxy in front of the deployment,
+    or a 500 from the deployment itself, as "all answered without a key", which is
+    false on its face. The status is named so a guard and a fault still read
+    differently in the report.
+    """
+    with serving(shutting("/v1/models", status=status)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["AUTH-2"].word == "broken", f"{status} was read as an answer"
+    assert "GET /v1/models" in verdicts["AUTH-2"].why
+    assert str(status) in verdicts["AUTH-2"].why
+
+
+def test_health_refusing_a_keyless_caller_behind_a_guard_is_broken() -> None:
+    """`HEALTH-3` is the claim that `/health` is outside the guard.
+
+    Nomad's health checker holds no key, so a deployment that put `/health`
+    behind its own guard is one every checker reads as down — which is the
+    failure this claim is for, and a deployment this service cannot produce.
+    """
+    guarded = guarded_deployment(lambda path, _: path in ("/v1/voices", "/health"))
+    with serving(guarded) as base_url:
+        verdicts = _verdicts(base_url, key="probe-key")
+
+    assert verdicts["HEALTH-3"].word == "broken"
+    assert "401" in verdicts["HEALTH-3"].why
+
+
+def test_a_closed_guard_holds_auth_1() -> None:
+    """The control for the two cases below, so one spoiled guard is what differs.
+
+    Without it a fixture broken in some unrelated way would turn both red for the
+    wrong reason and read as proof the prober works.
+    """
+    closed = guarded_deployment(lambda _, sent: sent != "probe-key")
+    with serving(closed) as base_url:
+        verdicts = _verdicts(base_url, key="probe-key")
+
+    assert verdicts["AUTH-1"].word == "held"
+
+
+def test_a_guard_that_admits_a_wrong_key_is_broken() -> None:
+    """A guard checking that a key was sent, not which one, is not closed.
+
+    It refuses the keyless caller, so it reads as guarded and every other
+    authentication claim behaves — and it lets any string past. `AUTH-1` asks a
+    wrong key precisely because that deployment is indistinguishable from a
+    correct one until something sends one.
+    """
+    sloppy = guarded_deployment(lambda _, sent: sent is None)
+    with serving(sloppy) as base_url:
+        verdicts = _verdicts(base_url, key="probe-key")
+
+    assert verdicts["AUTH-1"].word == "broken"
+    assert "the guard is not closed" in verdicts["AUTH-1"].why
+
+
+def test_a_refusal_carrying_another_detail_is_broken() -> None:
+    """The 401 is not the whole claim: a caller has to be able to read it.
+
+    `AUTH-1` promises a specific body, because a 401 from a proxy between the
+    caller and the deployment looks identical otherwise — and a client that
+    cannot tell them apart retries the wrong one.
+    """
+    mumbling = guarded_deployment(lambda _, sent: sent != "probe-key", detail="nope")
+    with serving(mumbling) as base_url:
+        verdicts = _verdicts(base_url, key="probe-key")
+
+    assert verdicts["AUTH-1"].word == "broken"
+    assert "nope" in verdicts["AUTH-1"].why
+    assert prober.INVALID_KEY_DETAIL in verdicts["AUTH-1"].why
 
 
 #: A row of README's endpoint table: the method and the path, in backticks.

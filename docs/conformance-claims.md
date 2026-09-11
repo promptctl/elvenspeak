@@ -101,7 +101,9 @@ prober discovers whether a deployment is guarded by asking `GET /v1/voices` with
 no key: a 401 means a key is configured. `HEALTH-3` — `/health` answers
 without a key even where everything else needs one — is then fully decided
 against any guarded deployment whether or not the prober holds a key, so it is
-asked there; holding one is sufficient for `HEALTH-3` and not necessary.
+asked there. What decides it is the guard and not the key: against an unguarded
+deployment there is no guard for `/health` to answer from outside of, and no
+key makes it askable.
 `AUTH-1` is not decidable that way. Showing a guard is *closed* rather than
 merely broken takes a missing key refused, a wrong key refused, and the real key
 admitted, and without a key that last control cannot be established — a 401
@@ -150,9 +152,9 @@ verdict against every row. Where a claim is already asked of a built image by
 
 | Id | Claim | Source | Evidence | Probed by |
 |---|---|---|---|---|
-| `HEALTH-1` | `GET /health` answers 200 with a non-empty `voices` array, or 503 with an empty one — status and body agree | README:51, api.py:793 | self-consistent | e16.3 |
+| `HEALTH-1` | `GET /health` answers 200 with a `voices` array of one or more non-empty strings, or 503 with an empty one — status and body agree | README:51, api.py:793 | self-consistent | e16.3 |
 | `HEALTH-2` | Every id in `/health`'s `voices` appears in `GET /v1/voices` and can be spoken | api.py:819 | falsifiable | e16.3 |
-| `HEALTH-3` | `/health` answers without a key even when one is configured | README:51, api.py:793 | falsifiable (only when the prober holds a key) | e16.3 |
+| `HEALTH-3` | `/health` answers without a key even when one is configured | README:51, api.py:793 | falsifiable (only against a guarded deployment) | e16.3 |
 | `AUTH-1` | With a key configured, a guarded endpoint answers 401 `{"detail":"invalid xi-api-key"}` to a missing or wrong `xi-api-key` | api.py:630 | falsifiable (only when the prober holds a key) | e16.3 |
 | `AUTH-2` | With no key configured, every endpoint answers without one | README:240 | falsifiable | e16.3 |
 

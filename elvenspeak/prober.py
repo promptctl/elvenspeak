@@ -479,20 +479,38 @@ def _counted(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
-def _health_voices(deployment: Deployment) -> list[Any]:
-    """The ids `/health` published, or [`Blocked`] if it published none usably."""
-    body = deployment.health.json("GET /health")
+def _parsed_health_voices(body: Any) -> tuple[str, ...] | str:
+    """`body`'s voice ids, or the complaint saying why it published none usably.
+
+    Returned rather than raised for the reason [`_parsed_voices`] returns its own:
+    to `HEALTH-1`, whose claim *is* the shape of this body, a malformed one is the
+    promise broken, while to `HEALTH-2` it is a precondition that failed. An entry
+    that is not a usable string is judged here too — `HEALTH-2` looks its ids up
+    in a set, so an unstamped one reaches that set and raises `TypeError`
+    ([LAW:parse-dont-validate] — the stamp is what keeps the question from
+    arriving inland).
+    """
     try:
-        voices = body["voices"]
-    except (KeyError, TypeError) as malformed:
-        raise Blocked(
-            f"GET /health answered without a `voices` array: {body!r:.200}"
-        ) from malformed
-    if not isinstance(voices, list):
-        raise Blocked(
-            f"GET /health published a `voices` that is not an array: {voices!r:.200}"
-        )
-    return voices
+        entries = body["voices"]
+    except (KeyError, TypeError):
+        return f"answered without a `voices` array: {body!r:.200}"
+    if not isinstance(entries, list):
+        return f"published a `voices` that is not an array: {entries!r:.200}"
+    for entry in entries:
+        if not isinstance(entry, str) or not entry:
+            return (
+                f"published a voice with no usable id: {entry!r:.200} — nothing "
+                "can address it"
+            )
+    return tuple(entries)
+
+
+def _health_voices(deployment: Deployment) -> tuple[str, ...]:
+    """The ids `/health` published, or [`Blocked`] if it published none usably."""
+    parsed = _parsed_health_voices(deployment.health.json("GET /health"))
+    if isinstance(parsed, str):
+        raise Blocked(f"GET /health {parsed}")
+    return parsed
 
 
 def probe_health_1(deployment: Deployment) -> Verdict:
@@ -501,9 +519,24 @@ def probe_health_1(deployment: Deployment) -> Verdict:
     Self-consistent, and the document says why that matters: a router misreporting
     the fleet behind it passes this and four claims like it, so the report has to
     show the split rather than fold them into one count.
+
+    The status and the body are judged here rather than taken from
+    [`_health_voices`], because they are this claim's subject: a body with no
+    usable `voices` array is this promise broken, where to every other claim the
+    same answer is only a precondition that failed. The status is read first for
+    the reason `DISC-1` reads the listing's first — a 500 answering prose has no
+    body to judge, and naming the status is the finding either way.
     """
-    voices = _health_voices(deployment)
     status = deployment.health.status
+    if status not in (200, 503):
+        return Broken(
+            f"GET /health answered {status}, which is neither the 200 of a server "
+            "fit for traffic nor the 503 of one that is not"
+        )
+    parsed = _parsed_health_voices(deployment.health.json("GET /health"))
+    if isinstance(parsed, str):
+        return Broken(f"GET /health {parsed}")
+    voices = parsed
     if status == 200 and not voices:
         return Broken(
             "GET /health answered 200 with an empty `voices` array — a server "
@@ -513,11 +546,6 @@ def probe_health_1(deployment: Deployment) -> Verdict:
         return Broken(
             f"GET /health answered 503 while offering {_counted(len(voices), 'voice')}"
             " — the status line and the body disagree"
-        )
-    if status not in (200, 503):
-        return Broken(
-            f"GET /health answered {status}, which is neither the 200 of a server "
-            "fit for traffic nor the 503 of one that is not"
         )
     return Held(
         f"{status} with {_counted(len(voices), 'voice')} — status line and body agree"
@@ -551,7 +579,7 @@ def probe_health_2(deployment: Deployment) -> Verdict:
             "can address"
         )
     for name in published:
-        reply = _spoken(deployment.target, str(name), key)
+        reply = _spoken(deployment.target, name, key)
         if reply.status != 200:
             return Broken(
                 f"{name!r} is offered by /health and answered {reply.status} when "
@@ -664,6 +692,29 @@ def _addressed(templates: tuple[str, ...], voice_id: str) -> tuple[str, ...]:
     return tuple(path.format(voice_id=quoted) for path in templates)
 
 
+#: One documented endpoint asked without a key: the method, the addressed path,
+#: and the body to post, `None` for a read.
+_KeylessAsk = tuple[str, str, Mapping[str, Any] | None]
+
+
+def _keyless_asks(voice_id: str) -> tuple[_KeylessAsk, ...]:
+    """Every documented endpoint `AUTH-2` asks, addressed at `voice_id`.
+
+    One sequence rather than a read loop beside a synthesis loop, so what a
+    keyless answer may be is decided in one place ([LAW:single-enforcer]) and a
+    read and a synthesis differ in the values carried here and in nothing else
+    ([LAW:dataflow-not-control-flow]).
+    """
+    reads: tuple[_KeylessAsk, ...] = tuple(
+        ("GET", path, None) for path in _addressed(DOCUMENTED_READS, voice_id)
+    )
+    syntheses: tuple[_KeylessAsk, ...] = tuple(
+        ("POST", f"{path}?output_format={PCM_FORMAT}", {"text": PROBE_TEXT})
+        for path in _addressed(DOCUMENTED_SYNTHESES, voice_id)
+    )
+    return reads + syntheses
+
+
 def probe_auth_2(deployment: Deployment) -> Verdict:
     """With nothing configured, every documented endpoint answers without a key.
 
@@ -673,8 +724,13 @@ def probe_auth_2(deployment: Deployment) -> Verdict:
     completely. One voice, and an utterance per documented synthesis, which is
     what that costs.
 
-    Only a 401 is judged: the claim is about keylessness, so a documented path
-    this build does not route answers 404 and belongs to some other claim.
+    A 404 is the one status not judged: the claim is about keylessness, so a
+    documented path this build does not route answers 404 and belongs to some
+    other claim. Every other non-2xx is this claim failing, named by its status.
+    Judging only a 401 would be assuming a foreign deployment shares this
+    checkout's choice of status for a refusal — a proxy in front of it refusing
+    403, or the deployment answering 500, is an endpoint a keyless caller did not
+    get an answer from either way.
     """
     if deployment.guarded:
         return Unasked(
@@ -688,34 +744,19 @@ def probe_auth_2(deployment: Deployment) -> Verdict:
             "syntheses this claim asks have nothing to address"
         )
     voice_id = voices[0].id
-    reads = _addressed(DOCUMENTED_READS, voice_id)
-    for path in reads:
-        reply = _ask(deployment.target, path, key=None)
-        if reply.status == 401:
+    asks = _keyless_asks(voice_id)
+    for method, path, body in asks:
+        reply = _ask(deployment.target, path, key=None, method=method, body=body)
+        if not (200 <= reply.status < 300 or reply.status == 404):
             return Broken(
-                f"GET {path} refused a keyless request 401 while GET /v1/voices "
-                "allows one — this deployment is guarded in part, which is "
-                "neither of the two states it documents"
-            )
-    syntheses = _addressed(DOCUMENTED_SYNTHESES, voice_id)
-    for path in syntheses:
-        spoken = _ask(
-            deployment.target,
-            f"{path}?output_format={PCM_FORMAT}",
-            key=None,
-            method="POST",
-            body={"text": PROBE_TEXT},
-        )
-        if spoken.status == 401:
-            return Broken(
-                f"synthesis at POST {path} refused a keyless request 401 while "
-                f"every read allows one — {voice_id!r} cannot be spoken by a "
-                "caller this deployment told it needs no key"
+                f"{method} {path} answered {reply.status} to a keyless request "
+                "while GET /v1/voices allows one — a deployment configuring no "
+                "key answers every documented endpoint without one, and this one "
+                "does not"
             )
     return Held(
-        f"{_counted(len(reads), 'documented read')} and "
-        f"{_counted(len(syntheses), 'documented synthesis route')} in "
-        f"{voice_id!r} all answered without a key"
+        f"{_counted(len(asks), 'documented endpoint')} in {voice_id!r} all "
+        "answered without a key"
     )
 
 
