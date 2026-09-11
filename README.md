@@ -203,31 +203,15 @@ Needs **ffmpeg** on `PATH` — it is an executable, so `pyproject.toml` cannot
 declare it. `brew install ffmpeg` or `apt install ffmpeg`; the Dockerfile
 installs it and fails the build if the codecs are missing.
 
-The kokoro engine phonemizes through **espeak-ng**, which is a native library
-and an executable and so cannot be declared either: `brew install espeak-ng` or
-`apt install espeak-ng`, and the Dockerfile installs it and fails the build if
-it is missing. It has to be the system one — the `espeakng-loader` wheel that
-`kokoro-onnx` would otherwise use ships a library that on macOS ignores the data
-path it is handed and aborts the process, so the Dockerfile points
-`PHONEMIZER_ESPEAK_LIBRARY` at the apt-installed one. A piper-only deployment
-needs none of this.
-
-Installing espeak-ng is not enough on its own, because the bundled library is
-the one tried first and it aborts before phonemizer's system-wide fallback can
-run. Outside Docker, running the kokoro engine means naming the working library
-too:
-
-```
-PHONEMIZER_ESPEAK_LIBRARY=/opt/homebrew/lib/libespeak-ng.dylib          # macOS, arm64
-PHONEMIZER_ESPEAK_LIBRARY=/usr/local/lib/libespeak-ng.dylib             # macOS, x86_64
-PHONEMIZER_ESPEAK_LIBRARY=/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1   # Linux, x86_64
-PHONEMIZER_ESPEAK_LIBRARY=/usr/lib/aarch64-linux-gnu/libespeak-ng.so.1  # Linux, arm64
-```
-
-The engine does not go looking for one itself. A broken wheel on one platform is
-a fact about a development machine, and an engine that quietly hunted for a
-library that works would be a silent fallback inside the component whose job is
-to fail loudly.
+The kokoro engine phonemizes through **espeak-ng**, a native library and an
+executable, so `pyproject.toml` cannot declare that one either: `brew install
+espeak-ng` or `apt install espeak-ng`. It has to be the system copy — rather
+than failing to load, the `espeakng-loader` wheel that `kokoro-onnx` would
+otherwise use aborts the process mid-synthesis. So kokoro takes the library's
+path from `PHONEMIZER_ESPEAK_LIBRARY` and refuses to boot without it, listing
+the usual places a system copy lives. The Dockerfile installs espeak-ng,
+resolves that path and sets the variable, and fails the build if the library is
+missing. A piper-only deployment needs none of this.
 
 ```
 uv run --extra piper main.py            # or --extra kokoro, to run that one.
