@@ -31,7 +31,9 @@ the answer that goes stale in the direction that hides the bug.
 
 from __future__ import annotations
 
+import ast
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
@@ -287,22 +289,27 @@ def test_the_smoke_confines_every_image_to_the_width_conformance_exercises():
     )
 
 
-#: The CPU row of `elvenspeak.chatterbox`'s measurement table, which owns both
-#: figures every other file quotes: the RTF range, then resident and peak.
+#: One row of `elvenspeak.chatterbox`'s measurement table: the device a
+#: deployment names, the hardware it was measured on, its RTF range, and what it
+#: resides in. Every cost figure any file in this repository quotes is one of
+#: these, so the rows are both the answer to "what may I name" and to "what does
+#: it cost" — see that module's header for why the device is the first column.
 _MEASURED = re.compile(
-    r"^\s*CPU \([^)]*\)\s+([\d.]+) - ([\d.]+)\s+([\d.]+) GiB, ([\d.]+) GiB peak\s*$",
+    r"^ {4}(\w+) {2,}(.+?) {2,}([\d.]+) - ([\d.]+) {2,}(.+?) *$",
     re.MULTILINE,
 )
 
 #: Every restatement of the peak, wherever it is quoted.
 _PEAK = re.compile(r"([\d.]+) GiB peak")
 
-#: Every restatement of the RTF range, in the two shapes this repository writes it.
-_RTF = re.compile(r"(\d+)\s*(?:-|to)\s*(\d+)\s*(?:x real time|times real time)")
+#: Every restatement of an RTF range, in the two shapes this repository writes
+#: it. Decimals are admitted because the accelerator rows are quoted in tenths
+#: and a pattern that only saw whole numbers would read straight past them.
+_RTF = re.compile(r"([\d.]+)\s*(?:-|to)\s*([\d.]+)\s*(?:x real time|times real time)")
 
 #: A line break inside a comment or docstring, with whatever marker and
 #: indentation continue it. Collapsed before matching, because a quotation is
-#: prose and prose wraps: the `Dockerfile`'s figure sat across "8-33x real" /
+#: prose and prose wraps: the `Dockerfile`'s cpu figure sat across "8-33x real" /
 #: "# time" and no pattern anchored to contiguous text could ever have seen it —
 #: which is how it survived a review round that was looking straight at it.
 _WRAP = re.compile(r"\n[ \t]*(?:#:?|//|--)?[ \t]*")
@@ -344,37 +351,107 @@ def quoting() -> list[Path]:
     )
 
 
+def assigned(name: str, source: str):
+    """The value of a module-level assignment, parsed out of `source`.
+
+    Parsed rather than imported, for the reason the test below gives about
+    `__doc__`: `import chatterbox` can answer off a `.pyc` Python believes
+    current, and a check that read the constant from the module and the table
+    from the file would be comparing two things that merely happened to agree.
+    One read of one text answers both.
+    """
+    for node in ast.parse(source).body:
+        for target in getattr(node, "targets", ()):
+            if getattr(target, "id", None) == name:
+                return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} is not assigned at module level in {ENGINE_SOURCE.name}")
+
+
+def rounds_to(measured: str, quoted: str) -> bool:
+    """Whether `quoted` is `measured` rounded to the precision `quoted` wrote.
+
+    Prose rounds — "8-33x real time" for a row measuring 7.62 - 33.3 — and how
+    coarsely is the writer's business, because a sentence explaining why cpu is
+    not a fallback is not improved by two more decimals. What is not the writer's
+    business is rounding to a number the row does not hold, which is the whole
+    distance between a quotation and an invention.
+    """
+    places = len(quoted.partition(".")[2])
+    return f"{float(measured):.{places}f}" == quoted
+
+
+def about(text: str, before: int, devices: "Iterable[str]") -> str:
+    """Which device the figure at `before` is quoting: the last one named ahead of it.
+
+    A range on its own cannot be checked against the right row: mps measures
+    "2.3 - 4.3x real time", and the same figure written about any other device is
+    badly wrong, yet the two are the same characters. Only the prose around a
+    figure says which row it meant. So the rule this enforces is that a figure is
+    written next to the device it belongs to, and a figure with no device named
+    ahead of it is refused rather than checked against a guess — this docstring
+    included, which is how the rule was first proved to bite.
+    """
+    at, device = max((text.rfind(name, 0, before), name) for name in devices)
+    return device if at >= 0 else ""
+
+
 def test_every_quotation_of_chatterbox_cost_matches_what_it_measured():
     """[LAW:single-enforcer] One measurement, however many places quote it.
 
-    Two figures travel: the CPU peak an operator checks free RAM against before
-    `git push gitea master`, and the RTF range that justifies this engine having
-    no default device. Both are quoted at people who act on them, in files that
-    cannot compute — a YAML comment, a `ConfigError` message, half a dozen
-    docstrings — so every quotation is a hand-copy that can drift.
+    Two kinds of figure travel: the cpu peak an operator checks free RAM against
+    before `git push gitea master`, and the per-device RTF ranges that justify
+    this engine having no default device. Both are quoted at people who act on
+    them, in files that cannot compute — a YAML comment, a `ConfigError` message,
+    half a dozen docstrings — so every quotation is a hand-copy that can drift.
 
     They already had, three ways. The peak was written 6.8, 6.83 and 6.68 in
-    three files; the RTF low bound was 10 in `chatterbox.py` and 8 in every file
-    quoting it, where 10 is neither measurement's low end but a splice of the
-    12-thread low with the 4-thread high. Nobody would catch that reading any one
-    file, and the dangerous direction is silent: a comment understating the peak
-    reads exactly like a safe one.
+    three files; the cpu RTF low bound was 10 in `chatterbox.py` and 8 in every
+    file quoting it, where 10 is neither measurement's low end but a splice of
+    the 12-thread low with the 4-thread high. Nobody would catch that reading any
+    one file, and the dangerous direction is silent: a comment understating the
+    peak reads exactly like a safe one.
 
-    So the table in `elvenspeak/chatterbox.py` owns both figures and this holds
+    So the table in `elvenspeak/chatterbox.py` owns every figure and this holds
     every other copy equal to it, anywhere in the repository — see [`quoting`]
     for why it scans everything tracked rather than a list of likely files.
+
+    THE SET AND THE TABLE ARE THE SAME SET, which is the assertion that makes
+    `DEVICES`' comment calling itself measured true rather than merely written.
+    Before it, the accelerator rows were measured and nothing checked that the
+    devices `configure` accepts are the devices anyone measured: `DEVICES` could
+    gain an entry, or the table lose a row, and the suite stayed green while an
+    operator was offered a device this engine has no figure for.
 
     Read as source text, never through `chatterbox.__doc__`: an edit preserving
     a row's byte length and landing in the same second as the last import left
     `__doc__` serving the previous numbers off a `.pyc` Python thought current.
     That cost a false green while this test was being written.
     """
-    measured = _MEASURED.search(ENGINE_SOURCE.read_text(encoding="utf-8"))
-    assert measured, "no CPU row found in chatterbox's measurement table"
+    source = ENGINE_SOURCE.read_text(encoding="utf-8")
+    rows = {
+        device: (low, high, resident)
+        for device, _hardware, low, high, resident in _MEASURED.findall(source)
+    }
+    assert rows, "no rows found in chatterbox's measurement table"
 
-    rtf_low, rtf_high, _resident, peak = measured.groups()
-    # The table carries the raw measurement; prose rounds it to whole numbers.
-    expected_rtf = (str(round(float(rtf_low))), str(round(float(rtf_high))))
+    devices = assigned("DEVICES", source)
+    assert tuple(rows) == tuple(devices), (
+        f"the table measures {tuple(rows)}; DEVICES accepts {tuple(devices)}"
+    )
+    for device, (low, high, _resident) in rows.items():
+        assert devices[device] == f"{low} - {high}", (
+            f"DEVICES[{device!r}] quotes {devices[device]!r}; "
+            f"the table measured {low} - {high}"
+        )
+
+    # The peak belongs to whichever row states one — cpu's, because that is the
+    # row measured under a ceiling — and is named by that property rather than by
+    # device, so the day a second row is measured the same way this asks for a
+    # decision instead of silently keeping the first.
+    stated = [_PEAK.search(resident) for _low, _high, resident in rows.values()]
+    owning = [found.group(1) for found in stated if found]
+    assert len(owning) == 1, f"{len(owning)} rows state a peak; exactly one owns it"
+    peak = owning[0]
 
     for path in quoting():
         try:
@@ -385,8 +462,15 @@ def test_every_quotation_of_chatterbox_cost_matches_what_it_measured():
         text = flowed(text)
         for quoted in _PEAK.findall(text):
             assert quoted == peak, f"{where} quotes a {quoted} GiB peak; measured {peak}"
-        for quoted in _RTF.findall(text):
-            assert quoted == expected_rtf, (
-                f"{where} quotes {quoted[0]}-{quoted[1]}x real time; "
-                f"measured {rtf_low}-{rtf_high}"
+        for quoted in _RTF.finditer(text):
+            device = about(text, quoted.start(), rows)
+            assert device, (
+                f"{where} quotes {quoted.group(0)!r} with no device named ahead of "
+                f"it, so there is no row to check it against; name the device the "
+                f"figure belongs to"
+            )
+            low, high, _resident = rows[device]
+            assert rounds_to(low, quoted.group(1)) and rounds_to(high, quoted.group(2)), (
+                f"{where} quotes {quoted.group(1)}-{quoted.group(2)} for {device}; "
+                f"the table measured {low} - {high}"
             )

@@ -33,17 +33,29 @@ from .provisioning import Registry
 #:
 #: The first entry is the default, so an unset `ELVENSPEAK_ENGINE` always names a
 #: real engine — a separate default setting could name one that is not here.
-#: Piper is first because it is roughly twenty-five times faster: measured on
-#: this class of machine, Piper runs at RTF ~0.03 against Kokoro's ~0.77. Kokoro
-#: sounds considerably better, which is a deployment's choice to make and not one
-#: to inherit by being listed.
+#:
+#: [LAW:one-source-of-truth] The order below rests on what these engines cost,
+#: and every figure it rests on is stated where that engine is implemented, never
+#: restated here. A cost quoted away from the thing it was measured on is a copy
+#: free to drift from it, and this file would be the copy nobody thought to check.
+#: The two pointers below are also not worth the same, which is the honest part:
+#: chatterbox's figures name the hardware and the library versions they were taken
+#: on, and Piper's and Kokoro's name neither.
+#:
+#: Piper is first because it is roughly twenty-five times faster than Kokoro —
+#: [`elvenspeak.kokoro`]'s header states the pair of figures that ratio is read
+#: off. Kokoro sounds considerably better, which is a deployment's choice to make
+#: and not one to inherit by being listed.
 #:
 #: `chatterbox` is third because it is the slow one and the one with a
 #: hardware requirement: it clones a single speaker and then speaks any of 23
 #: languages in that voice, which is what neither of the two above can do — their
-#: per-language voices are different people — and it costs an accelerator and an
-#: RTF of ~0.8 on CUDA or ~3 on Apple's GPU to say so. It also names no default
-#: device, so a deployment that has not said what hardware it has does not boot.
+#: per-language voices are different people — and it costs an accelerator to say
+#: so, and still runs near or above real time on one. What each device it accepts
+#: was measured at is the table in [`elvenspeak.chatterbox`]'s header, which
+#: `tests/test_workflow.py` holds every quotation of equal to it. It also names no
+#: default device, so a deployment that has not said what hardware it has does not
+#: boot.
 #: Listed after the two that run anywhere, for the same reason Kokoro is listed
 #: after Piper: what a deployment inherits by leaving `ELVENSPEAK_ENGINE` unset
 #: should be the cheapest thing that works, not the best thing that might not.
