@@ -23,6 +23,13 @@ WHAT IT ASKS THE IMAGE. Three questions, and they are not the same question:
   3. Does it speak? [`speaks`] asks every property the engine seam promises,
      over HTTP, of the running container.
 
+Then, beside its logs and on every path, it says what the container cost out of
+its own cgroup: the kernel's high-water mark and the limit it was held to. That
+is a report and not a fourth question, because the kernel is the one enforcer of
+a limit — an image that outgrew its ceiling was killed, and has no cgroup left to
+report from. The unconfined figure is what a ceiling is chosen from; the confined
+one is the headroom that ceiling left.
+
 The first two are read from the image rather than from this repository. `PORT` is read from
 the image's environment and the healthcheck out of its config, so this file
 holds no second copy of either ([LAW:one-source-of-truth]). Reading them from
@@ -133,6 +140,21 @@ CONFORM_TIMEOUT = 30.0
 #: would present as the empty fleet `--fleet` exists to prevent, and present it as
 #: a timeout rather than as a name that does not match.
 CONSUL_URL_VAR = "ROUTER_CONSUL_URL"
+
+#: What a container cost, as its own cgroup counts it, read from inside it. Every
+#: runtime here gives a container a private cgroup namespace on a cgroup v2 host,
+#: so `/sys/fs/cgroup` inside it is that container's cgroup and nobody else's —
+#: and a runtime that did not would put the host's root cgroup there, which has no
+#: `memory.peak`, so the read fails loudly rather than reporting the host's figure.
+#:
+#: `memory.peak` rather than sampling `stats`: it is the kernel's own high-water
+#: mark over the container's whole life, boot included, and a sampled figure misses
+#: exactly the burst that kills — elvenspeak-piper was OOM-killed at 2048 MiB by an
+#: eight-way burst that sampling every 0.5s never saw above 1773. `memory.stat`
+#: comes with it because the peak counts page cache, which a limit reclaims before
+#: it kills anything: `file` says how much of a peak was model files the kernel was
+#: only caching.
+MEMORY_FILES = ("memory.peak", "memory.max", "memory.stat")
 
 
 class SmokeFailure(Exception):
@@ -519,6 +541,52 @@ def _print_logs(runtime: Runtime, name: str) -> None:
     print(f"--- end {name} logs ---", flush=True)
 
 
+def _mib(counted: str) -> str:
+    """A byte count as the kernel wrote it, in whole mebibytes."""
+    return f"{int(counted) // 1048576} MiB"
+
+
+def _footprint(stdout: str) -> str:
+    """[`MEMORY_FILES`] as `cat` printed them, as one sentence about what they say.
+
+    Positional, because `cat` concatenates: the peak's one line, the limit's one
+    line, then `memory.stat`'s `name value` lines. The limit is quoted as the kernel
+    wrote it when it is `max`, which is how an unconfined container reads — a
+    number there would be a guess at what "no limit" means.
+    """
+    peak, limit, *stat = stdout.splitlines()
+    counters = dict(line.split(" ", 1) for line in stat)
+    return (
+        f"peaked at {_mib(peak)} against a limit of "
+        f"{limit if limit == 'max' else _mib(limit)}, holding {_mib(counters['anon'])} "
+        f"anonymous and {_mib(counters['file'])} page cache at the end"
+    )
+
+
+def _print_footprint(runtime: Runtime, name: str) -> None:
+    """Print what a container cost, on every path, for the reason its logs are.
+
+    The figure is most wanted from exactly the run that went red: gitea run 6276
+    lost chatterbox's peak because this was read only after conformance passed, and
+    conformance did not. So it is cleanup-shaped, like `_print_logs` — a read that
+    cannot raise, whose failure is printed with the runtime's own exit and reason.
+    A container the kernel killed has no cgroup left to ask, and says so here.
+    `_footprint` unpacks and indexes, and this is the one place a miss is turned
+    into that sentence ([LAW:single-enforcer]).
+    """
+    done = _attempt(
+        [runtime.binary, "exec", name, "cat", *(f"/sys/fs/cgroup/{f}" for f in MEMORY_FILES)]
+    )
+    try:
+        said = _footprint(done.stdout)
+    except (LookupError, ValueError) as unread:
+        said = (
+            f"left no memory figure this can read ({unread!r}; `{runtime.binary} exec` "
+            f"exited {done.returncode}: {done.stderr.strip() or done.stdout.strip()})"
+        )
+    print(f"smoke: {name} {said}", flush=True)
+
+
 @contextmanager
 def _container(runtime: Runtime, name: str, argv: Sequence[str]) -> Iterator[None]:
     """Own one container's whole lifetime: start it, then always log it and remove it.
@@ -547,6 +615,7 @@ def _container(runtime: Runtime, name: str, argv: Sequence[str]) -> Iterator[Non
         yield
     finally:
         _print_logs(runtime, name)
+        _print_footprint(runtime, name)
         removed = _attempt(sweep)
         if removed.returncode != 0:
             print(

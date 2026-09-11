@@ -154,8 +154,8 @@ def test_the_refusal_does_not_reach_the_bake_step(monkeypatch, fleet):
     nothing, so a synthesis ceiling is not its concern. If this refusal sat on
     `Settings.from_env`, a memory-limited builder would fail every image build --
     and while CI now runs each image before pushing it (piper-build-b4h.2), it
-    runs it unconfined, so a refusal that fires only under a ceiling is still
-    invisible there. The first evidence would be a publish that spent a dated tag
+    runs it under a memory limit with a ceiling chosen (piper-build-b4h.scw), so a
+    refusal that fires only when none was chosen is still invisible there. The first evidence would be a publish that spent a dated tag
     on an image that cannot boot.
 
     The confinement is patched over conftest's `_unconfined` fixture BEFORE the

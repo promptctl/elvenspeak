@@ -436,7 +436,12 @@ different commits, so reading the source would prove a property of the source
 while claiming to have proved the artifact. It exits 0 only when both questions
 passed, and 1 otherwise. The container's logs are printed on every path, success
 included — on a passing run they are the only account anyone has of what the
-artifact said at boot — and the container is removed either way.
+artifact said at boot — and the container is removed either way. Before it is,
+every run, red ones included, prints what the container cost, out of its own cgroup: the kernel's
+high-water mark over its whole life (`memory.peak`), the limit it was held to
+(`memory.max`, which reads `max` when there is none), and how much of it was
+anonymous memory against page cache at the end. That line, not a workstation's
+RSS, is where an engine's memory ceiling is read from.
 
 Standard-library Python 3 only, so `python3 smoke.py <image>` is the whole
 invocation: it imports nothing from `elvenspeak`, and there is no virtualenv to
@@ -461,15 +466,17 @@ image it just built, and only then pushes — so a red smoke ends the leg with t
 registry untouched and `:latest` unmoved. The step order is the guarantee, and
 `tests/test_workflow.py` fails if a later edit ever puts the push first.
 
-The CI run is unconfined: it passes no `--memory`, and therefore no
-`ELVENSPEAK_CONCURRENT_SYNTHESES` either. It does pass what an engine needs
-before it can answer at all *where CI can supply it*: `CHATTERBOX_DEVICE=cpu` for
-chatterbox, which has no default because cpu runs that model at 8-33x real time.
-Nothing is synthesized at this gate, so cpu costs nothing here. Running it
-confined would prove the shape the fleet actually deploys, but the ceiling has to
-be a measured per-engine number rather than a guess — a guessed ceiling turns a
-build red for a reason that has nothing to do with the commit — and those numbers
-do not exist yet.
+The CI run is confined, because every deployment in the fleet is. Each engine
+runs under its own `--memory`, read off the footprint line of a real CI run
+rather than off a workstation, with `ELVENSPEAK_CONCURRENT_SYNTHESES` set to
+exactly the number of callers `speaks.py` puts inside the image at once, so the
+width a ceiling is proven at is the width that was exercised. Those figures live
+in one table in `.gitea/actions/smoke-image`, which both CI jobs that smoke an
+image call, and an engine with no row there is refused rather than run bare.
+The same table passes what an engine needs before it can answer at all:
+`CHATTERBOX_DEVICE=cpu` for chatterbox, which has no default because cpu runs
+that model at 8-33x real time. The runner has no GPU, so cpu is the only device
+it can offer.
 
 The router's entry in that table is `--fleet`: what it needs before it can answer
 is a fleet to discover. That runs the repo-root `fleetstub.py` in a second

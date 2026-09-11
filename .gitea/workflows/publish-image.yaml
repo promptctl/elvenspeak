@@ -443,7 +443,10 @@ jobs:
           # and calling them MB understates by 4.9% -- hundreds of MB at this scale.
           # It also has to read against `tests/rsscurve.py`, which reports MiB, since
           # comparing the two is the entire point of collecting this.
-          awk '/^MemTotal:|^MemAvailable:/{printf "%-14s %6d MiB\n", $1, int($2/1024)}' /proc/meminfo
+          # SwapTotal because a container given `--memory` alone may swap up to that
+          # much again before it is killed, so whether this host has swap decides
+          # whether a smoke's ceiling is the limit it names.
+          awk '/^MemTotal:|^MemAvailable:|^SwapTotal:/{printf "%-14s %6d MiB\n", $1, int($2/1024)}' /proc/meminfo
           # The container's own limit, which is below the host's when there is one.
           # Both cgroup layouts, and "none" is a real answer rather than a failure --
           # said out loud, because this step exists to explain a 137 and a line that
@@ -1103,7 +1106,7 @@ jobs:
       # indistinguishable from a pass. [LAW:dataflow-not-control-flow]
       #
       # How the image is run — what each engine needs before it can answer, which runtime,
-      # why unconfined — belongs to `smoke-image`, which `prove` calls as well.
+      # under what memory ceiling — belongs to `smoke-image`, which `prove` calls as well.
       # [LAW:one-source-of-truth]
       #
       # The reference is the dated one this leg just built under, handed over by the tag

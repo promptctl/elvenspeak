@@ -35,6 +35,7 @@ import re
 from pathlib import Path
 
 import pytest
+import speaks
 from workflows import job, needs, without_prose
 
 from elvenspeak.engines import ENGINES
@@ -241,29 +242,49 @@ def test_nothing_publishes_past_a_proof_that_failed():
     assert "prove" in needs(WORKFLOW, "publish")
 
 
-#: The smoke's boot table — the engines that need something in their
-#: environment before the image can answer at all.
-_BOOT_TABLE = re.compile(r"^\s*([a-z][a-z0-9_]*)\)\s*boot=\(", re.MULTILINE)
+#: One row of the smoke's boot table: an engine, the memory ceiling measured for
+#: it, then whatever else it needs before the image can answer at all.
+_BOOT_TABLE = re.compile(r"^\s*([a-z][a-z0-9_]*)\)\s*memory=\d+m;\s*boot=\(", re.MULTILINE)
+
+#: The synthesis width every smoked image is confined to.
+_WIDTH = re.compile(r"ELVENSPEAK_CONCURRENT_SYNTHESES=(\d+)")
 
 
-def test_the_smoke_boot_table_names_only_real_engines():
-    """A setting keyed to an engine that no longer exists is a silent no-op.
+def test_the_smoke_boot_table_names_every_engine_and_nothing_else():
+    """A row keyed to a name that is not an engine is a silent no-op; a missing one is red.
 
     Two of four legs went red on the first real run of the smoke step because the
     image was handed an empty environment and a setting with no default was
     missing -- a red that says nothing about the commit. The table that fixed it
     is keyed by engine name, and a name that stops matching stops applying,
-    quietly: the leg goes back to booting bare and fails for the original reason,
-    with the table sitting right there looking like it covers the case.
+    quietly: the leg falls to the refusing arm, with the table sitting right there
+    looking like it covers the case.
 
-    Only this direction is checkable. That a *new* engine needs no boot
-    environment cannot be read off any file -- it is a fact about that engine's
-    settings, and the run that discovers it is the one this table exists to stop
-    being surprised by.
+    Both directions, since piper-build-b4h.scw. Every engine now needs a row,
+    because every image is smoked under a memory ceiling and a ceiling is a
+    per-engine measurement. An engine with no row is refused by the table's `*)`
+    arm at run time, and this says so before a runner is spent finding out.
     """
     named = set(_BOOT_TABLE.findall(without_prose(SMOKE_ACTION)))
     assert named, "matched no boot-table entries — the regex is wrong, not the file"
-    assert named <= set(ENGINES), f"boot table names non-engines: {named - set(ENGINES)}"
+    assert named == set(ENGINES), (
+        f"boot table names non-engines {named - set(ENGINES)} "
+        f"and has no ceiling for {set(ENGINES) - named}"
+    )
+
+
+def test_the_smoke_confines_every_image_to_the_width_conformance_exercises():
+    """The width a ceiling is proven at is the width `speaks.py` actually drives.
+
+    A ceiling means "this image fits in this much at this many syntheses at once".
+    Named wider than [`speaks.CALLERS_AT_ONCE`], the width would be a claim no
+    caller ever tested; named narrower, the fourth caller queues and the measured
+    peak understates what the image costs at the width conformance asks for.
+    """
+    widths = _WIDTH.findall(without_prose(SMOKE_ACTION))
+    assert widths == [str(speaks.CALLERS_AT_ONCE)], (
+        f"smoke-image names widths {widths}; conformance drives {speaks.CALLERS_AT_ONCE}"
+    )
 
 
 #: The CPU row of `elvenspeak.chatterbox`'s measurement table, which owns both

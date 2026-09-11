@@ -21,15 +21,45 @@ description: >-
 # the image exists in that daemon's store and nowhere else, so a podman arriving on this
 # runner would otherwise move the smoke to a runtime that cannot see what was built.
 #
-# UNCONFINED, DECIDED RATHER THAN DEFAULTED. Passing `--memory` obliges
-# `--env ELVENSPEAK_CONCURRENT_SYNTHESES=N`, since the image refuses to start under a
-# ceiling nobody chose, and N is a per-engine runtime figure nobody has measured.
-# Chatterbox's 4.69 GiB is its *bake* peak, which is a different number for a different
-# phase, and reusing it here would be a guess wearing a measurement's clothes. A ceiling
-# guessed low turns a leg red for a reason that has nothing to do with the commit that hit
-# it. Confined is the shape the fleet actually runs and is worth proving against measured
-# numbers, and there are none yet: that is piper-build-b4h.scw, and this file is the one
-# place it will need to change.
+# CONFINED, AT CEILINGS READ OFF A RUN. Every deployment in the fleet runs under a memory
+# limit, and since piper-memory-zbq a confined elvenspeak whose synthesis width nobody
+# chose refuses to start, so an image smoked bare proves a shape nothing deploys. Each
+# engine's row in the table below names its own `--memory`, and one width goes to all.
+#
+# The ceilings come from the footprint line `smoke.py` prints for every container, four
+# callers inside each image at once. Gitea run 6276 (e93093e) read three of them with no
+# limit set; run 6277 (90a72ce) then read every image under the ceiling chosen for it:
+#
+#   engine       unconfined (6276)     ceiling   under it (6277)   anonymous there
+#   piper                 1548 MiB    2560 MiB          1454 MiB          1310 MiB
+#   kokoro                 711 MiB    1280 MiB           599 MiB           484 MiB
+#   router                 110 MiB     256 MiB            87 MiB            47 MiB
+#   chatterbox        never printed   7168 MiB          6664 MiB          5010 MiB
+#
+# Each ceiling is its unconfined peak times 1.5, rounded up to a whole 256 MiB. The
+# headroom is for the draw a run did not make: `memory.peak` is one run's high-water mark,
+# and piper was OOM-killed in the fleet by a burst that sampling never saw. The peak also
+# counts page cache, which the kernel reclaims before it kills anything, so the margin
+# over what only a kill can free is wider than half again — and every confined peak came
+# in under its unconfined one because a limit makes the kernel reclaim that cache.
+#
+# CHATTERBOX IS THE ONE CEILING THE RULE DID NOT SET, because it cannot: 1.5 times its
+# 6664 MiB is 9996 MiB, and the runner has 7939 MiB. It keeps the 7168m it was first
+# measured under, which is 1.43 times the 5010 MiB of anonymous memory no reclaim can
+# free. It is also the one row whose peak has only ever been read under a limit: run 6276
+# lost it to a red leg, which is why `smoke.py` now prints the footprint on every path.
+#
+# A ceiling reserves nothing. The four legs run at once on one 7939 MiB runner and their
+# ceilings add up to more than that; what has to fit is what they hold at the same moment.
+# On run 6277 the piper, kokoro and router smokes all overlapped chatterbox's build, and
+# all had finished before its smoke began.
+#
+# ONE WIDTH, `speaks.CALLERS_AT_ONCE`. A ceiling says "this image fits in this much at
+# this many syntheses at once", and only the width conformance drives is ever exercised:
+# wider is a claim nothing tested, and narrower queues a caller, so the peak understates
+# the cost at the width that was asked for. Run 6276 left the width to the 2-cpu runner's
+# default of 6, which already let all four callers in, so its figures were taken at the
+# width passed here. `tests/test_workflow.py` holds the literal equal to the constant.
 #
 # ONE KNOWN FLAKE, WRITTEN DOWN SO NOBODY HUNTS A PHANTOM. `smoke.py` picks its host port
 # by binding :0, reading the number and closing, so there is a small bounded window before
@@ -74,14 +104,22 @@ runs:
         # refusal from inside its own container.
         #
         # A table and not a branch: every engine runs the same command below and only
-        # these values differ. Every engine that needs anything is named, so the `*)` arm
-        # means "needs nothing" rather than "not looked into".
-        # [LAW:dataflow-not-control-flow]
+        # these values differ. Every engine is named, because every one is smoked under
+        # its own measured ceiling, so the `*)` arm is a refusal: an engine added to the
+        # matrix without a row stops here, rather than running under a ceiling nobody
+        # measured. [LAW:dataflow-not-control-flow] [LAW:no-silent-failure]
         case "$ENGINE" in
+          piper)      memory=2560m; boot=() ;;
+          kokoro)     memory=1280m; boot=() ;;
+
           # `cpu` because this runner has no accelerator. `speaks.conform` does
           # synthesize here, at the 8-33x real time that makes cpu the wrong choice for
           # a deployment, and `speaks.budget` is sized for exactly that.
-          chatterbox) boot=(--env CHATTERBOX_DEVICE=cpu) ;;
+          #
+          # The one ceiling the times-1.5 rule could not set — see the table above. It is
+          # the runner's 7939 MiB less a margin for the runner itself, and chatterbox
+          # peaked 504 MiB under it on run 6277, 5010 MiB of that unreclaimable.
+          chatterbox) memory=7168m; boot=(--env CHATTERBOX_DEVICE=cpu) ;;
 
           # The router synthesizes nothing, so what it needs is not a setting but
           # something to discover. `--fleet` runs `fleetstub.py` in a second container,
@@ -96,9 +134,13 @@ runs:
           # 180-second timeout that reads like a hang. Since piper-routing-7e2.17 the
           # backend must also answer /v1/models, because the router asks each one which
           # models its voices speak while it is still constructing itself.
-          router)     boot=(--fleet) ;;
+          router)     memory=256m; boot=(--fleet) ;;
 
-          *)          boot=() ;;
+          *)
+            echo "smoke-image: no measured memory ceiling for engine '$ENGINE'; add its row to this table" >&2
+            exit 1
+            ;;
         esac
 
-        python3 smoke.py "$IMAGE" --runtime docker "${boot[@]}"
+        python3 smoke.py "$IMAGE" --runtime docker --memory "$memory" \
+          --env ELVENSPEAK_CONCURRENT_SYNTHESES=4 "${boot[@]}"
