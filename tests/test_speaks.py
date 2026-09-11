@@ -26,6 +26,7 @@ whole point of the move this file exists to protect.
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import threading
 import time
@@ -72,6 +73,15 @@ class Fake:
     #: is caught one check earlier as a voice that answered 200 with nothing.
     fixed_samples: int | None = None
 
+    #: Samples added to each successive synthesis, so no two answers are the same
+    #: length and two identical requests never come back identical. What a model
+    #: that samples does: Chatterbox's own draws of "Yes." have run from 14994 to
+    #: 191394 samples (gitea jobs 9106 and 9168), which is why `speaks.py` reads
+    #: no length against another unless the deployment repeats itself. Negative
+    #: counts down, which is how a test puts a later draw below an earlier one
+    #: without depending on the order four threads happen to run in.
+    redraws: int = 0
+
     #: Multiplier applied when a speed is asked for. 0.5 is a real halving; 1.0
     #: is the engine that accepted the parameter and did nothing.
     speed_effect: float = 0.5
@@ -107,6 +117,13 @@ class Fake:
     #: Whether the timestamps body arrives without the audio its timeline
     #: measured, leaving the numbers with nothing to be checked against.
     omits_audio: bool = False
+
+    #: The draw [`redraws`] steps, and the lock it is stepped under. The
+    #: concurrent section puts four callers inside this server at once, and two
+    #: of them advancing one unguarded counter would be the fake inventing a race
+    #: of its own to then fail on.
+    _drawn: Iterator[int] = field(default_factory=itertools.count, init=False, repr=False)
+    _drawing: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     #: Status for the timestamps endpoint; 501 is the refusal a voice that does
     #: not measure owes.
@@ -154,7 +171,12 @@ class Fake:
         )
         if speed is not None:
             count = int(count * self.speed_effect)
-        return 0 if text == self.silent_on else count
+        if text == self.silent_on:
+            return 0
+        if not self.redraws:
+            return count
+        with self._drawing:
+            return count + self.redraws * next(self._drawn)
 
     def audio(self, voice: str, text: str, speed: float | None) -> bytes:
         return b"\x00" * (
@@ -170,13 +192,19 @@ class Fake:
         for the same reason — a fake that relied on the slack `speaks.py` allows
         would be a fake whose alignment is quietly wrong wherever the slack hides it.
         """
-        samples = self.samples(voice, text, None)
+        spoken = self.audio(voice, text, None)
+        # Counted off the very bytes carried below rather than drawn a second
+        # time. Two calls agreed only while a synthesis was a pure function of
+        # its request, which [`redraws`] is precisely the end of — and a timeline
+        # divided out of one draw while the audio came from another is the drift
+        # this method's docstring exists to rule out.
+        samples = len(spoken) // speaks.BYTES_PER_SAMPLE
         spread = [
             self.covers * (index + 1) * samples / len(text) / speaks.SAMPLE_RATE
             for index in range(len(text))
         ]
         carried = {} if self.omits_audio else {
-            "audio_base64": base64.b64encode(self.audio(voice, text, None)).decode("ascii")
+            "audio_base64": base64.b64encode(spoken).decode("ascii")
         }
         return {
             **carried,
@@ -522,6 +550,44 @@ def test_a_concurrent_caller_answered_at_the_wrong_length_is_refused():
     message = refusal(fake)
     assert "callers at once" in message
     assert "crossed or truncated" in message
+
+
+def test_a_deployment_that_redraws_is_not_held_to_lengths_it_never_promised(capsys):
+    """The long tail, which is sampling and not a crossing.
+
+    Chatterbox forces EOS on a long tail and pads a short utterance toward a
+    ceiling the long text is bounded by too: "Yes." has drawn 191394 samples on
+    `builtin-es` and 127008 on `builtin-en` where these 65 characters drew 97020
+    and 88200 (gitea jobs 9168, 9190, 9194). Every leg measured does it, the
+    greenest of them most of all, so an engine that samples answers four
+    characters at more length than sixty-five with nothing crossed and no caller
+    truncated — and refusing that would refuse every image chatterbox can build.
+
+    Served with the same inversion
+    [`test_a_concurrent_caller_answered_at_the_wrong_length_is_refused`] is
+    refused for, which is the entire point of the pair: one deployment repeats an
+    identical request and is held to its lengths, this one redraws and is not,
+    and the two verdicts differ on that fact alone. Inverted for the *first*
+    voice, so the serial comparison is put under the same question as the
+    concurrent one — both read `APART`, and a premise fixed in one of them would
+    have gone on failing in the other.
+    """
+    fake = Fake(
+        voices=[dict(NOTHING), {"voice_id": "other", "capabilities": []}],
+        answers_as={(NOTHING["voice_id"], speaks.SHORT_TEXT): speaks.LONGER_TEXT},
+        redraws=-10,
+        # Neither voice declares `timestamps`, which is Chatterbox's own
+        # declaration, so the endpoint owes the 501 that goes with it.
+        timestamps_status=501,
+    )
+    with serving(fake) as url:
+        speaks.conform(url, timeout=5.0)
+
+    # A comparison that quietly did not run reads exactly like one that ran and
+    # passed, so the skip is only honest if it is said out loud.
+    printed = capsys.readouterr().out
+    assert "lengths are not read against each other" in printed
+    assert "no length was read against another" in printed
 
 
 def test_each_request_is_bounded_by_the_work_in_front_of_it(monkeypatch):
