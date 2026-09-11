@@ -413,9 +413,9 @@ def test_the_lying_deployment_fixture_passes_when_it_tells_the_truth() -> None:
     assert words["DISC-1"] == "held"
     assert words["HEALTH-1"] == "held"
     assert words["HEALTH-2"] == "held"
-    # This fixture routes neither per-voice read, so both answer 404 — and
-    # `AUTH-2` holds anyway, because the claim is about keylessness and a path a
-    # build does not serve is a different promise than the one being asked.
+    # Neither per-voice read nor any streaming synthesis is routed here, so they
+    # answer 404 — and `AUTH-2` holds anyway, because a path a build does not
+    # serve is a different promise than the keylessness being asked.
     assert words["AUTH-2"] == "held"
 
 
@@ -572,7 +572,12 @@ def partly_guarded_deployment(shut: str) -> FastAPI:
 
 
 @pytest.mark.parametrize(
-    "shut", [read for read in prober._documented_reads("v1") if read != "/v1/voices"]
+    "shut",
+    [
+        read
+        for read in prober._addressed(prober.DOCUMENTED_READS, "v1")
+        if read != "/v1/voices"
+    ],
 )
 def test_a_read_guarded_while_the_listing_is_open_breaks_auth_2(shut: str) -> None:
     """Every documented read is really asked, one guard at a time.
@@ -590,15 +595,63 @@ def test_a_read_guarded_while_the_listing_is_open_breaks_auth_2(shut: str) -> No
     assert shut in verdicts["AUTH-2"].why
 
 
-def test_synthesis_guarded_while_every_read_is_open_breaks_auth_2() -> None:
+@pytest.mark.parametrize("shut", prober._addressed(prober.DOCUMENTED_SYNTHESES, "v1"))
+def test_a_synthesis_guarded_while_every_read_is_open_breaks_auth_2(shut: str) -> None:
     """The expensive half guarded alone, which a read-only check passes whole.
 
     A deployment can plausibly arrive in this state by guarding what costs it CPU
     and leaving the listings open, and every read `AUTH-2` makes would answer.
-    The one utterance is what tells that deployment apart from an open one.
+    Each postable path is shut in turn because a deployment gating only the
+    streaming ones is the same failure one endpoint over: the plain synthesis
+    answers, and a prober asking nothing else calls that deployment open.
     """
-    with serving(partly_guarded_deployment("/v1/text-to-speech/v1")) as base_url:
+    with serving(partly_guarded_deployment(shut)) as base_url:
         verdicts = _verdicts(base_url)
 
-    assert verdicts["AUTH-2"].word == "broken"
+    assert verdicts["AUTH-2"].word == "broken", f"{shut} is never asked keyless"
     assert "synthesis" in verdicts["AUTH-2"].why
+    assert shut in verdicts["AUTH-2"].why
+
+
+#: A row of README's endpoint table: the method and the path, in backticks.
+_ENDPOINT_ROW = re.compile(r"^\|\s*`(GET|POST) (/\S+)`\s*\|", re.M)
+
+
+def published_endpoints() -> dict[str, set[str]]:
+    """README's endpoint table, as `method -> paths`."""
+    text = (Path(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
+    endpoints: dict[str, set[str]] = {"GET": set(), "POST": set()}
+    for row in _ENDPOINT_ROW.finditer(text):
+        endpoints[row.group(1)].add(row.group(2))
+    return endpoints
+
+
+def test_the_readme_still_publishes_a_table_this_test_can_read() -> None:
+    """The check below is worthless if the table stopped parsing.
+
+    A regex over prose is a map that can go stale silently: a reformatted table
+    yields no rows, and "every documented endpoint is asked" then passes against
+    nothing at all ([LAW:no-silent-failure]).
+    """
+    published = published_endpoints()
+
+    assert "/health" in published["GET"], published
+    assert "/v1/text-to-speech/{voice_id}" in published["POST"], published
+
+
+def test_auth_2_asks_every_endpoint_the_readme_documents() -> None:
+    """The probed surface, held equal to the published one.
+
+    `AUTH-2`'s subject is the *documented* surface, so the tuples cannot be
+    derived from `elvenspeak.api` — that is this checkout's route table and the
+    prober judges foreign builds. README is the document they mirror, and holding
+    them equal to it is what makes an endpoint added there arrive here as a test
+    failure rather than as a path nobody keyless ever asks
+    ([LAW:one-source-of-truth]).
+    """
+    published = published_endpoints()
+
+    assert set(prober.DOCUMENTED_SYNTHESES) == published["POST"]
+    # `/health` is the one documented read outside any guard — README says it
+    # never requires a key, and `HEALTH-3` is the claim that asks it.
+    assert set(prober.DOCUMENTED_READS) == published["GET"] - {"/health"}

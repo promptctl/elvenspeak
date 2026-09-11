@@ -548,11 +548,15 @@ in the prober's claim table. `tests/test_prober.py` holds that table equal to
 the document in both directions, so a claim id cannot be invented here and a
 claim the document assigns to this issue cannot go unasked.
 
-`HEALTH-2` is the expensive one: it requires every voice `/health` publishes to
-be listed by `GET /v1/voices` and to really speak, so it spends one synthesis
-per voice, and on the slowest engine here that dominates a run. It asks every
-voice rather than a sample because "every id" is the claim, and a prober that
-speaks the first voice and reports `held` has not earned it.
+`HEALTH-2` and `AUTH-2` are the two that spend real synthesis, and on the
+slowest engine here that is where a run's time goes. `HEALTH-2` requires every
+voice `/health` publishes to be listed by `GET /v1/voices` and to really speak,
+so it costs one utterance per voice — every voice rather than a sample,
+because "every id" is the claim and a prober that speaks the first voice and
+reports `held` has not earned it. `AUTH-2` costs one per documented synthesis
+route, four today, and only against a deployment that configures no key. Which
+of them dominates is the voice count: a fleet makes it `HEALTH-2`, a single
+open voice makes it `AUTH-2`.
 
 Two outcomes are deliberately not the deployment's fault. A `--key` the
 deployment refuses, and a guarded deployment probed with no key at all, both

@@ -128,6 +128,18 @@ DOCUMENTED_READS = (
     "/v1/voices/{voice_id}/settings",
 )
 
+#: The synthesis endpoints `AUTH-2` asks without a key, filled the same way:
+#: every postable path README publishes, because a deployment gating the
+#: streaming ones alone — the costlier half, and the plausible thing to gate —
+#: would answer a check of the plain one and read as open. Only the status is
+#: judged, so no stream and no timestamp body is ever decoded here.
+DOCUMENTED_SYNTHESES = (
+    "/v1/text-to-speech/{voice_id}",
+    "/v1/text-to-speech/{voice_id}/stream",
+    "/v1/text-to-speech/{voice_id}/with-timestamps",
+    "/v1/text-to-speech/{voice_id}/stream/with-timestamps",
+)
+
 
 class Blocked(Exception):
     """A precondition failed, so the claim asking for it could not be asked.
@@ -639,24 +651,27 @@ def probe_auth_1(deployment: Deployment) -> Verdict:
     )
 
 
-def _documented_reads(voice_id: str) -> tuple[str, ...]:
-    """[`DOCUMENTED_READS`] addressed at `voice_id`.
+def _addressed(templates: tuple[str, ...], voice_id: str) -> tuple[str, ...]:
+    """`templates` addressed at `voice_id`.
 
-    Every path is filled the same way, so a per-voice read is a template carrying
-    a value rather than a second kind of read with a branch selecting it
-    ([LAW:dataflow-not-control-flow]).
+    Every path is filled the same way, so a per-voice endpoint is a template
+    carrying a value rather than a second kind of endpoint with a branch
+    selecting it ([LAW:dataflow-not-control-flow]). Reads and syntheses differ in
+    the tuple handed here and in nothing else
+    ([LAW:one-type-per-behavior] — the tuple is the only thing that varies).
     """
     quoted = urllib.parse.quote(voice_id, safe="")
-    return tuple(path.format(voice_id=quoted) for path in DOCUMENTED_READS)
+    return tuple(path.format(voice_id=quoted) for path in templates)
 
 
 def probe_auth_2(deployment: Deployment) -> Verdict:
     """With nothing configured, every documented endpoint answers without a key.
 
-    Asked of [`DOCUMENTED_READS`] and of one synthesis, because the claim is
-    about every endpoint and a guard applied to only the expensive half would
-    pass a read-only check completely. One utterance, on one voice, which is what
-    that costs.
+    Asked of [`DOCUMENTED_READS`] and [`DOCUMENTED_SYNTHESES`], because the claim
+    is about every endpoint and a guard applied to only the expensive half — or
+    to only the streaming part of that half — would pass a narrower check
+    completely. One voice, and an utterance per documented synthesis, which is
+    what that costs.
 
     Only a 401 is judged: the claim is about keylessness, so a documented path
     this build does not route answers 404 and belongs to some other claim.
@@ -670,10 +685,10 @@ def probe_auth_2(deployment: Deployment) -> Verdict:
     if not voices:
         return Unasked(
             "this deployment lists no voice, so the per-voice reads and the "
-            "synthesis this claim asks have nothing to address"
+            "syntheses this claim asks have nothing to address"
         )
     voice_id = voices[0].id
-    reads = _documented_reads(voice_id)
+    reads = _addressed(DOCUMENTED_READS, voice_id)
     for path in reads:
         reply = _ask(deployment.target, path, key=None)
         if reply.status == 401:
@@ -682,15 +697,24 @@ def probe_auth_2(deployment: Deployment) -> Verdict:
                 "allows one — this deployment is guarded in part, which is "
                 "neither of the two states it documents"
             )
-    spoken = _spoken(deployment.target, voice_id, key=None)
-    if spoken.status == 401:
-        return Broken(
-            "synthesis refused a keyless request 401 while every read allows one "
-            f"— {voice_id!r} cannot be spoken by a caller this deployment "
-            "told it needs no key"
+    syntheses = _addressed(DOCUMENTED_SYNTHESES, voice_id)
+    for path in syntheses:
+        spoken = _ask(
+            deployment.target,
+            f"{path}?output_format={PCM_FORMAT}",
+            key=None,
+            method="POST",
+            body={"text": PROBE_TEXT},
         )
+        if spoken.status == 401:
+            return Broken(
+                f"synthesis at POST {path} refused a keyless request 401 while "
+                f"every read allows one — {voice_id!r} cannot be spoken by a "
+                "caller this deployment told it needs no key"
+            )
     return Held(
-        f"{len(reads)} documented reads and a synthesis in "
+        f"{_counted(len(reads), 'documented read')} and "
+        f"{_counted(len(syntheses), 'documented synthesis route')} in "
         f"{voice_id!r} all answered without a key"
     )
 
