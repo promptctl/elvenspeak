@@ -1,19 +1,26 @@
 # What a prober can check, and what a verdict means
 
-Fifty-eight of this service's documented promises can be checked over HTTP against a
-running deployment. Fifty-three of them can be *falsified* — decided against
+Fifty-four of this service's documented promises can be checked over HTTP against a
+running deployment. Forty-nine of them can be *falsified* — decided against
 something outside the deployment's own account of itself — and five can only be
 checked for agreement with what the deployment said about itself elsewhere.
 
-Those five are not scattered, which is the finding worth carrying out of this file.
-`HEALTH-1`, `MOD-2`, `MOD-7`, `CAP-5` and `SUB-3` are every claim about a value the
-deployment *derives* from its own catalogue — the union over its voices, the
-agreement between a status line and the body beside it. That derivation is exactly
-how a router advertises the fleet behind it (`piper-routing-7e2.17` moved the served
-set onto the voice so it could). So the epic's stated failure — a prober that
-returns green on a lying deployment — has an address: a router misreporting what it
-fronts passes all five, and nothing else in this file would notice. That is why the
-report has to show the split rather than a single count.
+Those five are not scattered. `HEALTH-1`, `MOD-2`, `MOD-7`, `CAP-5` and `SUB-3` are
+every claim about a value the deployment *derives* from its own catalogue — the
+union over its voices, the agreement between a status line and the body beside it.
+That derivation is exactly how a router advertises the fleet behind it
+(`piper-routing-7e2.17` moved the served set onto the voice so it could). So the
+epic's stated failure — a prober that returns green on a lying deployment — has an
+address: a router misreporting what it fronts passes all five, and nothing else in
+this file would notice. The report has to show the split, not a single count.
+
+A second class of promise is missing from the tables altogether, and its absence
+matters as much. Every guarantee `elvenspeak/engine.py` makes about the voice
+listing — best-first, stable order, ids stable across restarts, capabilities fixed
+while offered, no id twice — is unobservable over HTTP, because the server asks the
+engine for its voices once at startup and serves that snapshot forever. One of them
+cannot be caught at any time by anything: a duplicate id is dropped before an
+endpoint exists to be asked, which is `piper-voices-1n0`.
 
 This file fixes three things the rest of `piper-conformance-e16` builds against: the
 vocabulary a probe may return, the exit code a run produces, and the identifier each
@@ -103,7 +110,7 @@ is real and worth checking, but a deployment wrong in both places passes it. The
 are not weak claims — four of the five are the only way a router's account of the
 fleet behind it is observable at all. They are simply not proof on their own, and
 because there are only five of them a report that mixes them into one count hides
-the entire router question inside a 58-claim green.
+the entire router question inside a 54-claim green.
 
 Many claims are mixed: the prober picks its input self-consistently (take a
 `model_id` the voice does not list) and then judges the outcome falsifiably (it must
@@ -136,20 +143,29 @@ Observed: a wrong key and an absent key produce the same 401 and the same body;
 | Id | Claim | Source | Evidence | Probed by |
 |---|---|---|---|---|
 | `DISC-1` | `GET /v1/voices` returns `{"voices":[…]}`, each entry carrying ElevenLabs' fields plus `aliases`, `capabilities`, `models` and `language` | README:47, api.py:1167 | falsifiable | e16.2, e16.3 |
-| `DISC-2` | The listing does not change between two calls with nothing in between | engine.py:399 | falsifiable | e16.3 — `speaks.py` |
-| `DISC-3` | No voice id is offered twice | engine.py:399 | falsifiable | e16.3 — `speaks.py` |
-| `DISC-4` | The order is stable across calls | engine.py:406 | falsifiable | e16.3 |
-| `DISC-5` | `GET /v1/voices/{id}` returns that voice for an installed id and 404s an id that is not — discovery never substitutes | README:117, api.py:1099 | falsifiable | e16.5 |
-| `DISC-6` | `GET /v1/voices/settings/default` returns ElevenLabs' documented defaults: `stability` 0.5, `similarity_boost` 0.75, `style` 0.0, `use_speaker_boost` true, `speed` 1.0 | README:49, api.py:1085 | falsifiable | e16.2 |
-| `DISC-7` | `GET /v1/voices/{id}/settings` returns that same object, and 404s an unknown id | README:50, api.py:1109 | falsifiable | e16.2 |
-| `DISC-8` | Each voice's `language` is an ISO 639-1 family — the vocabulary `language_code` is compared in | engine.py:202 | falsifiable | e16.5 |
+| `DISC-2` | `GET /v1/voices/{id}` returns that voice for an installed id and 404s an id that is not — discovery never substitutes | README:117, api.py:1099 | falsifiable | e16.5 |
+| `DISC-3` | `GET /v1/voices/settings/default` returns ElevenLabs' documented defaults: `stability` 0.5, `similarity_boost` 0.75, `style` 0.0, `use_speaker_boost` true, `speed` 1.0 | README:49, api.py:1085 | falsifiable | e16.2 |
+| `DISC-4` | `GET /v1/voices/{id}/settings` returns that same object, and 404s an unknown id | README:50, api.py:1109 | falsifiable | e16.2 |
+| `DISC-5` | Each voice's `language` is an ISO 639-1 family — the vocabulary `language_code` is compared in | engine.py:202 | falsifiable | e16.5 |
 
-engine.py:406 makes a second promise beside `DISC-4`'s — that the first voice listed
-is what a deployment naming no fallback substitutes to — and that one is **not**
-checkable over HTTP. The prober cannot see whether `ELVENSPEAK_FALLBACK_VOICE` was
-set, so a substitution landing
-somewhere other than the first voice is indistinguishable from a deployment that
-configured a fallback on purpose. It is listed under "Needs an oracle" below.
+**Every promise `engine.py` makes about the listing itself is missing from this
+table, and the absence is the finding.** An engine's voices are promised best-first
+(engine.py:406), in an order stable across calls (engine.py:406), under ids stable
+across restarts (engine.py:125), with capabilities fixed while the voice is offered
+(engine.py:162). None of it is observable over HTTP, because the server never asks
+the engine twice: `api.py:498` builds the `Catalog` once at startup and every
+discovery response is a projection of that one snapshot. Two `GET /v1/voices` calls
+are byte-identical for the life of the process whatever the engine does.
+
+The ordering promise is worse than unverifiable. `voices.py:235` serves
+`sorted(self._voices)` — alphabetically by id — while `_chosen` picks the fallback
+with `next(iter(voices))`, the engine's own insertion order (`voices.py:85`). So the
+engine's best-first ordering is not what `GET /v1/voices` shows, and the first voice
+in that listing is not generally the voice an unconfigured deployment substitutes
+to. A prober reading the listing to check either one would be reading the wrong
+sequence, not merely an unfalsifiable one.
+
+All of these are under "Needs an oracle" below.
 
 ### Model ids
 
@@ -177,12 +193,11 @@ that refuses everything from one that ignores everything.
 | `CAP-3` | A voice declaring `timestamps` answers both timestamp endpoints 200, with a non-empty alignment | README:106 | falsifiable | e16.5 — `speaks.py` |
 | `CAP-4` | A voice not declaring `timestamps` answers both 501, with `{"detail":"this service cannot report how long each part of an utterance took"}` | README:106, api.py:647 | falsifiable | e16.5 — `speaks.py` |
 | `CAP-5` | `GET /v1/models`' `capabilities` is the union over the offered voices | README:111, api.py:1246 | self-consistent | e16.5 |
-| `CAP-6` | A voice's `capabilities` do not change while it is offered | engine.py:161 | falsifiable, weakly — only across the run's own calls | e16.5 |
-| `CAP-7` | A parameter the server cannot honour is named in `x-elvenspeak-ignored` rather than dropped — including a body field this build has never heard of | README:22, api.py:267 | falsifiable | e16.5 |
-| `CAP-8` | `x-elvenspeak-ignored` is absent, not empty, when everything asked for was honoured | api.py:776 | falsifiable | e16.5 |
+| `CAP-6` | A parameter the server cannot honour is named in `x-elvenspeak-ignored` rather than dropped — including a body field this build has never heard of | README:22, api.py:267 | falsifiable | e16.5 |
+| `CAP-7` | `x-elvenspeak-ignored` is absent, not empty, when everything asked for was honoured | api.py:776 | falsifiable | e16.5 |
 
 Observed: an invented body field (`invented_2027`) came back named in
-`x-elvenspeak-ignored`, so `CAP-7` holds for fields added after this build — which
+`x-elvenspeak-ignored`, so `CAP-6` holds for fields added after this build — which
 is the half of rule 2 a fixed list of parameter names would never have caught.
 
 ### Substitution
@@ -337,12 +352,36 @@ listing them here is what keeps a later issue from filing one as a gap.
   exists to tell a caller instead.
 - **MP3 matches the real API byte for byte at the front** (README:62). Needs
   ElevenLabs. `FMT-6` — a frame sync and no ID3 — is the checkable remainder.
-- **The first voice listed is what an unconfigured deployment substitutes to**
-  (engine.py:406). The prober cannot see whether a fallback was configured, so it
-  cannot tell a wrong substitution from a deliberate one.
 - **A silent engine answers 502 carrying `x-elvenspeak-silence`** (engine.py:332,
   api.py:604). A prober cannot make an engine go mute, so this is unreachable from
   outside. `tests/test_silence.py` owns it.
+
+Five more are unreachable for one shared reason — the server asks the engine for its
+voices once, at startup (`api.py:498`), and every discovery response projects that
+snapshot. A prober sees the cache, never the engine.
+
+- **The listing is stable across calls** (engine.py:406) and **a voice's
+  capabilities do not change while it is offered** (engine.py:162). Both are
+  structurally guaranteed inside one process: the responses are built from the same
+  frozen `Voice` objects every time, so no two calls can disagree however the engine
+  behaves. Only a restart could expose a violation, and the prober cannot force one.
+- **Voice ids are stable across restarts** (engine.py:125). Needs the restart itself.
+- **Voices come back best-first** (engine.py:406). `voices.py:235` re-sorts the
+  listing alphabetically, so the engine's order never reaches a caller at all.
+- **No voice id is offered twice.** This one is not merely out of reach, it is
+  permanently masked: `voices.py:225` keys the catalogue by id, so a duplicate is
+  dropped last-wins with no error and no log, before any endpoint exists to be
+  asked. No probe at any time can catch a violation. `speaks.py:507-513` asks a live
+  server this question today and cannot ever fail it. Filed as `piper-voices-1n0`,
+  which proposes refusing the boot instead — it is a `[LAW:no-silent-failure]`
+  problem in the server, not only an unprobeable one.
+
+The fallback promise is a casualty of the same two lines. `engine.py:406` says a
+deployment naming no fallback answers unknown ids in whichever voice its engine
+lists first — but `_chosen` reads that from the engine's insertion order
+(`voices.py:85`) while the listing is alphabetical, so the first voice a prober can
+see is not generally the fallback. It could not be checked even if the prober could
+see whether `ELVENSPEAK_FALLBACK_VOICE` was set.
 
 ## Not checkable over HTTP at all
 
@@ -352,8 +391,7 @@ checker: `smoke.py` runs the image, so a container that refuses its own environm
 fails the smoke in seconds (README:446), and one that reached a 200 must have had
 its assets baked.
 
-Voice-id stability across restarts (engine.py:399, needs a restart the prober does
-not control); "no network after the first start" (README:232); the RTF and
+"No network after the first start" (README:232); the RTF and
 throughput figures under "Running it" and "What this deliberately does not do";
 which engine's libraries and baked assets are in an image (README:394); the
 `ELVENSPEAK_*` misspelling refusal and its exit 2 (README:314); Piper's
@@ -362,12 +400,17 @@ raises from `acquire()` or `open()` rather than mid-request (README:557).
 
 ## Overlap with speaks.py
 
-`speaks.py` already asks `DISC-2`, `DISC-3`, `CAP-1`, `CAP-2`, `CAP-3`, `CAP-4` and
-`TIME-4` — plus a concurrency property no claim here states — of a *built image*, in
-CI, before it is pushed. It is not the prober and should not become one: its subject
-is the artifact about to be published, it is standard-library-only so it can run
-before any install, and its verdict is deliberately binary because a red one stops a
-publish.
+`speaks.py` already asks `CAP-1`, `CAP-2`, `CAP-3`, `CAP-4` and `TIME-4` — plus a
+concurrency property no claim here states — of a *built image*, in CI, before it is
+pushed. It is not the prober and should not become one: its subject is the artifact
+about to be published, it is standard-library-only so it can run before any install,
+and its verdict is deliberately binary because a red one stops a publish.
+
+Two checks it makes are not on that list because they cannot fail. `speaks.py:500`
+compares two voice listings and `speaks.py:507` looks for a duplicate id, and the
+catalogue described above guarantees both pass. They are the reason this file
+separates "asked and held" from "could not be asked": a green `speaks.py` run has
+always included two questions nothing could have answered wrongly.
 
 The prober's subject is a *deployed base URL*, and its value is the claims
 `speaks.py` cannot reach from CI — the 28 formats, the refusal bodies, the
