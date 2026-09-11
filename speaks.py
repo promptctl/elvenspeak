@@ -94,13 +94,35 @@ SHORT_TEXT = "Yes."
 LONGER_TEXT = "One two three four five, six seven eight nine ten, eleven twelve."
 
 #: The two texts every comparison of two utterances' lengths in this file is made
-#: between, far enough apart that no draw of any engine here puts them in the
-#: wrong order. Chatterbox samples, so a bare `<` between two of its answers is a
-#: coin weighted by how far apart the texts are. Measured on
-#: elvenspeak-chatterbox:2026.09.08.1: six syntheses of [`TEXT`] that reached the
-#: engine identical ran 39690 to 59094 samples, and "Yes." has run to 44100 —
-#: past [`TEXT`]'s shortest, so those two overlap. [`LONGER_TEXT`] ran 113778,
-#: which a third's spread still leaves 1.7x the longest "Yes.".
+#: between. What stood here was a premise — that these are far enough apart that
+#: no draw of any engine puts them in the wrong order — and it is false. No
+#: choice of texts repairs it: Chatterbox's sampler forces EOS on a long tail,
+#: which pads a short utterance toward a ceiling the long text is bounded by too,
+#: so a gap widened by a longer [`LONGER_TEXT`] is a gap the padding still
+#: crosses. Measured on gitea: "Yes." drew 191394 samples on `builtin-es` (job
+#: 9168) and 127008 on `builtin-en` (job 9190), both past every recorded draw of
+#: these 65 characters — 97020 and 88200. Job 9190's leg was green, and every leg
+#: measured, green and red alike, forces EOS on a long tail: the greenest of them
+#: does it twelve times and the red publish leg (job 9194) seven, so the padding
+#: is the engine's ordinary sampling and not the defect the red legs were named
+#: after.
+#:
+#: Those four characters have also drawn as little as 14994 samples (job 9106),
+#: so one text's own draws span better than twelvefold — further than any pair of
+#: texts here is apart, which is the same fact said as a ratio.
+#:
+#: [LAW:one-source-of-truth] The one home for these figures. `tests/test_speaks.py`
+#: reasons from them in two places and cites this name rather than re-quoting
+#: them, because three copies of a measurement are three chances to drift and the
+#: drift is silent — a reader would be told what the evidence shows by whichever
+#: copy they happened to read.
+#:
+#: A bare `<` between two draws of an engine that samples therefore says nothing
+#: about which request they answer, and every comparison between these two texts
+#: asks [`_repeatable`] first. The `speed` pair is the one length comparison in
+#: this file drawn between something else — one text against itself at two
+#: speeds — and it does not ask; what makes that one sound is argued where it is
+#: made.
 APART = (SHORT_TEXT, LONGER_TEXT)
 
 #: How many callers [`_conform_concurrently`] puts inside a server at once: both
@@ -285,7 +307,17 @@ def _speak(
     *,
     timeout: float,
 ) -> Utterance:
-    """One synthesis of `text` in `voice`, as raw PCM.
+    """One synthesis of `text` in `voice`, as raw PCM, audited before it returns.
+
+    [LAW:parse-dont-validate] The audit is here, in the draw, and not at the call
+    sites: a length read off an answer nobody audited is the defect this file
+    exists to catch, wearing a number. Held at the call sites it depended on five
+    callers each remembering, and three of them did not — the repeatability
+    probe, the serial [`APART`] pair and the `speed` pair all went unaudited. The
+    third was the expensive one. An engine answering a speeded request with no
+    audio at all passed the pace check and was reported as honouring the
+    parameter, because zero samples is shorter than three quarters of anything
+    ([LAW:no-silent-failure]). A bar that a worse defect clears is not a bar.
 
     `speed` is sent only when a caller asked for one, so an engine that does not
     honour it is not handed a `voice_settings` it would then name in
@@ -312,7 +344,9 @@ def _speak(
     reply = _exchange(request, timeout, asking)
     if reply.status != 200:
         raise _refused(asking, reply)
-    return Utterance(audio=reply.body, ignored=reply.headers.get("x-elvenspeak-ignored", ""))
+    spoken = Utterance(audio=reply.body, ignored=reply.headers.get("x-elvenspeak-ignored", ""))
+    _audible(voice, text, spoken)
+    return spoken
 
 
 def _audible(voice_id: str, text: str, spoken: Utterance) -> None:
@@ -323,6 +357,12 @@ def _audible(voice_id: str, text: str, spoken: Utterance) -> None:
     held to exactly the bar the serial ones are. A second, local reading of the
     same two rules is how contention becomes the one condition under which a
     broken answer passes.
+
+    Two entry points, and they are the whole census: [`_speak`], which audits
+    every answer it draws, and [`_conform_timings`], whose audio arrives inside a
+    JSON body it never drew through [`_speak`]. Checkable by eye rather than
+    taken on trust — they are the only two places in this file where bytes
+    become an [`Utterance`].
 
     The text is named rather than only the voice, because a voice is asked for
     more than one utterance now and the short one is where an engine is known to
@@ -340,6 +380,77 @@ def _audible(voice_id: str, text: str, spoken: Utterance) -> None:
             f"{PCM_FORMAT}, which is not a whole number of 16-bit samples — the "
             "audio is not the format it was asked for"
         )
+
+
+def _subjects(voices: tuple[SpokenVoice, ...]) -> tuple[SpokenVoice, ...]:
+    """The voices every comparison of two lengths in this file is asked of.
+
+    The first and the last of the offer rather than a slice, so a deployment
+    offering exactly one voice is asked the same question twice instead of being
+    quietly skipped ([LAW:dataflow-not-control-flow]).
+
+    [LAW:one-source-of-truth] Named because two places need the same answer:
+    [`_conform_concurrently`] compares these, and `conform` measures
+    [`_repeatable`] for them. Derived twice, the set that gets measured could
+    drift from the set that gets compared, and the failure would be a voice
+    compared against a repeatability nobody took for it.
+    """
+    return (voices[0], voices[-1])
+
+
+def _repeatable(first: Utterance, again: Utterance) -> bool:
+    """Whether one voice answered two identical requests identically.
+
+    The question that decides whether any length comparison in this file means
+    anything. A voice whose backend runs a fixed graph returns the same audio
+    twice, so its lengths follow its texts and an answer at the wrong length is
+    somebody else's answer. One whose backend samples returns two different
+    utterances, and the distance between its own draws exceeds the distance its
+    texts make — the measurement is in [`APART`].
+
+    Asked per voice and never per deployment, which is not a refinement but the
+    whole correctness of it: behind the router one voice's backend samples while
+    the next one's does not, in one process (`elvenspeak/router.py` sends each
+    voice to `self._speakers[voice.id]`, and README's capability section says a
+    deployment serves voices from more than one engine). One answer borrowed
+    across two voices is wrong in both directions — it refuses a sampling voice
+    for a steady one's repeatability, and it excuses a steady one behind a
+    sampling voice, which is the crossed response this file exists to catch going
+    unlooked-for. A property of the voice, then, and still never of the engine's
+    name, which this file has never been allowed to ask for.
+
+    Compared as audio and not as sample counts: two draws land on one length by
+    coincidence often enough to matter — these are quantised to whole frames —
+    and never on one waveform. A coincidence read as repeatability would put a
+    sampling voice back under a comparison it cannot reliably pass, which is the
+    defect this is here to retire rather than make rarer.
+    """
+    return first.audio == again.audio
+
+
+def _repeats(
+    base_url: str, voices: tuple[SpokenVoice, ...], said: dict[tuple[str, str], Utterance]
+) -> dict[str, bool]:
+    """[`_repeatable`], asked once of each of `voices` and keyed by voice id.
+
+    The second answer is drawn here rather than taken from the concurrent
+    section, where one is already going spare. That draw is free and using it
+    would be wrong: a crossed answer under contention differs from what the voice
+    said serially, so the defect [`_conform_concurrently`] exists to catch would
+    read as "this voice does not repeat" and switch off its own detector. The
+    probe is therefore uncontended, and costs one [`SHORT_TEXT`] — the cheapest
+    utterance in the file — per distinct voice compared.
+    """
+    return {
+        voice.id: _repeatable(
+            said[voice.id, SHORT_TEXT],
+            _speak(base_url, voice.id, SHORT_TEXT, timeout=budget(SHORT_TEXT)),
+        )
+        # Distinct, because a deployment offering one voice makes [`_subjects`]
+        # that voice twice and the probe would otherwise be paid for twice to
+        # answer the same question.
+        for voice in {voice.id: voice for voice in voices}.values()
+    }
 
 
 def _voices(base_url: str, timeout: float) -> tuple[SpokenVoice, ...]:
@@ -408,10 +519,16 @@ def conform(base_url: str, timeout: float) -> None:
     # lengths reach the same request, the same refusals and the same log line, so
     # an engine that goes silent on four characters fails the check every voice
     # already passes rather than one bolted on beside it.
+    #
+    # Kept rather than only printed, because the comparisons below need a second
+    # answer to a request one of these already made, and buying it again would
+    # add a synthesis to every engine's leg to learn what this one already
+    # answered ([`_repeatable`]).
+    said: dict[tuple[str, str], Utterance] = {}
     for voice in voices:
         for text in (TEXT, SHORT_TEXT):
             spoken = _speak(base_url, voice.id, text, timeout=budget(text))
-            _audible(voice.id, text, spoken)
+            said[voice.id, text] = spoken
             print(
                 f"speaks: {voice.id} said {text!r} in {spoken.samples} samples",
                 flush=True,
@@ -423,15 +540,32 @@ def conform(base_url: str, timeout: float) -> None:
     # every voice on offer can be spoken in at all.
     subject = voices[0]
 
+    # Measured for every voice a length is read off, not for this one and then
+    # borrowed: [`_repeatable`] says why that borrowing is wrong in both
+    # directions. Printed per voice, and on both arms rather than only the arm
+    # that goes on to compare — a comparison that quietly does not run reads
+    # exactly like one that ran and passed, and this file's whole job is to be
+    # the thing between a defect and a green publish ([LAW:no-silent-failure]).
+    repeats = _repeats(base_url, _subjects(voices), said)
+    for voice_id, repeatable in repeats.items():
+        print(
+            f"speaks: {voice_id} answered one request twice "
+            f"{'identically' if repeatable else 'with two different utterances'}, "
+            f"so its lengths {'are' if repeatable else 'are not'} read against "
+            "each other",
+            flush=True,
+        )
+
     less_text, more_text = (
         _speak(base_url, subject.id, text, timeout=budget(text)) for text in APART
     )
-    if more_text.samples <= less_text.samples:
+    if repeats[subject.id] and more_text.samples <= less_text.samples:
         raise ConformanceFailure(
             f"{subject.id!r} made {more_text.samples} samples of "
             f"{len(APART[1])} characters and {less_text.samples} of "
-            f"{len(APART[0])} — more text did not make more audio, so the engine "
-            "is not speaking what it was given"
+            f"{len(APART[0])} — more text did not make more audio from a voice "
+            "that answers an identical request identically, so the engine is "
+            "not speaking what it was given"
         )
 
     # [LAW:dataflow-not-control-flow] Both arms run the same two requests and
@@ -444,6 +578,21 @@ def conform(base_url: str, timeout: float) -> None:
     # draw as a speed honoured failed a correct image. [LAW:single-enforcer] That
     # a disclaimed speed never reaches the engine is held where it is decided, by
     # test_capabilities.py's test_a_speed_the_engine_cannot_vary_never_reaches_it.
+    #
+    # These two draws are the one length comparison here not made between
+    # [`APART`]'s texts, and the one that does not ask [`_repeatable`] first. A
+    # margin rather than a guard is what makes it sound: [`PACE_CHANGED`] wants a
+    # quarter off, while every voice that reaches the declaring arm draws within a
+    # percent of itself — piper 40960 against 40704 samples of the same [`TEXT`],
+    # kokoro 39308 twice (gitea run 6362, jobs 9344 and 9343). The engine whose own
+    # draws outrun the distance its texts make ([`APART`]) is Chatterbox, which
+    # declares no speed and is answered by the arm below instead. Gating this on
+    # `repeats` would lose the check rather than tighten it: piper and kokoro both
+    # measure non-repeating on the probe — piper by a few hundred samples, kokoro
+    # by bytes alone, and `piper-pipeline-0uq` is where those draws are recorded —
+    # so the only live proof that a declared speed does anything would stop being
+    # asked of the only two engines that implement one.
+    # `piper-pipeline-0uq` holds what `repeats` should mean at a spread this small.
     paced = _speak(base_url, subject.id, TEXT, speed=FASTER, timeout=budget(TEXT))
     unpaced = _speak(base_url, subject.id, TEXT, timeout=budget(TEXT))
     if subject.paces and paced.samples >= unpaced.samples * PACE_CHANGED:
@@ -471,7 +620,7 @@ def conform(base_url: str, timeout: float) -> None:
 
     # --------------------------------------------- what holds under contention
 
-    _conform_concurrently(base_url, voices)
+    _conform_concurrently(base_url, voices, repeats)
 
 
 def _conform_timings(base_url: str, voice: SpokenVoice) -> None:
@@ -563,7 +712,9 @@ def _conform_timings(base_url: str, voice: SpokenVoice) -> None:
     )
 
 
-def _conform_concurrently(base_url: str, voices: tuple[SpokenVoice, ...]) -> None:
+def _conform_concurrently(
+    base_url: str, voices: tuple[SpokenVoice, ...], repeats: dict[str, bool]
+) -> None:
     """Callers inside the engine at once are each answered in full.
 
     The engines behind this seam are not reentrant, and one of them says so in
@@ -585,18 +736,24 @@ def _conform_concurrently(base_url: str, voices: tuple[SpokenVoice, ...]) -> Non
 
     WHAT IT DOES ESTABLISH is everything else contention breaks, none of which
     any other check in this file would survive: a caller refused, a deadlock, a
-    truncated body, two responses interleaved on one socket, an answer that is
-    somebody else's length. Whether the two overlapped at all is the deployment's
-    `speaking_at_once` bound to decide and is not observable from out here; a
-    server that serialises them keeps every promise below, which is correct —
-    `tests/test_concurrency.py` owns the bound itself.
+    truncated body, two responses interleaved on one socket, and — from a voice
+    whose answers repeat, never from one that samples — an answer that is
+    somebody else's length. That last one is `repeats`' to allow, voice by voice:
+    a backend drawing a fresh utterance each time can answer four characters at
+    more length than sixty-five without anything having crossed, so reading its
+    lengths against each other names a defect in the lock below at a run that had
+    none. [`APART`] carries the draws that settled it. Per voice and not per
+    deployment because behind the router these two subjects can sit on different
+    backends, one sampling and one not ([`_repeatable`]). Whether the two overlapped
+    at all is the deployment's `speaking_at_once` bound to decide and is not
+    observable from out here; a server that serialises them keeps every promise
+    below, which is correct — `tests/test_concurrency.py` owns the bound itself.
 
     Two voices and not one, because a single-voice pair never writes two
-    different speakers. The first and the last of the offer rather than a slice,
-    so a deployment offering exactly one voice is asked the same question twice
-    instead of being quietly skipped ([LAW:dataflow-not-control-flow]).
+    different speakers. Which two is [`_subjects`]' to say, so the set measured
+    in `conform` and the set compared here cannot drift apart.
     """
-    subjects = (voices[0], voices[-1])
+    subjects = _subjects(voices)
     callers_at_once = len(subjects) * len(APART)
     assert callers_at_once == CALLERS_AT_ONCE, "CALLERS_AT_ONCE no longer counts these callers"
     # [LAW:no-ambient-temporal-coupling] Each caller's bound is the work of every
@@ -641,27 +798,27 @@ def _conform_concurrently(base_url: str, voices: tuple[SpokenVoice, ...]) -> Non
             (voice, tuple(caller.result() for caller in pair)) for voice, pair in started
         ]
 
-    for voice, pair in answered:
-        for text, spoken in zip(APART, pair, strict=True):
-            _audible(voice.id, text, spoken)
-
     # Compared inside one voice and never across two. Across, this would be
     # arithmetic on two speaking rates, and that two voices of one engine speak
     # at comparable rates is not a property any engine here promises — a check
     # resting on it would go red on a legitimately slow voice and read as a
     # concurrency defect.
     for voice, (shorter, longer) in answered:
-        if longer.samples <= shorter.samples:
+        if repeats[voice.id] and longer.samples <= shorter.samples:
             raise ConformanceFailure(
                 f"under {callers_at_once} callers at once, {voice.id!r} answered "
                 f"{len(APART[1])} characters with {longer.samples} samples and "
                 f"{len(APART[0])} with {shorter.samples} — each answer is a "
                 "plausible utterance and they are not the ones that were asked "
-                "for, which is what a crossed or truncated response looks like "
+                "for, which from a voice that answers an identical request "
+                "identically is what a crossed or truncated response looks like "
                 "from here"
             )
+    read = sorted(voice_id for voice_id, repeatable in repeats.items() if repeatable)
     print(
         f"speaks: {callers_at_once} callers at once across "
-        f"{len({voice.id for voice, _ in answered})} voices were each answered in full",
+        f"{len({voice.id for voice, _ in answered})} voices were each answered in "
+        f"full, and a length was read against another for "
+        f"{', '.join(read) if read else 'no voice here'}",
         flush=True,
     )
