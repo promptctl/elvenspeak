@@ -143,6 +143,11 @@ def test_every_named_device_is_accepted(device: str):
     A `configure` that refused every string would satisfy the refusal test
     perfectly. `DEVICES` is the closed set this engine has been measured on, and
     each member of it has to actually get through.
+
+    That it is the *measured* set is not this test's word for it:
+    `test_workflow.test_every_quotation_of_chatterbox_cost_matches_what_it_measured`
+    holds the set equal to the rows of the table in `chatterbox`'s header, so a
+    device accepted here without a figure there is red.
     """
     assert parsed(**{chatterbox.DEVICE: device}).device == device
 
@@ -157,6 +162,44 @@ def test_a_device_torch_would_accept_but_nobody_measured_is_still_refused():
     """
     with pytest.raises(ConfigError):
         parsed(**{chatterbox.DEVICE: "xpu"})
+
+
+def test_both_refusals_say_what_each_device_costs_and_not_only_its_name(monkeypatch):
+    """The refusals are where the device is chosen, so they carry the figures.
+
+    A message listing `cuda, mps, cpu` and then quoting one figure for cpu
+    satisfies every assertion above about the names while telling an operator
+    holding a GPU nothing about the choice it is asking them to make — and "there
+    is no default" is an explanation only if the line shows what the candidates
+    cost. Both refusals render the set through `_offered` for that reason, and
+    this holds both: the one for a device outside the set, and the one for a
+    device this host cannot provide.
+
+    The pairing is what is asserted, not the wording. Each device has to appear
+    with its own figure in one clause — a message that listed every name and
+    every number separately would be the same failure with more characters.
+    """
+    with pytest.raises(ConfigError) as raised:
+        parsed(**{chatterbox.DEVICE: None})
+
+    monkeypatch.setattr(chatterbox, "_allocate", _unusable)
+    refusals = ["\n".join(raised.value.problems), "\n".join(chatterbox._probed("mps"))]
+
+    for message in refusals:
+        for device, rtf in chatterbox.DEVICES.items():
+            assert re.search(rf"{device}\b[^,;]*{re.escape(rtf)}", message), (
+                f"{device} is named without its measured {rtf} in: {message}"
+            )
+
+
+def _unusable(device: str) -> None:
+    """An accelerator this host does not have, stated rather than looked for.
+
+    The suite states the hardware it names — see `conftest`'s `cpu` — so the
+    device that fails here is decided by this function and not by whether the
+    machine running the tests happens to own a GPU.
+    """
+    raise RuntimeError("MPS backend is not available")
 
 
 # ------------------------------------------------- everything else it parses

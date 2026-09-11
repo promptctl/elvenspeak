@@ -78,10 +78,16 @@ Measured, on the hardware named, with `chatterbox-tts` 0.1.7 and torch 2.6.0.
 RTF is real time factor, so 1.0 is "as long to make as to play"; Piper is ~0.03
 and Kokoro ~0.77 on this class of machine.
 
-    device                          RTF, warm     resident
-    RTX 2070 (CUDA, fp32)           0.76 - 1.09   3.2 GiB VRAM + 3.5 GiB host
-    Apple M-series GPU (MPS, fp32)  2.33 - 4.30   ~4.8 GiB unified
-    CPU (12 cores, 4 threads)       7.62 - 33.3   4.69 GiB, 4.69 GiB peak
+    device  hardware                       RTF, warm     resident
+    cuda    RTX 2070 (fp32)                0.76 - 1.09   3.2 GiB VRAM + 3.5 GiB host
+    mps     Apple M-series GPU (fp32)      2.33 - 4.30   ~4.8 GiB unified
+    cpu     12 cores, 4 threads            7.62 - 33.3   4.69 GiB, 4.69 GiB peak
+
+The first column is what a deployment writes into `CHATTERBOX_DEVICE`, so this
+table is the answer to "which devices may I name" as well as "what do they cost".
+[`DEVICES`] quotes the RTF column and `tests/test_workflow.py` holds the two equal
+by device name, which is what keeps the accepted set and the measured set from
+ever being two different sets.
 
 These follow, and each of them is a decision in the code below.
 
@@ -126,6 +132,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from . import engine
@@ -194,13 +201,34 @@ _INHERENT: frozenset[engine.Capability] = frozenset()
 #: than returned whole because the streaming encoder is pumped from this iterator.
 _CHUNK_SAMPLES = 4096
 
-#: Every accelerator this engine will run on, by torch's own name for it.
+#: Every accelerator this engine will run on, by torch's own name for it, each
+#: mapped to the real time factor it was measured at.
 #:
 #: A closed set rather than anything torch accepts, because the point of naming a
 #: device is to be refused when the deployment and the hardware disagree, and
 #: `torch.device` accepts strings this engine has never been measured on. `cpu` is
 #: in the set and is deliberately not the default — see [`configure`].
-DEVICES = ("cuda", "mps", "cpu")
+#:
+#: [LAW:one-source-of-truth] The values are the RTF column of this module's
+#: header table, quoted character for character rather than rounded, so holding
+#: them equal to it is `==` and there is no rounding convention for a later edit
+#: to get wrong. That check is what makes "measured" a fact about this constant
+#: instead of a claim about it: a device added here with no row in the table
+#: turns `tests/test_workflow.py` red, which is the only reason the comment above
+#: is allowed to call the set measured.
+#:
+#: [LAW:no-shared-mutable-globals] Proxied rather than left a bare dict, because
+#: "closed set" has to be enforced by the type and not by everyone importing this
+#: module agreeing not to write to it. It was a tuple before it carried the
+#: figures, and a mapping that anything could reopen would be the one place this
+#: engine's refusal could be silently widened at runtime.
+DEVICES: "Mapping[str, str]" = MappingProxyType(
+    {
+        "cuda": "0.76 - 1.09",
+        "mps": "2.33 - 4.30",
+        "cpu": "7.62 - 33.3",
+    }
+)
 
 #: Environment variables this engine parses. Named here so `configure` and its
 #: failure messages spell each one once.
@@ -595,9 +623,10 @@ def configure(
     device = env.get(DEVICE, "").strip()
     if device not in DEVICES:
         problems.append(
-            f"{DEVICE}={device or '(unset)'!s} is not one of {', '.join(DEVICES)}; "
+            f"{DEVICE}={device or '(unset)'!s} is not one of {_offered()}; "
             f"name the accelerator this deployment has. There is no default: cpu "
-            f"runs this model at 8-33x real time and would boot anywhere"
+            f"is the one that would boot anywhere, and the figure beside it is why "
+            f"booting anywhere is not the same as serving"
         )
 
     try:
@@ -632,6 +661,22 @@ def _named(env: "Mapping[str, str]", variable: str, fallback: tuple[str, ...]) -
         for name in env.get(variable, ",".join(fallback)).split(",")
         if name.strip()
     )
+
+
+def _offered() -> str:
+    """Every device this engine runs on, each with what it was measured at.
+
+    [LAW:one-source-of-truth] Both refusals that name the device set render it
+    through here. They used to `', '.join(DEVICES)` and then hand-copy cpu's
+    figure into the sentence after — the same measurement written twice in this
+    module and a third time in the header both copies came from.
+
+    The cost travels with the name because these two refusals are where the
+    choice is actually made: an operator who did not know this setting existed
+    reads one of these lines and nothing else, and "there is no default" is an
+    explanation only if the line also shows what the candidates cost.
+    """
+    return ", ".join(f"{device} at RTF {rtf}" for device, rtf in DEVICES.items())
 
 
 def _allocate(device: str) -> None:
@@ -681,8 +726,7 @@ def _probed(device: str) -> tuple[str, ...]:
         return (
             f"{DEVICE}={device} is not usable on this host: "
             f"{type(error).__name__}: {error}. Name the accelerator this machine "
-            f"really has, one of {', '.join(DEVICES)} — cpu runs everywhere and "
-            f"this model at 8-33x real time",
+            f"really has, one of {_offered()} — cpu is the one that runs everywhere",
         )
     return ()
 
