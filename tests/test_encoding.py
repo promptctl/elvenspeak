@@ -223,6 +223,14 @@ def _modules_reaching_an_engine(root: str) -> set[str]:
         # `engine` itself.
         "settings",
         "provisioning",
+        # The prober ships in the package so a project that registered its own
+        # engine gets it by installing `elvenspeak` — which is worth nothing if
+        # having it means installing three engines it will never call. It reaches
+        # no first-party module at all today and the seam still belongs here: the
+        # obvious convenience is importing `formats` for the list of 28 that
+        # `FMT-8` checks, and that would couple a prober of *foreign* deployments
+        # to this checkout's own constants.
+        "prober",
     ],
 )
 def test_the_server_cannot_reach_a_concrete_engine(root: str):

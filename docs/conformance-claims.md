@@ -95,6 +95,30 @@ One constraint on that report belongs here, because it follows from the vocabula
 report that prints only failures cannot be read for coverage, and coverage is the
 number that tells you whether a green run meant anything.
 
+`piper-conformance-e16.3` implemented `AUTH-1` exactly as its `Evidence` column
+reads and `HEALTH-3` more broadly, and the asymmetry is worth recording. The
+prober discovers whether a deployment is guarded by asking `GET /v1/voices` with
+no key: a 401 or a 403 means a key is configured, those being the two statuses
+that mean refused for authentication rather than broken. Any other non-2xx is a
+listing defect and `DISC-1` reports it as one. `HEALTH-3` — `/health` answers
+without a key even where everything else needs one — is then fully decided
+against any guarded deployment whether or not the prober holds a key, so it is
+asked there. What decides it is the guard and not the key: against an unguarded
+deployment there is no guard for `/health` to answer from outside of, and no key
+makes it askable. `AUTH-1` is not decidable that way. Showing a guard is
+*closed* rather than merely broken takes a missing key refused, a wrong key
+refused, and the real key admitted, and without a key that last control cannot
+be established — a refusal from an endpoint that refuses everyone is
+indistinguishable from a correctly closed one.
+
+When the prober holds a key the deployment refuses, `AUTH-1` reports `unasked`,
+not `broken`. From outside, "the operator supplied the wrong key" and "this
+endpoint refuses everyone" are the same observation, and the first is
+overwhelmingly likelier; reporting `broken` would blame the deployment for the
+invocation, which is how a prober earns a reputation for crying wolf and stops
+being run. The blocker names `--key`, sending the reader to their own command
+line rather than to the server.
+
 ## Evidence: falsifiable, or only self-consistent
 
 Each claim below is marked with what decides it.
@@ -129,9 +153,9 @@ verdict against every row. Where a claim is already asked of a built image by
 
 | Id | Claim | Source | Evidence | Probed by |
 |---|---|---|---|---|
-| `HEALTH-1` | `GET /health` answers 200 with a non-empty `voices` array, or 503 with an empty one — status and body agree | README:51, api.py:793 | self-consistent | e16.3 |
+| `HEALTH-1` | `GET /health` answers 200 with a `voices` array of one or more non-empty strings, or 503 with an empty one — status and body agree | README:51, api.py:793 | self-consistent | e16.3 |
 | `HEALTH-2` | Every id in `/health`'s `voices` appears in `GET /v1/voices` and can be spoken | api.py:819 | falsifiable | e16.3 |
-| `HEALTH-3` | `/health` answers without a key even when one is configured | README:51, api.py:793 | falsifiable (only when the prober holds a key) | e16.3 |
+| `HEALTH-3` | `/health` answers without a key even when one is configured | README:51, api.py:793 | falsifiable (only against a guarded deployment) | e16.3 |
 | `AUTH-1` | With a key configured, a guarded endpoint answers 401 `{"detail":"invalid xi-api-key"}` to a missing or wrong `xi-api-key` | api.py:630 | falsifiable (only when the prober holds a key) | e16.3 |
 | `AUTH-2` | With no key configured, every endpoint answers without one | README:240 | falsifiable | e16.3 |
 

@@ -479,6 +479,91 @@ timeout that reads like a hang. `elvenspeak-router:2026.09.07.2` answers 200 wit
 `{"voices":["stub-voice"]}` under `--fleet`, and 503 with `{"voices":[]}` against
 a reachable but empty catalog.
 
+### Probing a deployment
+
+`smoke.py` asks a built image a fixed set of questions in CI and answers yes or
+no, because a red answer stops a publish. An operator pointing at a URL has a
+different question: not whether an artifact boots, but which of this service's
+documented promises *this deployment* keeps. `elvenspeak.prober` asks a running
+deployment the documented contract and answers claim by claim.
+
+```
+python -m elvenspeak.prober http://localhost:8000
+python -m elvenspeak.prober https://tts.example --key "$ELVENSPEAK_API_KEY"
+```
+
+`--key` is the `xi-api-key` to send, omitted against a deployment that
+configures none, and `--timeout` caps one request at 180 seconds. It ships in
+the package rather than in the test tree, so a project that registered its own
+engine gets it by installing `elvenspeak` and can hold this surface to account
+against that engine instead of taking it on trust — the difference between a
+promise and a warranty. It is standard-library Python and imports nothing from
+`elvenspeak`, the constants it is checking included: the deployment under test
+is routinely a different build than the one running the prober, so a check
+comparing the server's answer against this checkout would be asserting the
+implementation against itself and would go red on a version skew that is no
+defect.
+
+A claim comes back `held`, `broken` or `unasked`, and there is deliberately no
+fourth word. `unasked` means a precondition failed; it carries what blocked it,
+prints like any other verdict, and moves the exit code off 0. There is no
+`skipped`, for the reason `CLAUDE.md` refuses CI path filters and the suite
+dropped its skip markers: a skip is indistinguishable from a pass. A prober
+stands between a defect and a deployment somebody trusts, and a vocabulary that
+lets "I did not find out" render like "I found out and it was fine" defeats it.
+
+It exits `0` when every claim was asked and every claim held, `1` when at least
+one is broken, `2` when it could not run at all — bad arguments, or a base URL
+that never answered — and `3` when nothing is broken but something was
+unasked. Precedence is `2`, `1`, `3`, `0`. `3` is its own code because an
+operator reading a red run needs to know whether the deployment is wrong or
+whether the prober could not find out, and those call for different next
+actions.
+
+Every claim appears in the report with its verdict, `held` ones included,
+because a report printing only failures cannot be read for coverage. The totals
+split `falsifiable` claims — decided by something outside the deployment's own
+account — from `self-consistent` ones, checked only against what the
+deployment said about itself elsewhere. A router misreporting the fleet behind
+it passes every self-consistent claim there is, so one combined count would hide
+that whole question inside a green run.
+
+Every check names the specific fields this service promises and judges them past
+the parse, because the official SDK's response models are far looser than those
+promises. On SDK 2.68.0, `Voice` requires only `voice_id` and holds twenty-five
+fields optional, `name` and `category` among them, so a server answering
+`{"voices": [{"voice_id": "x"}]}` satisfies every one of them. That was verified
+by regression rather than by reading: deleting `name` from the voice payload
+left the SDK parsing cleanly, with no `ValidationError` raised at all. An SDK
+parse is the floor and never the verdict — a prober resting on one would call
+that deployment conformant while a real client rendered a voice picker full of
+blanks.
+
+Six claims are asked today: `HEALTH-1`, `HEALTH-2`, `HEALTH-3`, `AUTH-1`,
+`AUTH-2` and `DISC-1`. `docs/conformance-claims.md` publishes all fifty-seven
+checkable claims and assigns each to the issue that owns it; the rest — the 28
+output formats, the refusal bodies, the substitution contract, `model_id` read
+per voice, the unknown-route and wrong-method fall-throughs — arrive as rows
+in the prober's claim table. `tests/test_prober.py` holds that table equal to
+the document in both directions, so a claim id cannot be invented here and a
+claim the document assigns to this issue cannot go unasked.
+
+`HEALTH-2` and `AUTH-2` are the two that spend real synthesis, and on the
+slowest engine here that is where a run's time goes. `HEALTH-2` requires every
+voice `/health` publishes to be listed by `GET /v1/voices` and to really speak,
+so it costs one utterance per voice — every voice rather than a sample,
+because "every id" is the claim and a prober that speaks the first voice and
+reports `held` has not earned it. `AUTH-2` costs one per documented synthesis
+route, four today, and only against a deployment that configures no key. Which
+of them dominates is the voice count: a fleet makes it `HEALTH-2`, a single
+open voice makes it `AUTH-2`.
+
+Two outcomes are deliberately not the deployment's fault. A `--key` the
+deployment refuses, and a guarded deployment probed with no key at all, both
+come back `unasked` naming `--key` rather than `broken`: from outside, an
+operator's wrong key and an endpoint that refuses everyone are the same
+observation, and the report sends the reader to their own command line.
+
 ### Pointing openconv at it
 
 ```
