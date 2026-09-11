@@ -73,14 +73,21 @@ class Fake:
     #: is caught one check earlier as a voice that answered 200 with nothing.
     fixed_samples: int | None = None
 
-    #: Samples added to each successive synthesis, so no two answers are the same
-    #: length and two identical requests never come back identical. What a model
-    #: that samples does: Chatterbox's own draws of "Yes." have run from 14994 to
-    #: 191394 samples (gitea jobs 9106 and 9168), which is why `speaks.py` reads
-    #: no length against another unless the deployment repeats itself. Negative
-    #: counts down, which is how a test puts a later draw below an earlier one
-    #: without depending on the order four threads happen to run in.
-    redraws: int = 0
+    #: Samples added to each successive synthesis, per voice, so no two of that
+    #: voice's answers are the same length and two identical requests never come
+    #: back identical. What a model that samples does: Chatterbox's own draws of
+    #: "Yes." have run from 14994 to 191394 samples (gitea jobs 9106 and 9168),
+    #: which is why `speaks.py` reads no length against another unless the voice
+    #: repeats itself. Negative counts down, which is how a test puts a later draw
+    #: below an earlier one without depending on the order four threads happen to
+    #: run in.
+    #:
+    #: Per voice rather than per server because that is the case that matters:
+    #: behind the router one voice's backend samples while the next one's does
+    #: not, in one deployment, and a server that could only be all of one or all
+    #: of the other could not have caught reading one voice's repeatability off
+    #: another.
+    redraws: dict[str, int] = field(default_factory=dict)
 
     #: Multiplier applied when a speed is asked for. 0.5 is a real halving; 1.0
     #: is the engine that accepted the parameter and did nothing.
@@ -173,10 +180,11 @@ class Fake:
             count = int(count * self.speed_effect)
         if text == self.silent_on:
             return 0
-        if not self.redraws:
+        step = self.redraws.get(voice, 0)
+        if not step:
             return count
         with self._drawing:
-            return count + self.redraws * next(self._drawn)
+            return count + step * next(self._drawn)
 
     def audio(self, voice: str, text: str, speed: float | None) -> bytes:
         return b"\x00" * (
@@ -575,7 +583,7 @@ def test_a_deployment_that_redraws_is_not_held_to_lengths_it_never_promised(caps
     fake = Fake(
         voices=[dict(NOTHING), {"voice_id": "other", "capabilities": []}],
         answers_as={(NOTHING["voice_id"], speaks.SHORT_TEXT): speaks.LONGER_TEXT},
-        redraws=-10,
+        redraws={NOTHING["voice_id"]: -10, "other": -10},
         # Neither voice declares `timestamps`, which is Chatterbox's own
         # declaration, so the endpoint owes the 501 that goes with it.
         timestamps_status=501,
@@ -586,8 +594,49 @@ def test_a_deployment_that_redraws_is_not_held_to_lengths_it_never_promised(caps
     # A comparison that quietly did not run reads exactly like one that ran and
     # passed, so the skip is only honest if it is said out loud.
     printed = capsys.readouterr().out
-    assert "lengths are not read against each other" in printed
-    assert "no length was read against another" in printed
+    assert "plain answered one request twice with two different utterances" in printed
+    assert "its lengths are not read against each other" in printed
+    assert "a length was read against another for no voice here" in printed
+
+
+def test_a_steady_voice_is_still_held_to_its_lengths_behind_a_sampling_one():
+    """One voice's redrawing must not excuse the next voice's crossed answer.
+
+    The router puts these two in one deployment: each voice reaches its own
+    backend (`elvenspeak/router.py` sends `speak` to `self._speakers[voice.id]`),
+    so the first can sample while the last runs a fixed graph. Repeatability read
+    once off `voices[0]` and spent on both would skip the comparison here — and
+    what it skips is a real crossed response on a voice that never redraws
+    anything, which is the whole defect `_conform_concurrently` exists to catch.
+    """
+    fake = Fake(
+        voices=[dict(NOTHING), {"voice_id": "steady", "capabilities": []}],
+        redraws={NOTHING["voice_id"]: -10},
+        answers_as={("steady", speaks.SHORT_TEXT): speaks.LONGER_TEXT},
+        timestamps_status=501,
+    )
+    message = refusal(fake)
+    assert "callers at once" in message
+    assert "crossed or truncated" in message
+    assert "steady" in message
+
+
+def test_a_sampling_voice_is_not_refused_for_a_steady_one_s_repeatability():
+    """The same borrowing, in the direction that refuses a conformant image.
+
+    `voices[0]` runs a fixed graph and `voices[-1]` samples. One flag taken from
+    the first would hold the second to a length its backend never promised, which
+    is the false positive this whole change exists to retire — arriving under the
+    one name that sends a reader hunting a lock in `elvenspeak/chatterbox.py`.
+    """
+    fake = Fake(
+        voices=[dict(NOTHING), {"voice_id": "drifty", "capabilities": []}],
+        redraws={"drifty": -10},
+        answers_as={("drifty", speaks.SHORT_TEXT): speaks.LONGER_TEXT},
+        timestamps_status=501,
+    )
+    with serving(fake) as url:
+        speaks.conform(url, timeout=5.0)
 
 
 def test_each_request_is_bounded_by_the_work_in_front_of_it(monkeypatch):
