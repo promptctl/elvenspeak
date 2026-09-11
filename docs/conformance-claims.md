@@ -95,6 +95,27 @@ One constraint on that report belongs here, because it follows from the vocabula
 report that prints only failures cannot be read for coverage, and coverage is the
 number that tells you whether a green run meant anything.
 
+`piper-conformance-e16.3` implemented `AUTH-1` exactly as its `Evidence` column
+reads and `HEALTH-3` more broadly, and the asymmetry is worth recording. The
+prober discovers whether a deployment is guarded by asking `GET /v1/voices` with
+no key: a 401 means a key is configured. `HEALTH-3` — `/health` answers
+without a key even where everything else needs one — is then fully decided
+against any guarded deployment whether or not the prober holds a key, so it is
+asked there; holding one is sufficient for `HEALTH-3` and not necessary.
+`AUTH-1` is not decidable that way. Showing a guard is *closed* rather than
+merely broken takes a missing key refused, a wrong key refused, and the real key
+admitted, and without a key that last control cannot be established — a 401
+from an endpoint that refuses everyone is indistinguishable from a correctly
+closed one.
+
+When the prober holds a key the deployment refuses, `AUTH-1` reports `unasked`,
+not `broken`. From outside, "the operator supplied the wrong key" and "this
+endpoint refuses everyone" are the same observation, and the first is
+overwhelmingly likelier; reporting `broken` would blame the deployment for the
+invocation, which is how a prober earns a reputation for crying wolf and stops
+being run. The blocker names `--key`, sending the reader to their own command
+line rather than to the server.
+
 ## Evidence: falsifiable, or only self-consistent
 
 Each claim below is marked with what decides it.
