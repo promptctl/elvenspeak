@@ -625,6 +625,57 @@ def test_a_missing_asset_with_downloading_off_fails_loudly(tmp_path):
         kokoro_prepared(tmp_path, allow_download=False).open()
 
 
+def test_an_unnamed_espeak_is_refused_before_the_export_is_opened(tmp_path):
+    """The abort this engine used to take on its first request, moved to boot.
+
+    `espeakng-loader` aborts the process rather than failing to load, so an
+    unnamed library was not a 500 anyone could read: the server loaded its
+    voices, answered `/health` with 200, and died without a traceback on the
+    first real synthesis.
+
+    `tmp_path` holds no assets, and the test above shows what opening it costs
+    without this refusal — a `FileNotFoundError` from the asset install. Getting
+    `ConfigError` here is therefore the ordering claim as well as the refusal
+    one: nothing is fetched or opened before the library is named.
+    """
+    prepared = kokoro.configure(
+        {"KOKORO_MODELS_DIR": str(tmp_path), "KOKORO_ALLOW_DOWNLOAD": "0"},
+        frozenset(),
+        SERVES,
+    )
+
+    with pytest.raises(ConfigError) as raised:
+        prepared.open()
+
+    assert kokoro.ESPEAK_LIBRARY in str(raised.value)
+    # Every one of them, because the refusal's job is to tell an operator on any
+    # platform where to look — and because naming them is the whole of what this
+    # engine is allowed to do with the list.
+    for candidate in kokoro.ESPEAK_LIBRARY_CANDIDATES:
+        assert candidate in str(raised.value)
+
+
+def test_the_espeak_library_is_read_at_the_parse_and_refused_only_at_open():
+    """The bake needs no phonemes, so the shared parse must not refuse for them.
+
+    [LAW:one-source-of-truth] `configure` is the one place this engine holds a
+    string out of the environment, so it reads the variable — but `python -m
+    elvenspeak.bake` goes through the same parse and synthesizes nothing, and
+    refusing it for a library it will never call would make an espeak-less
+    machine unable to bake assets it could serve from elsewhere. Same split
+    `main._app` makes for `unsized`.
+    """
+    assert kokoro.configure({}, frozenset(), SERVES).espeak_library == ""
+    assert (
+        kokoro.configure(
+            {kokoro.ESPEAK_LIBRARY: "  /usr/lib/libespeak-ng.so.1  "},
+            frozenset(),
+            SERVES,
+        ).espeak_library
+        == "/usr/lib/libespeak-ng.so.1"
+    )
+
+
 def test_a_download_that_produces_nothing_is_a_failure_not_an_install(
     tmp_path, monkeypatch
 ):
