@@ -182,16 +182,19 @@ def _use_a_working_espeak() -> None:
 
 _use_a_working_espeak()
 
-#: The espeak-ng this machine turned out to have, settled once here rather than
-#: read from the process wherever a test needs it.
+#: The library `kokoro_prepared` names, and a path nothing here ever opens.
 #:
-#: [LAW:no-ambient-temporal-coupling] `clean_env` strips `ESPEAK_LIBRARY` along
-#: with every other setting a startup reads, so a helper that reached for the
-#: process environment later would hand `kokoro_prepared` a library or an empty
-#: string depending on which fixtures the calling test happened to request — and
-#: `Prepared.open` refuses on the empty one. Stated once, like `_unconfined`
-#: states an unconfined process, so the answer cannot depend on ordering.
-INSTALLED_ESPEAK = os.environ.get(kokoro.ESPEAK_LIBRARY, "")
+#: Stated rather than inherited from the machine, in the same spirit as
+#: `_unconfined` stating an unconfined process. No test in `test_kokoro.py`
+#: phonemizes — every `open` there runs against the `_Session` stand-in — so what
+#: those tests need is a deployment that *named* a library, not this machine's
+#: real one. Reading the real one would fail them on a host with no espeak-ng, or
+#: with one outside the four candidates above, for a library they never call.
+#:
+#: `Prepared.open` cannot tell the difference, because it is forbidden from
+#: looking at the path: it checks that a deployment named one and never that the
+#: name resolves. Which is the property these tests are exercising.
+NAMED_ESPEAK = "/stated-by-the-tests/libespeak-ng.so.1"
 
 
 #: The voice that a test wanting real audio needs installed, and where the image
@@ -271,12 +274,9 @@ def kokoro_prepared(
     some other way would keep passing after the parse it skipped stopped being
     able to produce that value.
 
-    The espeak library comes from `INSTALLED_ESPEAK`, which
-    `_use_a_working_espeak` settled at import, because `Prepared.open` refuses
-    without it. A machine with no espeak-ng therefore fails these tests with the
-    refusal's own message naming where to install one — which is the answer the
-    suite wants, since the tests that need real models fetch them rather than
-    skipping for exactly this reason.
+    It names `NAMED_ESPEAK` because `Prepared.open` refuses a deployment that
+    named no espeak library, and stating one keeps these tests independent of
+    whether the machine running them has espeak-ng at all.
     """
     return kokoro.configure(
         {
@@ -284,7 +284,7 @@ def kokoro_prepared(
             "KOKORO_MODELS_DIR": str(models_dir),
             "KOKORO_MODEL": model,
             "KOKORO_ALLOW_DOWNLOAD": "1" if allow_download else "0",
-            kokoro.ESPEAK_LIBRARY: INSTALLED_ESPEAK,
+            kokoro.ESPEAK_LIBRARY: NAMED_ESPEAK,
         },
         frozenset(),
         serves("kokoro"),
