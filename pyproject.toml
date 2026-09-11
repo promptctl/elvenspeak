@@ -81,6 +81,11 @@ chatterbox = ["chatterbox-tts>=0.1.7,<0.2", "setuptools<81"]
 # which is the same statement every other extra here makes.
 router = []
 dev = [
+    # The official client, so `test_sdk` can drive this server through the same
+    # code a real caller runs. A dev dependency and never a runtime one: nothing
+    # this package serves imports it, and the point of having it is that it was
+    # written by someone who has never read this repo.
+    "elevenlabs>=2.0",
     "httpx>=0.28",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

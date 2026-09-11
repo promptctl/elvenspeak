@@ -592,6 +592,23 @@ wheels = [
 ]
 
 [[package]]
+name = "elevenlabs"
+version = "2.68.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "requests" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/40/60/9bc77b0c6657c31f046a3a9dadba3ed99bcaf36bfffaada5c05abdfee63f/elevenlabs-2.68.0.tar.gz", hash = "sha256:21c4cef15d2f0afe1687f551b8cf57cf64a8547ec57abd0e1142f9749d4bd002", size = 812638, upload-time = "2026-09-11T16:00:19.118Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/28/12/f34cbf1feba57405510262679262057bbb390999e7b512343cd76d83a412/elevenlabs-2.68.0-py3-none-any.whl", hash = "sha256:061e79126819f40c61442d75c098c27744ba36ed3e0f6162db6fb1ba423ed878", size = 2143179, upload-time = "2026-09-11T16:00:17.159Z" },
+]
+
+[[package]]
 name = "elvenspeak"
 version = "1.0.0"
 source = { editable = "." }
@@ -606,6 +623,7 @@ chatterbox = [
     { name = "setuptools" },
 ]
 dev = [
+    { name = "elevenlabs" },
     { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -620,6 +638,7 @@ piper = [
 [package.metadata]
 requires-dist = [
     { name = "chatterbox-tts", marker = "extra == 'chatterbox'", specifier = ">=0.1.7,<0.2" },
+    { name = "elevenlabs", marker = "extra == 'dev'", specifier = ">=2.0" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28" },
     { name = "kokoro-onnx", marker = "extra == 'kokoro'", specifier = ">=0.6.1" },
