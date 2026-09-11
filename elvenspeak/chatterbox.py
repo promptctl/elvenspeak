@@ -446,12 +446,13 @@ class _Prepared:
         # ElevenLabs surface cannot reach an engine library through configuration.
         #
         # Two stages, and the order is the whole point. Everything answerable from
-        # the configuration alone is answered first, before a byte is fetched or a
-        # weight is loaded: a language code is a lookup in a table the import
-        # already carries, and a reference recording is a stat on `models_dir`.
-        # Neither reads `checkpoints`, so asking them after the fetch would spend
-        # ~3.06 GiB of download and then ~4.69 GiB of load to report a typo — and
-        # again on the next restart, for the operator's second typo.
+        # the configuration and the host alone is answered first, before a byte is
+        # fetched or a weight is loaded: a language code is a lookup in a table the
+        # import already carries, a reference recording is a stat on `models_dir`,
+        # and the device is a one-number round trip. None of them reads
+        # `checkpoints`, so asking them after the fetch would spend ~3.06 GiB of
+        # download and then ~4.69 GiB of load to report a typo — and again on the
+        # next restart, for the operator's second typo.
         #
         # Collected rather than raised one at a time, the way `configure` collects,
         # so one restart reports every problem this stage can see.
@@ -468,6 +469,17 @@ class _Prepared:
             if speaker != BUILTIN_SPEAKER
             and not _reference(self.models_dir, speaker).is_file()
         ]
+        # Probed here rather than in `configure`, for the reason `allow_download`
+        # is read here and the espeak library is read in `kokoro._Prepared.open`:
+        # `configure` is shared with `python -m elvenspeak.bake`. The difference
+        # is that the bake *does* reach the device — `acquire` loads the model
+        # through this same method to prove the checkpoints are readable — so this
+        # refuses both callers, and refuses them no earlier than the load already
+        # would. `from_local` gets there on its own; it gets there after the
+        # download, and it gets there saying `Torch not compiled with CUDA
+        # enabled`, which names neither the variable that chose cuda nor the fact
+        # that a deployment chose it.
+        problems += _probed(self.device)
         if problems:
             raise ConfigError(problems)
 
@@ -620,6 +632,59 @@ def _named(env: "Mapping[str, str]", variable: str, fallback: tuple[str, ...]) -
         for name in env.get(variable, ",".join(fallback)).split(",")
         if name.strip()
     )
+
+
+def _allocate(device: str) -> None:
+    """Puts one number on `device`, adds to it, and brings it back.
+
+    [LAW:effects-at-boundaries] The whole of this engine's contact with the
+    hardware outside a synthesis, kept to one named function so [`_probed`] is a
+    pure translation of what happened here into something an operator can read —
+    and so a test can hand that translation a failure without owning a GPU.
+
+    The round trip is the point. `torch.cuda.is_available()` answers a question
+    about the build and the driver; this one allocates, computes and copies back,
+    which is what a synthesis will ask of the device and is what a present but
+    unusable accelerator fails. It costs a millisecond and no checkpoints.
+    """
+    import torch
+
+    torch.zeros(1, device=device).add_(1).cpu()
+
+
+def _probed(device: str) -> tuple[str, ...]:
+    """What is wrong with running on `device` here — nothing, said as no problems.
+
+    [LAW:dataflow-not-control-flow] Returns a tuple so the caller appends it to
+    the problems it is already collecting rather than branching on a probe that
+    may or may not have found something. A usable device contributes no problems,
+    which is the same shape a deployment naming no bad languages contributes.
+
+    WHAT THIS PROVES, exactly: that the named accelerator exists here and will
+    allocate and compute. It does not prove the model fits — 3.2 GiB of VRAM on
+    CUDA and ~4.8 GiB unified on MPS, by the header's measurements — and an OOM
+    at `from_local` is still an OOM at `from_local`. Claiming more would make
+    this the kind of check whose passing means less than an operator reads into
+    it.
+
+    [LAW:no-silent-failure] Every exception is caught and none is swallowed:
+    torch's own words are carried into the message verbatim. The catch is broad
+    because the failures are not this module's to enumerate — `cuda` on a CPU
+    build raises `AssertionError: Torch not compiled with CUDA enabled`, `mps`
+    off Apple hardware raises `RuntimeError`, and a driver mismatch raises
+    whatever it raises. What they have in common is the only thing this needs:
+    the deployment named a device this host cannot give it.
+    """
+    try:
+        _allocate(device)
+    except Exception as error:
+        return (
+            f"{DEVICE}={device} is not usable on this host: "
+            f"{type(error).__name__}: {error}. Name the accelerator this machine "
+            f"really has, one of {', '.join(DEVICES)} — cpu runs everywhere and "
+            f"this model at 8-33x real time",
+        )
+    return ()
 
 
 def _fetch(models_dir: Path, allow_download: bool) -> Path:

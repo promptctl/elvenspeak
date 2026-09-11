@@ -728,6 +728,77 @@ def test_a_speaker_with_no_reference_recording_is_refused_at_boot(unfetched):
     assert chatterbox.REFERENCES_DIR in reported
 
 
+def test_a_device_the_host_cannot_provide_is_refused_before_anything_is_fetched(
+    unfetched, monkeypatch
+):
+    """The device is answerable from the host, so it is answered with the typos.
+
+    `from_local` reaches the same verdict on its own, and reaches it in the two
+    worst places: after ~3.06 GiB of download, and inside torch, where the words
+    are `Torch not compiled with CUDA enabled` — true, and naming neither the
+    variable that chose cuda nor the fact that a deployment chose it. So the
+    probe is a round trip of one number, it happens beside the language and
+    speaker checks, and it keeps torch's sentence while adding the two facts
+    torch cannot know.
+
+    Which device is missing is STATED here rather than inherited from the
+    machine. A test that asked for the accelerator this host genuinely lacks
+    would assert the opposite thing on a CUDA box and nothing at all on some
+    third one — the shape that cost `kokoro_prepared` a review round on #53.
+
+    `probed` pins the device as well as the refusal. A probe that always asked
+    about `cpu` would satisfy every other assertion here while proving that a
+    deployment's `cuda` was never looked at.
+    """
+    refused = "cuda"
+    probed: list[str] = []
+
+    def allocate(device: str) -> None:
+        probed.append(device)
+        if device == refused:
+            raise AssertionError("Torch not compiled with CUDA enabled")
+
+    monkeypatch.setattr(chatterbox, "_allocate", allocate)
+
+    with pytest.raises(ConfigError) as raised:
+        chatterbox_prepared(device=refused).open()
+
+    reported = "\n".join(raised.value.problems)
+    assert chatterbox.DEVICE in reported
+    assert refused in reported
+    assert "Torch not compiled with CUDA enabled" in reported
+    assert probed == [refused]
+
+
+def test_the_bake_is_refused_the_device_too_because_it_loads_the_model_onto_it(
+    unfetched, monkeypatch
+):
+    """Where this engine parts company with kokoro's espeak refusal, deliberately.
+
+    `kokoro._Prepared.open` refuses an unnamed espeak library and `acquire` does
+    not, because the bake synthesizes nothing and must not be refused for a
+    library it will never call. The device is not that: `acquire` loads the model
+    through this same `_open`, on this same device, to prove 3.06 GiB of
+    checkpoints are readable — so a bake naming a device the builder lacks is a
+    bake that was going to fail at `from_local` regardless.
+
+    Refusing it here is therefore no new requirement, only the same one made
+    legible and made early. This test exists because the reverse edit reads like
+    consistency: moving the probe into `open` alone would look like following the
+    kokoro precedent, and would quietly hand the bake back its 3.06 GiB traceback.
+    """
+
+    def allocate(device: str) -> None:
+        raise RuntimeError("MPS backend is not available")
+
+    monkeypatch.setattr(chatterbox, "_allocate", allocate)
+
+    with pytest.raises(ConfigError) as raised:
+        chatterbox_prepared(device="mps").acquire()
+
+    assert "MPS backend is not available" in "\n".join(raised.value.problems)
+
+
 def test_checkpoints_with_no_builtin_voice_are_refused_before_the_model_loads(
     tmp_path, monkeypatch
 ):

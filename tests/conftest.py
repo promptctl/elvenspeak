@@ -212,18 +212,20 @@ KOKORO_VOICES = ("af_heart", "am_michael")
 #: The accelerator the suite opens Chatterbox on, and the one setting this engine
 #: refuses to guess for itself.
 #:
-#: `cpu` is the floor rather than a preference: it is the only device every
-#: machine that runs this suite has, and a default naming anything else would
-#: fail the run on the machines least able to diagnose it. It is also slow —
-#: measured at 8-33x real time — so a developer with an accelerator says so
-#: through the engine's own variable and gets the same tests several times
-#: faster. Read here rather than in each caller, because a second spelling of
-#: "which device do the tests use" is free to disagree with this one.
+#: Stated rather than read from `CHATTERBOX_DEVICE`, in the same spirit as
+#: `NAMED_ESPEAK` above — and for a reason that only became true when
+#: `_Prepared._open` began round-tripping a tensor through this device before it
+#: fetches anything. Whatever this names is now hardware the run really touches,
+#: so inheriting it would fail tests about speakers and languages on any machine
+#: whose environment named an accelerator it does not have — the Fedora-espeak
+#: shape, arriving through the one value every one of these fixtures shares.
 #:
-#: Spelled through `chatterbox.DEVICE` for the reason `_ENVIRONMENT` reads the
-#: same constant: the variable has one name, and it lives in the module that
-#: parses it.
-CHATTERBOX_DEVICE = os.environ.get(chatterbox.DEVICE, "cpu")
+#: `cpu` is the floor rather than a preference: it is the only device every
+#: machine that runs this suite has. Naming it costs nothing, because no test
+#: here synthesizes — every caller stands in `from_local`, and the real model is
+#: driven by `speaks.py` against the published image. An accelerator would have
+#: nothing in this suite to make faster.
+CHATTERBOX_DEVICE = "cpu"
 
 #: One language for the shared fixtures, against the engine's own two.
 #:
