@@ -136,6 +136,29 @@ _INHERENT = frozenset({engine.Capability.SPEED})
 #: boundaries for a consumer to get wrong.
 _CHUNK_SAMPLES = 4096
 
+#: phonemizer's own documented override, and the only answer this engine accepts
+#: to "which espeak-ng". Spelled once because three files need the same spelling
+#: — this module refuses without it, the Dockerfile sets it, and the test suite
+#: finds one to set — and a second spelling is a deployment that sets the other.
+ESPEAK_LIBRARY = "PHONEMIZER_ESPEAK_LIBRARY"
+
+#: Where a system espeak-ng usually is, by platform. Printed in [`_Prepared.open`]'s
+#: refusal and never read by this engine for anything else.
+#:
+#: This list is not a search path, and turning it into one is the specific edit
+#: this comment exists to refuse. An engine that probed these and took whichever
+#: existed would be a silent fallback inside the component whose entire job is to
+#: fail loudly — and the failure it would hide is not a 500 but a process abort,
+#: because the `espeakng-loader` wheel aborts rather than failing to load, which
+#: is why phonemizer's own system-wide fallback never fires. Naming the four
+#: places an operator should look is help; choosing one for them is the bug.
+ESPEAK_LIBRARY_CANDIDATES = (
+    "/opt/homebrew/lib/libespeak-ng.dylib",
+    "/usr/local/lib/libespeak-ng.dylib",
+    "/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1",
+    "/usr/lib/aarch64-linux-gnu/libespeak-ng.so.1",
+)
+
 
 class KokoroEngine:
     """Speech from a Kokoro export, opened and ready.
@@ -232,6 +255,13 @@ class _Prepared:
     #: speak. Arrives from [`configure`] because the name it was derived from is
     #: the key this module is registered under, which this module never learns.
     serves: frozenset[str]
+    #: What `PHONEMIZER_ESPEAK_LIBRARY` named, or empty. Consulted by [`open`] and
+    #: deliberately not by [`acquire`], for the same reason `allow_download` is
+    #: read by one of them: phonemes are wanted only by something about to speak,
+    #: and the bake speaks nothing. Carried as a field rather than read from the
+    #: process by whoever needs it, so [`configure`] stays the one place in this
+    #: engine that holds a string out of the environment.
+    espeak_library: str
 
     def acquire(self) -> tuple[engine.Voice, ...]:
         """Puts this engine's assets on disk, and says what they turned out to be.
@@ -262,7 +292,33 @@ class _Prepared:
         return tuple(_declaring(model, installed).values())
 
     def open(self) -> KokoroEngine:
-        """Opens the export and returns the engine that speaks every named voice."""
+        """Opens the export and returns the engine that speaks every named voice.
+
+        Refuses an unnamed espeak-ng before opening anything. This engine
+        phonemizes through the library `PHONEMIZER_ESPEAK_LIBRARY` names, and the
+        `espeakng-loader` wheel that `kokoro_onnx` reaches for instead *aborts the
+        process* on its first synthesis rather than failing to load — so an
+        unnamed library is not a 500 an operator can read, it is a server that
+        loaded its voices, answered `/health` with 200, and then died without a
+        traceback on the first real request.
+
+        Here rather than in [`configure`], which is the checkpoint for everything
+        else this engine reads, because the parse is shared with the bake: the
+        bake synthesizes nothing and must not be refused for a library it will
+        never call. It is the same split `main._app` makes for `unsized`, and the
+        same one `allow_download` makes within this class.
+        """
+        if not self.espeak_library:
+            # [LAW:no-silent-failure] Names where to look; never looks. See
+            # `ESPEAK_LIBRARY_CANDIDATES` for why that distinction is the point.
+            raise ConfigError(
+                [
+                    f"{ESPEAK_LIBRARY} is unset; kokoro phonemizes through "
+                    f"espeak-ng and would abort the process on its first "
+                    f"synthesis. Install espeak-ng and name its library, "
+                    f"commonly one of: {', '.join(ESPEAK_LIBRARY_CANDIDATES)}"
+                ]
+            )
         model, installed, sample_rate = _open(
             self.keys, self.models_dir, self.model, self.allow_download, self.serves
         )
@@ -370,6 +426,12 @@ def configure(
         problems.append(str(error))
         allow_download = True
 
+    # Read here because this is the one place that holds `env`, and *not* refused
+    # here: it is the one setting on this engine that only a server needs, so the
+    # refusal waits for [`_Prepared.open`] and the bake goes through untroubled.
+    # Absent from `problems` for that reason rather than by omission.
+    espeak_library = env.get(ESPEAK_LIBRARY, "").strip()
+
     if problems:
         raise ConfigError(problems)
 
@@ -379,6 +441,7 @@ def configure(
         model=model,
         allow_download=allow_download,
         serves=serves,
+        espeak_library=espeak_library,
     )
 
 

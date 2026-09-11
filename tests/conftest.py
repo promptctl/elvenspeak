@@ -70,7 +70,9 @@ from elvenspeak.engine import (
 #: The engines' half stays spelled out: those modules parse their own prefixes
 #: privately and expose no equivalent set, so a copy is the honest shape here.
 #: Where one does own its name as a constant, that constant is read rather than
-#: spelled again — Piper's and Kokoro's are literals because they expose none.
+#: spelled again — Piper's are literals because it exposes none, and Kokoro's own
+#: prefix is literal for the same reason, but the espeak library it refuses to
+#: boot without is a name three files have to agree on, so it owns that one.
 _ENVIRONMENT = (
     *sorted(settings_mod.VOCABULARY),
     "PIPER_VOICES",
@@ -80,6 +82,7 @@ _ENVIRONMENT = (
     "KOKORO_MODELS_DIR",
     "KOKORO_MODEL",
     "KOKORO_ALLOW_DOWNLOAD",
+    kokoro.ESPEAK_LIBRARY,
     router.CONSUL_URL,
     router.BACKEND_API_KEY,
     chatterbox.MODELS_DIR,
@@ -152,27 +155,46 @@ def _use_a_working_espeak() -> None:
     it — and it aborts rather than failing to load, so the fallback to a
     system-wide espeak that phonemizer already has never fires.
 
-    `PHONEMIZER_ESPEAK_LIBRARY` is phonemizer's own documented override and is
-    read by Kokoro, so this needs nothing from the engine: a developer with
-    espeak-ng installed gets working tests, and an environment that already set
-    the variable keeps its own answer. The container installs espeak-ng from
-    apt and sets this in the Dockerfile, so nothing here is load-bearing for a
-    deployment.
+    `ESPEAK_LIBRARY` is phonemizer's own documented override and is the variable
+    Kokoro refuses to boot without, so this needs nothing from the engine: a
+    developer with espeak-ng installed gets working tests, and an environment
+    that already set the variable keeps its own answer. The container installs
+    espeak-ng from apt and sets this in the Dockerfile, so nothing here is
+    load-bearing for a deployment.
+
+    [LAW:one-source-of-truth] The name and the candidates are the engine's, read
+    from it rather than spelled again — two lists of where espeak lives would be
+    free to disagree about the platform added to one of them.
+
+    That the engine may not do what this function does is the whole distinction,
+    and it survives sharing the list. A *test harness* choosing a library for the
+    machine it is running on is a convenience at the edge; the *engine* choosing
+    one would be a silent fallback inside the component whose job is to fail
+    loudly. Shared data, opposite permissions — see the constant's own comment.
     """
-    if os.environ.get("PHONEMIZER_ESPEAK_LIBRARY"):
+    if os.environ.get(kokoro.ESPEAK_LIBRARY):
         return
-    for candidate in (
-        "/opt/homebrew/lib/libespeak-ng.dylib",
-        "/usr/local/lib/libespeak-ng.dylib",
-        "/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1",
-        "/usr/lib/aarch64-linux-gnu/libespeak-ng.so.1",
-    ):
+    for candidate in kokoro.ESPEAK_LIBRARY_CANDIDATES:
         if Path(candidate).exists():
-            os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = candidate
+            os.environ[kokoro.ESPEAK_LIBRARY] = candidate
             return
 
 
 _use_a_working_espeak()
+
+#: The library `kokoro_prepared` names, and a path nothing here ever opens.
+#:
+#: Stated rather than inherited from the machine, in the same spirit as
+#: `_unconfined` stating an unconfined process. No test in `test_kokoro.py`
+#: phonemizes — every `open` there runs against the `_Session` stand-in — so what
+#: those tests need is a deployment that *named* a library, not this machine's
+#: real one. Reading the real one would fail them on a host with no espeak-ng, or
+#: with one outside the four candidates above, for a library they never call.
+#:
+#: `Prepared.open` cannot tell the difference, because it is forbidden from
+#: looking at the path: it checks that a deployment named one and never that the
+#: name resolves. Which is the property these tests are exercising.
+NAMED_ESPEAK = "/stated-by-the-tests/libespeak-ng.so.1"
 
 
 #: The voice that a test wanting real audio needs installed, and where the image
@@ -251,6 +273,10 @@ def kokoro_prepared(
     `kokoro.configure` rather than reaching past it. A test that built the engine
     some other way would keep passing after the parse it skipped stopped being
     able to produce that value.
+
+    It names `NAMED_ESPEAK` because `Prepared.open` refuses a deployment that
+    named no espeak library, and stating one keeps these tests independent of
+    whether the machine running them has espeak-ng at all.
     """
     return kokoro.configure(
         {
@@ -258,6 +284,7 @@ def kokoro_prepared(
             "KOKORO_MODELS_DIR": str(models_dir),
             "KOKORO_MODEL": model,
             "KOKORO_ALLOW_DOWNLOAD": "1" if allow_download else "0",
+            kokoro.ESPEAK_LIBRARY: NAMED_ESPEAK,
         },
         frozenset(),
         serves("kokoro"),
