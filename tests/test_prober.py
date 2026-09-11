@@ -877,6 +877,36 @@ def test_a_guard_that_admits_a_wrong_key_is_broken() -> None:
     assert "the guard is not closed" in verdicts["AUTH-1"].why
 
 
+def test_a_403_guard_is_not_reported_as_a_guard_standing_open() -> None:
+    """Both are `broken`; the reason is the part an operator acts on.
+
+    A single `!= 401` used to answer the two cases either side of this one, so a
+    deployment that shut the caller out and one that waved an unusable key
+    through came back in the same words — and the words were the open guard's.
+    A closed 403 guard reported as a bypass sends an operator hunting something
+    that is not there, which is the explanation failing in the one direction
+    that gets a prober switched off. Holding the two reasons apart is the
+    assertion; that they are both `broken` is why the verdict alone cannot make
+    it.
+
+    The statuses are written out rather than read from [`prober.AUTH_REFUSALS`]:
+    a case list derived from the constant under test shrinks with it and stays
+    green.
+    """
+    closed = guarded_deployment(lambda _, sent: sent != "probe-key", status=403)
+    with serving(closed) as base_url:
+        refusing = _verdicts(base_url, key="probe-key")["AUTH-1"]
+
+    admits_anything = guarded_deployment(lambda _, sent: sent is None)
+    with serving(admits_anything) as base_url:
+        admitting = _verdicts(base_url, key="probe-key")["AUTH-1"]
+
+    assert refusing.word == "broken" and admitting.word == "broken"
+    assert "the guard is not closed" in admitting.why
+    assert "the guard is not closed" not in refusing.why
+    assert "403" in refusing.why and "401" in refusing.why
+
+
 def test_a_refusal_carrying_another_detail_is_broken() -> None:
     """The 401 is not the whole claim: a caller has to be able to read it.
 

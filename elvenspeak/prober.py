@@ -673,10 +673,26 @@ def probe_auth_1(deployment: Deployment) -> Verdict:
     unusable = ((None, "no xi-api-key"), (key + "-wrong", "a wrong xi-api-key"))
     for sent, described in unusable:
         refused = _ask(deployment.target, "/v1/voices", sent)
-        if refused.status != 401:
+        if refused.status == 200:
             return Broken(
-                f"GET /v1/voices answered {refused.status} to {described} while "
-                "admitting the real one — the guard is not closed"
+                f"GET /v1/voices answered 200 to {described} while admitting "
+                "the real one — the guard is not closed"
+            )
+        if refused.status != 401:
+            # Split from the admission above because one branch could not
+            # carry both. A deployment that shut the caller out and one that
+            # let an unusable key through are opposite facts, and the single
+            # `!= 401` told the first of them "the guard is not closed" —
+            # sending an operator to hunt a bypass that is not there, which is
+            # the explanation lying in the one direction that gets a prober
+            # switched off. [`AUTH_REFUSALS`] is deliberately not reused here:
+            # it answers whether a door is closed, which is discovery's
+            # question, and `AUTH-1` asks which door — only 401 is that one.
+            return Broken(
+                f"GET /v1/voices answered {refused.status} to {described}, "
+                "not the documented 401 — it did not let the caller in, so "
+                "the guard is not standing open; what is wrong is the status "
+                "it refuses with"
             )
         detail = refused.json("GET /v1/voices with an unusable key")
         if not isinstance(detail, dict) or detail.get("detail") != INVALID_KEY_DETAIL:
