@@ -132,6 +132,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from . import engine
@@ -215,11 +216,19 @@ _CHUNK_SAMPLES = 4096
 #: instead of a claim about it: a device added here with no row in the table
 #: turns `tests/test_workflow.py` red, which is the only reason the comment above
 #: is allowed to call the set measured.
-DEVICES = {
-    "cuda": "0.76 - 1.09",
-    "mps": "2.33 - 4.30",
-    "cpu": "7.62 - 33.3",
-}
+#:
+#: [LAW:no-shared-mutable-globals] Proxied rather than left a bare dict, because
+#: "closed set" has to be enforced by the type and not by everyone importing this
+#: module agreeing not to write to it. It was a tuple before it carried the
+#: figures, and a mapping that anything could reopen would be the one place this
+#: engine's refusal could be silently widened at runtime.
+DEVICES: "Mapping[str, str]" = MappingProxyType(
+    {
+        "cuda": "0.76 - 1.09",
+        "mps": "2.33 - 4.30",
+        "cpu": "7.62 - 33.3",
+    }
+)
 
 #: Environment variables this engine parses. Named here so `configure` and its
 #: failure messages spell each one once.

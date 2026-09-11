@@ -307,6 +307,14 @@ _PEAK = re.compile(r"([\d.]+) GiB peak")
 #: and a pattern that only saw whole numbers would read straight past them.
 _RTF = re.compile(r"([\d.]+)\s*(?:-|to)\s*([\d.]+)\s*(?:x real time|times real time)")
 
+#: How far ahead of a figure [`about`] will look for the device it belongs to.
+#: About a sentence: the widest real gap in this repository is the README's
+#: "because cpu runs that model at 8-33x real time", and the rest are shorter.
+#: Deliberately not wide enough to reach the previous paragraph — a figure whose
+#: only nearby device is one someone mentioned earlier for another reason is a
+#: figure this cannot check, and it is refused rather than guessed at.
+_NEARBY = 120
+
 #: A line break inside a comment or docstring, with whatever marker and
 #: indentation continue it. Collapsed before matching, because a quotation is
 #: prose and prose wraps: the `Dockerfile`'s cpu figure sat across "8-33x real" /
@@ -351,7 +359,7 @@ def quoting() -> list[Path]:
     )
 
 
-def assigned(name: str, source: str):
+def assigned(name: str, source: str, where: str):
     """The value of a module-level assignment, parsed out of `source`.
 
     Parsed rather than imported, for the reason the test below gives about
@@ -359,40 +367,66 @@ def assigned(name: str, source: str):
     current, and a check that read the constant from the module and the table
     from the file would be comparing two things that merely happened to agree.
     One read of one text answers both.
+
+    `where` is the source's name, taken as an argument rather than reached for,
+    so the refusal names the file the caller actually passed. A wrapping call is
+    unwrapped to its one argument: `DEVICES` is a `MappingProxyType` around the
+    literal, and it is the literal this is after.
     """
     for node in ast.parse(source).body:
-        for target in getattr(node, "targets", ()):
+        # `x = ...` carries `targets`, `x: T = ...` carries one `target`; read as
+        # one list so this does not branch on which spelling the module used.
+        for target in getattr(node, "targets", ()) or (getattr(node, "target", None),):
             if getattr(target, "id", None) == name:
-                return ast.literal_eval(node.value)
-    raise AssertionError(f"{name} is not assigned at module level in {ENGINE_SOURCE.name}")
+                value = node.value
+                if isinstance(value, ast.Call):
+                    (value,) = value.args
+                return ast.literal_eval(value)
+    raise AssertionError(f"{name} is not assigned at module level in {where}")
 
 
 def rounds_to(measured: str, quoted: str) -> bool:
     """Whether `quoted` is `measured` rounded to the precision `quoted` wrote.
 
-    Prose rounds — "8-33x real time" for a row measuring 7.62 - 33.3 — and how
-    coarsely is the writer's business, because a sentence explaining why cpu is
-    not a fallback is not improved by two more decimals. What is not the writer's
-    business is rounding to a number the row does not hold, which is the whole
-    distance between a quotation and an invention.
+    Prose rounds, and how coarsely is the writer's business: cpu is measured at
+    7.62 to 33.3 and every sentence explaining why it is not a fallback says
+    "8-33x real time", which two more decimals would not improve. What is not the
+    writer's business is rounding to a number the row does not hold, which is the
+    whole distance between a quotation and an invention.
     """
     places = len(quoted.partition(".")[2])
     return f"{float(measured):.{places}f}" == quoted
 
 
 def about(text: str, before: int, devices: "Iterable[str]") -> str:
-    """Which device the figure at `before` is quoting: the last one named ahead of it.
+    """Which device the figure at `before` is quoting: the last one named beside it.
 
     A range on its own cannot be checked against the right row: mps measures
     "2.3 - 4.3x real time", and the same figure written about any other device is
     badly wrong, yet the two are the same characters. Only the prose around a
     figure says which row it meant. So the rule this enforces is that a figure is
     written next to the device it belongs to, and a figure with no device named
-    ahead of it is refused rather than checked against a guess — this docstring
+    beside it is refused rather than checked against a guess — this docstring
     included, which is how the rule was first proved to bite.
+
+    BESIDE MEANS WITHIN [`_NEARBY`], not anywhere earlier in the file. Review
+    found the whole-file version passing on luck: `rounds_to`'s docstring quoted
+    a cpu figure whose nearest "cpu" was in an unrelated comment sixty lines up,
+    so rewording that comment would have misattributed a docstring that was never
+    about a device. An anchor a paragraph away is not evidence of what a figure
+    is about.
+
+    Word boundaries for the same reason in miniature: "mps" sits inside "jumps"
+    and "champs", and a figure anchored to the wrong row either fails confusingly
+    or — the direction that matters — coincidentally passes and hides real drift.
     """
-    at, device = max((text.rfind(name, 0, before), name) for name in devices)
-    return device if at >= 0 else ""
+    window = text[max(0, before - _NEARBY) : before]
+    found = [
+        (found.start(), name)
+        for name in devices
+        for found in re.finditer(rf"\b{re.escape(name)}\b", window)
+    ]
+    return max(found)[1] if found else ""
 
 
 def test_every_quotation_of_chatterbox_cost_matches_what_it_measured():
@@ -434,7 +468,7 @@ def test_every_quotation_of_chatterbox_cost_matches_what_it_measured():
     }
     assert rows, "no rows found in chatterbox's measurement table"
 
-    devices = assigned("DEVICES", source)
+    devices = assigned("DEVICES", source, ENGINE_SOURCE.name)
     assert tuple(rows) == tuple(devices), (
         f"the table measures {tuple(rows)}; DEVICES accepts {tuple(devices)}"
     )
