@@ -75,12 +75,11 @@ class Fake:
 
     #: Samples added to each successive synthesis, per voice, so no two of that
     #: voice's answers are the same length and two identical requests never come
-    #: back identical. What a model that samples does: Chatterbox's own draws of
-    #: "Yes." have run from 14994 to 191394 samples (gitea jobs 9106 and 9168),
-    #: which is why `speaks.py` reads no length against another unless the voice
-    #: repeats itself. Negative counts down, which is how a test puts a later draw
-    #: below an earlier one without depending on the order four threads happen to
-    #: run in.
+    #: back identical. What a model that samples does — the spread of one text's
+    #: draws is measured in `speaks.APART`, and it is why `speaks.py` reads no
+    #: length against another unless the voice repeats itself. Negative counts
+    #: down, which is how a test puts a later draw below an earlier one without
+    #: depending on the order four threads happen to run in.
     #:
     #: Per voice rather than per server because that is the case that matters:
     #: behind the router one voice's backend samples while the next one's does
@@ -88,6 +87,26 @@ class Fake:
     #: of the other could not have caught reading one voice's repeatability off
     #: another.
     redraws: dict[str, int] = field(default_factory=dict)
+
+    #: Voices whose successive draws carry different waveforms at whatever length
+    #: they came out — the other half of what a sampler does, and the half
+    #: [`redraws`] cannot express. `speaks._repeatable` compares audio rather than
+    #: sample counts precisely because counts are quantised to whole frames and
+    #: two draws land on one length by coincidence, never on one waveform. A
+    #: server that could only vary its lengths made equal length equal bytes, so
+    #: a `_repeatable` rewritten to compare `.samples` passed every test here
+    #: while reinstating the flake it was written to retire: the claim lived only
+    #: in a docstring, and a claim only a comment defends is one that decays.
+    rewaveforms: set[str] = field(default_factory=set)
+
+    #: Draws of [`silent_on`] answered before the silence starts. 0 is a text this
+    #: server never speaks. 1 is the intermittent shape Kokoro actually had — 15
+    #: of 16 short lines silent — and it is the one that reaches the repeatability
+    #: probe, whose second draw of `SHORT_TEXT` is what decides whether the
+    #: voice's lengths are read at all. A server silent from the first draw is
+    #: refused in the loop above and never gets that far, so it could not have
+    #: caught a glitched probe buying a voice an exemption from its own checks.
+    answers_before_silence: int = 0
 
     #: Multiplier applied when a speed is asked for. 0.5 is a real halving; 1.0
     #: is the engine that accepted the parameter and did nothing.
@@ -125,11 +144,16 @@ class Fake:
     #: measured, leaving the numbers with nothing to be checked against.
     omits_audio: bool = False
 
-    #: The draw [`redraws`] steps, and the lock it is stepped under. The
-    #: concurrent section puts four callers inside this server at once, and two
-    #: of them advancing one unguarded counter would be the fake inventing a race
-    #: of its own to then fail on.
+    #: The draws [`redraws`], [`rewaveforms`] and [`answers_before_silence`] step,
+    #: and the one lock they are stepped under. The concurrent section puts four
+    #: callers inside this server at once, and two of them advancing one unguarded
+    #: counter would be the fake inventing a race of its own to then fail on.
+    #: Taken and released around each `next` rather than held across the draw,
+    #: because a lock held while another is taken is the deadlock a test double
+    #: has no business teaching anyone about.
     _drawn: Iterator[int] = field(default_factory=itertools.count, init=False, repr=False)
+    _waved: Iterator[int] = field(default_factory=itertools.count, init=False, repr=False)
+    _hushed: Iterator[int] = field(default_factory=itertools.count, init=False, repr=False)
     _drawing: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     #: Status for the timestamps endpoint; 501 is the refusal a voice that does
@@ -153,6 +177,17 @@ class Fake:
     engine: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     _calls: int = 0
+
+    def _stepped(self, counter: Iterator[int]) -> int:
+        """The next value of one of this server's draw counters, taken once.
+
+        [LAW:single-enforcer] The one place a counter is advanced, so "guarded by
+        `_drawing`" is a fact about this method rather than a convention three
+        call sites keep. Three counters and one lock: each orders a draw against
+        the others of its own kind, never against another kind.
+        """
+        with self._drawing:
+            return next(counter)
 
     def voice_listing(self) -> dict:
         self._calls += 1
@@ -178,19 +213,31 @@ class Fake:
         )
         if speed is not None:
             count = int(count * self.speed_effect)
-        if text == self.silent_on:
+        if text == self.silent_on and self._stepped(self._hushed) >= self.answers_before_silence:
             return 0
         step = self.redraws.get(voice, 0)
         if not step:
             return count
-        with self._drawing:
-            return count + step * next(self._drawn)
+        return count + step * self._stepped(self._drawn)
 
     def audio(self, voice: str, text: str, speed: float | None) -> bytes:
-        return b"\x00" * (
-            self.samples(voice, text, speed) * speaks.BYTES_PER_SAMPLE
-            + (1 if self.odd_bytes else 0)
+        """The bytes one synthesis returns, filled with one repeated sample.
+
+        The filler is what a draw of a [`rewaveforms`] voice varies: a different
+        byte each time, so two draws of one voice can land on the same sample
+        count and still be two different utterances. Every other voice answers in
+        zeros, which is what this has always returned — the filler is a *value*
+        this method reads and never a second way of building a body
+        ([LAW:dataflow-not-control-flow]).
+
+        Counted before the filler is drawn, because [`samples`] takes the same
+        lock and a single `threading.Lock` does not nest.
+        """
+        counted = self.samples(voice, text, speed) * speaks.BYTES_PER_SAMPLE + (
+            1 if self.odd_bytes else 0
         )
+        filler = self._stepped(self._waved) % 256 if voice in self.rewaveforms else 0
+        return bytes([filler]) * counted
 
     def timed(self, voice: str, text: str) -> dict:
         """The body `/with-timestamps` returns: the audio and its timeline.
@@ -394,6 +441,70 @@ def test_a_voice_that_goes_silent_on_a_short_utterance_is_refused():
     assert "no audio at all" in message
 
 
+def test_a_voice_that_goes_silent_only_on_the_repeatability_probe_is_refused(capsys):
+    """A glitched probe must not buy a voice an exemption from its own checks.
+
+    The probe draws `SHORT_TEXT` a second time to ask whether the voice answers
+    an identical request identically, and that answer decides whether any length
+    of that voice is read against another. So a voice that answered the first
+    draw and goes silent on the second — Kokoro's intermittent defect, one draw
+    in sixteen speaking — differs from itself for a reason that is not sampling,
+    and reading that as "this voice samples" switches off the very comparison
+    that would have caught it. A defect disabling its own detector, which is the
+    shape of the bug this whole check was written to retire.
+
+    Refused as the silence it is, then: the probe is drawn through `_speak` like
+    every other synthesis in the file and audited before anything reads it.
+
+    The verdict is what this asserts, and the message alone would not have. Left
+    unaudited, the probe's silence still ended in a refusal naming this very text
+    — three draws later, from the concurrent section, which audited its own
+    answers — so a test reading only the message passed against the defect it was
+    written for. What separates the two is whether this voice was ever called a
+    sampler: that line is printed only by a run that read an empty probe as a
+    redraw, and the exemption is granted at the moment it is printed
+    ([LAW:behavior-not-structure]).
+    """
+    message = refusal(Fake(silent_on=speaks.SHORT_TEXT, answers_before_silence=1))
+    assert repr(speaks.SHORT_TEXT) in message
+    assert "no audio at all" in message
+    assert "with two different utterances" not in capsys.readouterr().out
+
+
+def test_a_voice_that_goes_silent_when_asked_to_speak_faster_is_refused():
+    """Zero samples is shorter than three quarters of anything.
+
+    The pace check asks whether a declared `speed` shortened the audio, and an
+    engine that answers a speeded request with no audio at all satisfies it
+    completely — measured: `conform` passed this server and printed "speed varies
+    the pace as declared (2400 -> 0 samples at 2.0x)" about an answer carrying
+    nothing. A check a defect passes by being worse than the defect it looks for
+    gates nothing ([LAW:no-silent-failure]).
+
+    Served as `speed_effect=0.0` rather than a field of its own: "the engine's
+    speed handling returns no audio" is already sayable as a value this fake
+    reads, and the deviation belongs in the value ([LAW:no-mode-explosion]).
+    """
+    message = refusal(Fake(speed_effect=0.0))
+    assert "no audio at all" in message
+
+
+def test_a_silence_on_the_longer_text_is_named_as_silence_not_as_a_short_answer():
+    """The refusal has to name the defect, not the first check it happens to trip.
+
+    `LONGER_TEXT` is drawn only by the two comparisons, never by the loop that
+    speaks every voice, so a voice silent on it arrives at a length comparison
+    first. Unaudited, that read `0 <= 400` and refused it as "more text did not
+    make more audio" — true of the numbers and wrong about the engine, sending a
+    reader after a length defect in a server that had gone silent. Two different
+    faults are not owed one message.
+    """
+    message = refusal(Fake(silent_on=speaks.LONGER_TEXT))
+    assert repr(speaks.LONGER_TEXT) in message
+    assert "no audio at all" in message
+    assert "more text did not make more audio" not in message
+
+
 def test_a_declared_speed_that_does_nothing_is_refused():
     """The silent drop the declaration exists to rule out."""
     message = refusal(Fake(speed_effect=1.0))
@@ -564,12 +675,12 @@ def test_a_deployment_that_redraws_is_not_held_to_lengths_it_never_promised(caps
     """The long tail, which is sampling and not a crossing.
 
     Chatterbox forces EOS on a long tail and pads a short utterance toward a
-    ceiling the long text is bounded by too: "Yes." has drawn 191394 samples on
-    `builtin-es` and 127008 on `builtin-en` where these 65 characters drew 97020
-    and 88200 (gitea jobs 9168, 9190, 9194). Every leg measured does it, the
-    greenest of them most of all, so an engine that samples answers four
-    characters at more length than sixty-five with nothing crossed and no caller
-    truncated — and refusing that would refuse every image chatterbox can build.
+    ceiling the long text is bounded by too, so an engine that samples answers
+    four characters at more length than sixty-five with nothing crossed and no
+    caller truncated — and refusing that would refuse every image chatterbox can
+    build. Every leg measured does it, the greenest of them most of all; the
+    draws that say so are in `speaks.APART`, which is the one place they are
+    written down.
 
     Served with the same inversion
     [`test_a_concurrent_caller_answered_at_the_wrong_length_is_refused`] is
@@ -637,6 +748,38 @@ def test_a_sampling_voice_is_not_refused_for_a_steady_one_s_repeatability():
     )
     with serving(fake) as url:
         speaks.conform(url, timeout=5.0)
+
+
+def test_two_draws_of_one_length_carrying_two_waveforms_are_not_a_repeat(capsys):
+    """A coincidence of length is not an identical answer.
+
+    Every draw this server makes comes back at the *same sample count* and a
+    different waveform, which is the case `_repeatable` compares audio to survive:
+    sample counts are quantised to whole frames, so two draws of a sampler land on
+    one length by coincidence often enough to matter and never on one waveform.
+    Read as a repeat, this voice would then be held to lengths its backend never
+    promised — and it is served with the inversion that makes that refusal happen,
+    so the verdict here is a refusal or a pass and never a log line alone.
+
+    That is the point of asserting it this way. `_repeatable` rewritten to compare
+    `first.samples == again.samples` is a one-word edit that passed every other
+    test in this file, because a fake filling its bodies with zeros made equal
+    length equal bytes — the defect could not be expressed, so the whole argument
+    for comparing audio lived in a docstring and nothing held the code to it
+    ([LAW:behavior-not-structure]).
+    """
+    fake = Fake(
+        voices=[dict(NOTHING)],
+        rewaveforms={NOTHING["voice_id"]},
+        answers_as={(NOTHING["voice_id"], speaks.SHORT_TEXT): speaks.LONGER_TEXT},
+        timestamps_status=501,
+    )
+    with serving(fake) as url:
+        speaks.conform(url, timeout=5.0)
+
+    printed = capsys.readouterr().out
+    assert "plain answered one request twice with two different utterances" in printed
+    assert "a length was read against another for no voice here" in printed
 
 
 def test_each_request_is_bounded_by_the_work_in_front_of_it(monkeypatch):

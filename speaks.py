@@ -103,8 +103,20 @@ LONGER_TEXT = "One two three four five, six seven eight nine ten, eleven twelve.
 #: 9168) and 127008 on `builtin-en` (job 9190), both past every recorded draw of
 #: these 65 characters — 97020 and 88200. Job 9190's leg was green, and every leg
 #: measured, green and red alike, forces EOS on a long tail: the greenest of them
-#: does it twelve times and the red publish leg seven, so the padding is the
-#: engine's ordinary sampling and not the defect the red legs were named after.
+#: does it twelve times and the red publish leg (job 9194) seven, so the padding
+#: is the engine's ordinary sampling and not the defect the red legs were named
+#: after.
+#:
+#: Those four characters have also drawn as little as 14994 samples (job 9106),
+#: so one text's own draws span better than twelvefold — further than any pair of
+#: texts here is apart, which is the same fact said as a ratio.
+#:
+#: [LAW:one-source-of-truth] The one home for these figures. `tests/test_speaks.py`
+#: reasons from them in two places and cites this name rather than re-quoting
+#: them, because three copies of a measurement are three chances to drift and the
+#: drift is silent — a reader would be told what the evidence shows by whichever
+#: copy they happened to read.
+#:
 #: A bare `<` between two draws of an engine that samples therefore says nothing
 #: about which request they answer, and every comparison below asks
 #: [`_repeatable`] first.
@@ -292,7 +304,17 @@ def _speak(
     *,
     timeout: float,
 ) -> Utterance:
-    """One synthesis of `text` in `voice`, as raw PCM.
+    """One synthesis of `text` in `voice`, as raw PCM, audited before it returns.
+
+    [LAW:parse-dont-validate] The audit is here, in the draw, and not at the call
+    sites: a length read off an answer nobody audited is the defect this file
+    exists to catch, wearing a number. Held at the call sites it depended on five
+    callers each remembering, and three of them did not — the repeatability
+    probe, the serial [`APART`] pair and the `speed` pair all went unaudited. The
+    third was the expensive one. An engine answering a speeded request with no
+    audio at all passed the pace check and was reported as honouring the
+    parameter, because zero samples is shorter than three quarters of anything
+    ([LAW:no-silent-failure]). A bar that a worse defect clears is not a bar.
 
     `speed` is sent only when a caller asked for one, so an engine that does not
     honour it is not handed a `voice_settings` it would then name in
@@ -319,7 +341,9 @@ def _speak(
     reply = _exchange(request, timeout, asking)
     if reply.status != 200:
         raise _refused(asking, reply)
-    return Utterance(audio=reply.body, ignored=reply.headers.get("x-elvenspeak-ignored", ""))
+    spoken = Utterance(audio=reply.body, ignored=reply.headers.get("x-elvenspeak-ignored", ""))
+    _audible(voice, text, spoken)
+    return spoken
 
 
 def _audible(voice_id: str, text: str, spoken: Utterance) -> None:
@@ -330,6 +354,12 @@ def _audible(voice_id: str, text: str, spoken: Utterance) -> None:
     held to exactly the bar the serial ones are. A second, local reading of the
     same two rules is how contention becomes the one condition under which a
     broken answer passes.
+
+    Two entry points, and they are the whole census: [`_speak`], which audits
+    every answer it draws, and [`_conform_timings`], whose audio arrives inside a
+    JSON body it never drew through [`_speak`]. Checkable by eye rather than
+    taken on trust — they are the only two places in this file where bytes
+    become an [`Utterance`].
 
     The text is named rather than only the voice, because a voice is asked for
     more than one utterance now and the short one is where an engine is known to
@@ -495,7 +525,6 @@ def conform(base_url: str, timeout: float) -> None:
     for voice in voices:
         for text in (TEXT, SHORT_TEXT):
             spoken = _speak(base_url, voice.id, text, timeout=budget(text))
-            _audible(voice.id, text, spoken)
             said[voice.id, text] = spoken
             print(
                 f"speaks: {voice.id} said {text!r} in {spoken.samples} samples",
@@ -750,10 +779,6 @@ def _conform_concurrently(
         answered = [
             (voice, tuple(caller.result() for caller in pair)) for voice, pair in started
         ]
-
-    for voice, pair in answered:
-        for text, spoken in zip(APART, pair, strict=True):
-            _audible(voice.id, text, spoken)
 
     # Compared inside one voice and never across two. Across, this would be
     # arithmetic on two speaking rates, and that two voices of one engine speak
