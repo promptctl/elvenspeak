@@ -98,17 +98,18 @@ number that tells you whether a green run meant anything.
 `piper-conformance-e16.3` implemented `AUTH-1` exactly as its `Evidence` column
 reads and `HEALTH-3` more broadly, and the asymmetry is worth recording. The
 prober discovers whether a deployment is guarded by asking `GET /v1/voices` with
-no key: a 401 means a key is configured. `HEALTH-3` — `/health` answers
+no key: a 401 or a 403 means a key is configured, those being the two statuses
+that mean refused for authentication rather than broken. Any other non-2xx is a
+listing defect and `DISC-1` reports it as one. `HEALTH-3` — `/health` answers
 without a key even where everything else needs one — is then fully decided
 against any guarded deployment whether or not the prober holds a key, so it is
 asked there. What decides it is the guard and not the key: against an unguarded
-deployment there is no guard for `/health` to answer from outside of, and no
-key makes it askable.
-`AUTH-1` is not decidable that way. Showing a guard is *closed* rather than
-merely broken takes a missing key refused, a wrong key refused, and the real key
-admitted, and without a key that last control cannot be established — a 401
-from an endpoint that refuses everyone is indistinguishable from a correctly
-closed one.
+deployment there is no guard for `/health` to answer from outside of, and no key
+makes it askable. `AUTH-1` is not decidable that way. Showing a guard is
+*closed* rather than merely broken takes a missing key refused, a wrong key
+refused, and the real key admitted, and without a key that last control cannot
+be established — a refusal from an endpoint that refuses everyone is
+indistinguishable from a correctly closed one.
 
 When the prober holds a key the deployment refuses, `AUTH-1` reports `unasked`,
 not `broken`. From outside, "the operator supplied the wrong key" and "this

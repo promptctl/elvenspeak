@@ -347,6 +347,26 @@ def test_an_unreachable_url_exits_two_rather_than_reporting_on_a_deployment() ->
     assert prober.main(["http://127.0.0.1:1", "--timeout", "2"]) == 2
 
 
+@pytest.mark.parametrize("given", ["-1", "0", "nan", "inf", "soon"])
+def test_a_timeout_no_socket_can_take_is_a_usage_error_and_not_a_verdict(
+    given: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An operator's typo is the operator's, and `1` would say it was the server's.
+
+    `--timeout -1` reached `socket.settimeout` inside `urlopen` and raised
+    `ValueError`, which is neither of the two exceptions `_ask` turns into a
+    blocker — so it propagated past `main` and the shell saw `1`, this project's
+    code for *at least one claim is broken*. A deployment nobody probed was being
+    reported as non-conformant. `2` is the code for a run that could not start,
+    which is what a refused invocation is.
+    """
+    with pytest.raises(SystemExit) as refused:
+        prober.main(["http://127.0.0.1:1", "--timeout", given])
+
+    assert refused.value.code == 2, f"--timeout {given} exited {refused.value.code}"
+    assert "--timeout" in capsys.readouterr().err
+
+
 # ------------------------------------- the deployments that lie past the parse
 
 
@@ -717,19 +737,115 @@ def test_a_read_answering_any_other_status_keyless_breaks_auth_2(status: int) ->
     assert str(status) in verdicts["AUTH-2"].why
 
 
-def test_health_refusing_a_keyless_caller_behind_a_guard_is_broken() -> None:
+@pytest.mark.parametrize("refusal", [401, 403])
+def test_health_refusing_a_keyless_caller_behind_a_guard_is_broken(
+    refusal: int,
+) -> None:
     """`HEALTH-3` is the claim that `/health` is outside the guard.
 
     Nomad's health checker holds no key, so a deployment that put `/health`
     behind its own guard is one every checker reads as down — which is the
     failure this claim is for, and a deployment this service cannot produce.
+
+    Both refusals, written out rather than read from `prober.AUTH_REFUSALS`: a
+    case list derived from the tuple it polices shrinks silently when the tuple
+    does, which is how the per-read gap survived three rounds green.
     """
-    guarded = guarded_deployment(lambda path, _: path in ("/v1/voices", "/health"))
+    guarded = guarded_deployment(
+        lambda path, _: path in ("/v1/voices", "/health"), status=refusal
+    )
     with serving(guarded) as base_url:
         verdicts = _verdicts(base_url, key="probe-key")
 
     assert verdicts["HEALTH-3"].word == "broken"
-    assert "401" in verdicts["HEALTH-3"].why
+    assert str(refusal) in verdicts["HEALTH-3"].why
+
+
+@pytest.mark.parametrize("refusal", [401, 403])
+def test_a_listing_refusing_a_keyless_caller_is_a_guard_whichever_status(
+    refusal: int,
+) -> None:
+    """Guarded is decided by what a refusal *is*, not by this service's own 401.
+
+    A deployment behind a gateway that answers 403 read as unguarded, and three
+    claims then reported something other than authentication: `AUTH-1` and
+    `HEALTH-3` said "nothing is guarded here" of a deployment that is, and
+    `DISC-1` called the refusal a listing defect. The guard is the precondition
+    all three turn on, so one wrong reading of it is three wrong answers, none of
+    them naming the key.
+    """
+    guarded = guarded_deployment(
+        lambda path, sent: path == "/v1/voices" and sent != "probe-key",
+        status=refusal,
+    )
+    with serving(guarded) as base_url:
+        words = _words(base_url, key="probe-key")
+
+    assert words["HEALTH-3"] == "held"
+    assert words["DISC-1"] == "held"
+    assert words["HEALTH-2"] == "held"
+    # The open arm has no subject against a guarded deployment, and says so.
+    assert words["AUTH-2"] == "unasked"
+
+
+def test_a_guard_refusing_403_breaks_auth_1_rather_than_being_excused() -> None:
+    """The refusal `AUTH-1` promises is a 401, so a 403 is that promise broken.
+
+    Naming it is the point: the deployment really is guarded, and it guards with
+    a status the documented contract does not offer, which is a conformance
+    failure a caller meets as a refusal it cannot tell from a proxy's. A
+    carve-out letting 403 pass here would trade a wrong `unasked` for a wrong
+    `held`.
+    """
+    guarded = guarded_deployment(lambda _, sent: sent != "probe-key", status=403)
+    with serving(guarded) as base_url:
+        verdicts = _verdicts(base_url, key="probe-key")
+
+    assert verdicts["AUTH-1"].word == "broken"
+    assert "403" in verdicts["AUTH-1"].why
+
+
+@pytest.mark.parametrize("refusal", [401, 403])
+def test_a_key_the_guard_refuses_blocks_the_catalogue_whichever_status(
+    refusal: int,
+) -> None:
+    """A refused key is the prober's problem behind either refusal.
+
+    The same reading decides both ends of the guard: if only a 401 counted as
+    "the key you gave me was refused", a 403 came back as a `Reply` and `DISC-1`
+    called the operator's typo a listing this deployment answered wrongly —
+    crying wolf at the server for what the command line did.
+    """
+    guarded = guarded_deployment(
+        lambda path, sent: path != "/health" and sent != "probe-key", status=refusal
+    )
+    with serving(guarded) as base_url:
+        verdicts = _verdicts(base_url, key="not-the-key")
+
+    words = {name: verdict.word for name, verdict in verdicts.items()}
+    assert "broken" not in words.values(), words
+    assert words["DISC-1"] == "unasked"
+    assert "--key" in verdicts["DISC-1"].blocker
+
+
+@pytest.mark.parametrize("status", [404, 500])
+def test_a_listing_answering_an_error_is_a_broken_listing_and_not_a_guard(
+    status: int,
+) -> None:
+    """Only the two auth refusals are a guard; every other non-2xx is a defect.
+
+    A deployment whose `/v1/voices` is broken or unrouted is not a deployment
+    with a key configured, and reading it as one would ask `AUTH-1` and
+    `HEALTH-3` of a guard that does not exist while `DISC-1` — which reports
+    this accurately — lost the only claim that owns the listing.
+    """
+    with serving(shutting("/v1/voices", status=status)) as base_url:
+        verdicts = _verdicts(base_url, key="probe-key")
+
+    assert verdicts["DISC-1"].word == "broken"
+    assert str(status) in verdicts["DISC-1"].why
+    assert verdicts["AUTH-1"].word == "unasked"
+    assert verdicts["HEALTH-3"].word == "unasked"
 
 
 def test_a_closed_guard_holds_auth_1() -> None:

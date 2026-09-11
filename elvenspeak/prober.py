@@ -80,6 +80,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import math
 import sys
 import urllib.error
 import urllib.parse
@@ -115,11 +116,19 @@ DEFAULT_TIMEOUT_SECONDS = 180.0
 #: might produce.
 INVALID_KEY_DETAIL = "invalid xi-api-key"
 
+#: The two statuses that mean *refused for authentication*. Both, because a
+#: foreign deployment — or the gateway in front of one — shuts a keyless caller
+#: out with either, and reading 401 alone reports a 403-guarded deployment as
+#: open. Every other non-2xx stays an answer to be judged: a 500 or a 404 on
+#: `/v1/voices` is a listing owed, not a guard ([LAW:single-enforcer] — which
+#: status is a closed door is decided here and nowhere else).
+AUTH_REFUSALS = (401, 403)
+
 #: The read endpoints `AUTH-2` asks without a key, `{voice_id}` filled from the
-#: catalogue: every gettable path README publishes, because a deployment guarding
-#: only the per-voice ones would pass a check of the rest. It cannot be derived
-#: from `elvenspeak.api` — that is this checkout's route table, not the remote
-#: build's ([LAW:one-source-of-truth] reaches only as far as one program).
+#: catalogue: every gettable path README publishes but `/health`, which is
+#: `HEALTH-3`'s subject. It cannot be derived from `elvenspeak.api` — that is
+#: this checkout's route table, not the remote build's ([LAW:one-source-of-truth]
+#: reaches only as far as one program).
 DOCUMENTED_READS = (
     "/v1/voices",
     "/v1/models",
@@ -379,11 +388,11 @@ class Deployment:
     def listed(self) -> Reply:
         """`GET /v1/voices`' answer, or [`Blocked`] if it could not be asked.
 
-        A 401 never arrives here: [`discover`] turns the one status meaning "the
-        prober could not get in" into the blocker, so every reply this hands back
-        is one the deployment really composed and every claim below is free to
-        judge it ([LAW:single-enforcer] — which status is a closed door is decided
-        in one place).
+        No [`AUTH_REFUSALS`] status arrives here: [`discover`] turns the ones
+        meaning "the prober could not get in" into the blocker, so every reply
+        this hands back is one the deployment really composed and every claim
+        below is free to judge it ([LAW:single-enforcer] — which status is a
+        closed door is decided in one place).
         """
         if isinstance(self.listing, Blocked):
             raise self.listing
@@ -434,7 +443,7 @@ def discover(target: Target) -> Deployment:
     """
     health = _ask(target, "/health", key=None)
     keyless = _ask(target, "/v1/voices", key=None)
-    guarded = keyless.status == 401
+    guarded = keyless.status in AUTH_REFUSALS
     # The keyless answer is reused when nothing is guarded, so an open deployment
     # is asked for its listing once rather than twice.
     try:
@@ -462,11 +471,12 @@ def _keyed_listing(target: Target) -> Reply:
             "so its catalogue could not be read"
         )
     answer = _ask(target, "/v1/voices", key=target.key)
-    if answer.status == 401:
+    if answer.status in AUTH_REFUSALS:
         raise Blocked(
-            "GET /v1/voices refused the xi-api-key the prober was given, so this "
-            "deployment's catalogue could not be read — check --key before "
-            "reading anything below as a fault of the deployment"
+            f"GET /v1/voices answered {answer.status} to the xi-api-key the "
+            "prober was given, so this deployment's catalogue could not be read "
+            "— check --key before reading anything below as a fault of the "
+            "deployment"
         )
     return answer
 
@@ -617,10 +627,11 @@ def probe_health_3(deployment: Deployment) -> Verdict:
             "so /health has no guard to be outside of"
         )
     status = deployment.health.status
-    if status == 401:
+    if status in AUTH_REFUSALS:
         return Broken(
-            "GET /health refused a keyless request 401 — every health checker "
-            "this deployment has must then hold a key, and Nomad's does not"
+            f"GET /health refused a keyless request {status} — every health "
+            "checker this deployment has must then hold a key, and Nomad's does "
+            "not"
         )
     return Held(f"answered {status} keyless while /v1/voices refuses a keyless read")
 
@@ -643,8 +654,8 @@ def probe_auth_1(deployment: Deployment) -> Verdict:
     key = deployment.target.key
     if key is None:
         return Unasked(
-            "the prober holds no --key, so a 401 here cannot be told apart from "
-            "an endpoint that refuses everyone"
+            "the prober holds no --key, so a refusal here cannot be told apart "
+            "from an endpoint that refuses everyone"
         )
     admitted = _ask(deployment.target, "/v1/voices", key)
     if admitted.status != 200:
@@ -1018,6 +1029,27 @@ def probe(target: Target) -> Report:
     )
 
 
+def _timeout_seconds(given: str) -> float:
+    """`given` as a timeout a socket can really take, or an `argparse` refusal.
+
+    [LAW:parse-dont-validate] The one crossing between an operator's word and a
+    number this file spends on a socket, so nothing inland asks again. A
+    negative, NaN or infinite value reaches `socket.settimeout` as a `ValueError`
+    or an `OverflowError` — neither of them what [`_ask`] catches — and the
+    traceback leaves `main` with exit `1`, the code for a deployment whose
+    claims are broken, spent on the operator's own invocation.
+    """
+    try:
+        seconds = float(given)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{given!r} is not a number") from None
+    if not (math.isfinite(seconds) and seconds > 0):
+        raise argparse.ArgumentTypeError(
+            f"{given!r} is not a finite positive number of seconds"
+        )
+    return seconds
+
+
 def main(argv: list[str] | None = None) -> int:
     """Probe one deployment, print the report, and return its exit code.
 
@@ -1039,7 +1071,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--timeout",
-        type=float,
+        type=_timeout_seconds,
         default=DEFAULT_TIMEOUT_SECONDS,
         help=f"seconds one request may take (default {DEFAULT_TIMEOUT_SECONDS:g})",
     )
