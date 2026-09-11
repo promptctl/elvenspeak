@@ -616,10 +616,11 @@ def loads(tmp_path, monkeypatch):
     """`open` with the fetch answered by a snapshot and the load by [`_Model`].
 
     Everything between those two runs for real — the language table is consulted,
-    the reference recordings are stat'd, `conds.pt` is looked for, the speaker and
-    language loops build the catalogue — which is where every property below
-    lives. What is skipped is the ~3.06 GiB download and the ~4.69 GiB load of
-    weights that no assertion here reads a single number out of.
+    the reference recordings are stat'd, the device is round-tripped, `conds.pt`
+    is looked for, the speaker and language loops build the catalogue — which is
+    where every property below lives. What is skipped is the ~3.06 GiB download
+    and the ~4.69 GiB load of weights that no assertion here reads a single
+    number out of.
 
     Yields the models it loaded, because "how many were loaded" is the shape of
     the memory ceiling this suite used to be killed by: two live models measured

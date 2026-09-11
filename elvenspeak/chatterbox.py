@@ -637,10 +637,10 @@ def _named(env: "Mapping[str, str]", variable: str, fallback: tuple[str, ...]) -
 def _allocate(device: str) -> None:
     """Puts one number on `device`, adds to it, and brings it back.
 
-    [LAW:effects-at-boundaries] The whole of this engine's contact with the
-    hardware outside a synthesis, kept to one named function so [`_probed`] is a
-    pure translation of what happened here into something an operator can read —
-    and so a test can hand that translation a failure without owning a GPU.
+    [LAW:effects-at-boundaries] The probe's entire contact with the hardware,
+    kept to one named function so [`_probed`] is a pure translation of what
+    happened here into something an operator can read — and so a test can hand
+    that translation a failure without owning a GPU.
 
     The round trip is the point. `torch.cuda.is_available()` answers a question
     about the build and the driver; this one allocates, computes and copies back,
