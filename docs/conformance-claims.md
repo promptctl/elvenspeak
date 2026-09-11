@@ -1,7 +1,7 @@
 # What a prober can check, and what a verdict means
 
-Fifty-four of this service's documented promises can be checked over HTTP against a
-running deployment. Forty-nine of them can be *falsified* — decided against
+Fifty-seven of this service's documented promises can be checked over HTTP against a
+running deployment. Fifty-two of them can be *falsified* — decided against
 something outside the deployment's own account of itself — and five can only be
 checked for agreement with what the deployment said about itself elsewhere.
 
@@ -110,7 +110,7 @@ is real and worth checking, but a deployment wrong in both places passes it. The
 are not weak claims — four of the five are the only way a router's account of the
 fleet behind it is observable at all. They are simply not proof on their own, and
 because there are only five of them a report that mixes them into one count hides
-the entire router question inside a 54-claim green.
+the entire router question inside a 57-claim green.
 
 Many claims are mixed: the prober picks its input self-consistently (take a
 `model_id` the voice does not list) and then judges the outcome falsifiably (it must
@@ -195,10 +195,22 @@ that refuses everything from one that ignores everything.
 | `CAP-5` | `GET /v1/models`' `capabilities` is the union over the offered voices | README:111, api.py:1246 | self-consistent | e16.5 |
 | `CAP-6` | A parameter the server cannot honour is named in `x-elvenspeak-ignored` rather than dropped — including a body field this build has never heard of | README:22, api.py:267 | falsifiable | e16.5 |
 | `CAP-7` | `x-elvenspeak-ignored` is absent, not empty, when everything asked for was honoured | api.py:776 | falsifiable | e16.5 |
+| `CAP-8` | A `language_code` the resolved voice does not speak is named in `x-elvenspeak-ignored`; one it does speak is not | api.py:773 | falsifiable | e16.5 |
+| `CAP-9` | A blank, whitespace-only or absent `language_code` expresses no preference, and is never reported ignored | api.py:206 | falsifiable | e16.5 |
+| `CAP-10` | `en-GB`, `es_MX` and `ES` are the same request — a tag is reduced to its ISO 639-1 family before it is compared | engine.py:89, api.py:220 | falsifiable | e16.5 |
 
 Observed: an invented body field (`invented_2027`) came back named in
 `x-elvenspeak-ignored`, so `CAP-6` holds for fields added after this build — which
 is the half of rule 2 a fixed list of parameter names would never have caught.
+
+`CAP-9`, `CAP-10` and `REF-6` are the three answers a `language_code` can get, and
+they are worth probing together because two of them look alike from outside. A tag
+naming *no* language — `""`, `"   "`, absent — is absence, and the caller is told
+nothing. A tag naming a *different* language is a preference that could not be met,
+and is named back. A value that is not a string at all is refused. Observed: `""`,
+`"  "`, `null` and an omitted field all returned 200 with no `x-elvenspeak-ignored`;
+`"fr"` returned 200 naming `language_code`; `5` returned 422. `en-GB` was honoured
+against an `en` voice, which is `CAP-10`.
 
 ### Substitution
 
@@ -247,7 +259,7 @@ fact about the encoder instead of about the utterance." Verifying that an `mp3_*
 | `REF-3` | Whitespace-only `text` is a 422 | README:33, api.py:163 | falsifiable | e16.4 |
 | `REF-4` | `text` longer than 5000 characters is a 422 | README:34, api.py:142 | falsifiable | e16.4 |
 | `REF-5` | A refusal carries no `x-elvenspeak-*` headers — the bound on README:115's "every synthesis response" | README:115, observed | falsifiable | e16.4 |
-| `REF-6` | A `language_code` that is not a string is a 422, where a blank one is merely reported ignored | api.py:206 | falsifiable | e16.4 |
+| `REF-6` | A `language_code` that is not a string is a 422 | api.py:224 | falsifiable | e16.4 |
 | `REF-7` | An unmodelled body field is kept and reported, never a 422 | api.py:148 | falsifiable | e16.4 |
 
 **The two refusal bodies have different shapes, and e16.4 has to decide about it.**
