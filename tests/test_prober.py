@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 from conftest import DECLARED_VOICES
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
 from fleet import engine_app, serving
 
 from elvenspeak import prober
@@ -413,6 +413,10 @@ def test_the_lying_deployment_fixture_passes_when_it_tells_the_truth() -> None:
     assert words["DISC-1"] == "held"
     assert words["HEALTH-1"] == "held"
     assert words["HEALTH-2"] == "held"
+    # This fixture routes neither per-voice read, so both answer 404 — and
+    # `AUTH-2` holds anyway, because the claim is about keylessness and a path a
+    # build does not serve is a different promise than the one being asked.
+    assert words["AUTH-2"] == "held"
 
 
 def test_a_voice_missing_its_name_is_broken() -> None:
@@ -540,3 +544,61 @@ def test_a_listing_that_answers_an_error_breaks_the_claim_about_the_listing() ->
     assert verdicts["DISC-1"].word == "broken"
     assert "500" in verdicts["DISC-1"].why
     assert verdicts["HEALTH-2"].word == "unasked"
+
+
+def partly_guarded_deployment(shut: str) -> FastAPI:
+    """[`lying_deployment`], with `shut` alone refusing a keyless caller 401.
+
+    The state `AUTH-2` exists to catch, and the one this service cannot be made
+    to produce: a key covering part of its surface, so `GET /v1/voices` reads as
+    open while something behind it does not. A middleware rather than a route,
+    because the paths worth shutting include the two per-voice reads this fixture
+    deliberately does not serve — refusing before the router is what lets a path
+    be guarded without the fixture pretending to implement it.
+    """
+    app = lying_deployment([WELL_FORMED])
+
+    @app.middleware("http")
+    async def refuse_one(request: Request, call_next: Any) -> Response:
+        if request.url.path == shut:
+            return Response(
+                content=b'{"detail": "invalid xi-api-key"}',
+                status_code=401,
+                media_type="application/json",
+            )
+        return await call_next(request)
+
+    return app
+
+
+@pytest.mark.parametrize(
+    "shut", [read for read in prober._documented_reads("v1") if read != "/v1/voices"]
+)
+def test_a_read_guarded_while_the_listing_is_open_breaks_auth_2(shut: str) -> None:
+    """Every documented read is really asked, one guard at a time.
+
+    `AUTH-2` promises that a deployment configuring no key answers *every*
+    documented endpoint without one, so a path the prober never asks turns a
+    partial guard into a `held` verdict nothing earned — and the per-voice reads
+    were exactly that gap. Shutting each read in turn is what holds the probed
+    set equal to the documented one, including the reads added after this test.
+    """
+    with serving(partly_guarded_deployment(shut)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["AUTH-2"].word == "broken", f"{shut} is never asked keyless"
+    assert shut in verdicts["AUTH-2"].why
+
+
+def test_synthesis_guarded_while_every_read_is_open_breaks_auth_2() -> None:
+    """The expensive half guarded alone, which a read-only check passes whole.
+
+    A deployment can plausibly arrive in this state by guarding what costs it CPU
+    and leaving the listings open, and every read `AUTH-2` makes would answer.
+    The one utterance is what tells that deployment apart from an open one.
+    """
+    with serving(partly_guarded_deployment("/v1/text-to-speech/v1")) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["AUTH-2"].word == "broken"
+    assert "synthesis" in verdicts["AUTH-2"].why

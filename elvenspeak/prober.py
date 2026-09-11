@@ -115,17 +115,17 @@ DEFAULT_TIMEOUT_SECONDS = 180.0
 #: might produce.
 INVALID_KEY_DETAIL = "invalid xi-api-key"
 
-#: The read endpoints `AUTH-2` asks without a key. A list rather than a probe of
-#: whatever the deployment happens to route, because the claim is about the
-#: *documented* surface: these are the four gettable paths README publishes, and
-#: a deployment serving fewer of them is answering a different contract. It
-#: cannot be derived from `elvenspeak.api` — that is this checkout's route table,
-#: not the remote build's ([LAW:one-source-of-truth] reaches only as far as one
-#: program).
+#: The read endpoints `AUTH-2` asks without a key, `{voice_id}` filled from the
+#: catalogue: every gettable path README publishes, because a deployment guarding
+#: only the per-voice ones would pass a check of the rest. It cannot be derived
+#: from `elvenspeak.api` — that is this checkout's route table, not the remote
+#: build's ([LAW:one-source-of-truth] reaches only as far as one program).
 DOCUMENTED_READS = (
     "/v1/voices",
     "/v1/models",
     "/v1/voices/settings/default",
+    "/v1/voices/{voice_id}",
+    "/v1/voices/{voice_id}/settings",
 )
 
 
@@ -639,6 +639,17 @@ def probe_auth_1(deployment: Deployment) -> Verdict:
     )
 
 
+def _documented_reads(voice_id: str) -> tuple[str, ...]:
+    """[`DOCUMENTED_READS`] addressed at `voice_id`.
+
+    Every path is filled the same way, so a per-voice read is a template carrying
+    a value rather than a second kind of read with a branch selecting it
+    ([LAW:dataflow-not-control-flow]).
+    """
+    quoted = urllib.parse.quote(voice_id, safe="")
+    return tuple(path.format(voice_id=quoted) for path in DOCUMENTED_READS)
+
+
 def probe_auth_2(deployment: Deployment) -> Verdict:
     """With nothing configured, every documented endpoint answers without a key.
 
@@ -646,13 +657,24 @@ def probe_auth_2(deployment: Deployment) -> Verdict:
     about every endpoint and a guard applied to only the expensive half would
     pass a read-only check completely. One utterance, on one voice, which is what
     that costs.
+
+    Only a 401 is judged: the claim is about keylessness, so a documented path
+    this build does not route answers 404 and belongs to some other claim.
     """
     if deployment.guarded:
         return Unasked(
             "GET /v1/voices refuses a keyless request, so this deployment has a "
             "key configured and the open arm cannot be asked"
         )
-    for path in DOCUMENTED_READS:
+    voices = deployment.voices
+    if not voices:
+        return Unasked(
+            "this deployment lists no voice, so the per-voice reads and the "
+            "synthesis this claim asks have nothing to address"
+        )
+    voice_id = voices[0].id
+    reads = _documented_reads(voice_id)
+    for path in reads:
         reply = _ask(deployment.target, path, key=None)
         if reply.status == 401:
             return Broken(
@@ -660,22 +682,16 @@ def probe_auth_2(deployment: Deployment) -> Verdict:
                 "allows one — this deployment is guarded in part, which is "
                 "neither of the two states it documents"
             )
-    voices = deployment.voices
-    if not voices:
-        return Unasked(
-            f"the {len(DOCUMENTED_READS)} documented reads answered without a "
-            "key, but this deployment lists no voice to ask a synthesis of"
-        )
-    spoken = _spoken(deployment.target, voices[0].id, key=None)
+    spoken = _spoken(deployment.target, voice_id, key=None)
     if spoken.status == 401:
         return Broken(
             "synthesis refused a keyless request 401 while every read allows one "
-            f"— {voices[0].id!r} cannot be spoken by a caller this deployment "
+            f"— {voice_id!r} cannot be spoken by a caller this deployment "
             "told it needs no key"
         )
     return Held(
-        f"{len(DOCUMENTED_READS)} documented reads and a synthesis in "
-        f"{voices[0].id!r} all answered without a key"
+        f"{len(reads)} documented reads and a synthesis in "
+        f"{voice_id!r} all answered without a key"
     )
 
 
