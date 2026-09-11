@@ -118,8 +118,11 @@ LONGER_TEXT = "One two three four five, six seven eight nine ten, eleven twelve.
 #: copy they happened to read.
 #:
 #: A bare `<` between two draws of an engine that samples therefore says nothing
-#: about which request they answer, and every comparison below asks
-#: [`_repeatable`] first.
+#: about which request they answer, and every comparison between these two texts
+#: asks [`_repeatable`] first. The `speed` pair is the one length comparison in
+#: this file drawn between something else — one text against itself at two
+#: speeds — and it does not ask; what makes that one sound is argued where it is
+#: made.
 APART = (SHORT_TEXT, LONGER_TEXT)
 
 #: How many callers [`_conform_concurrently`] puts inside a server at once: both
@@ -575,6 +578,21 @@ def conform(base_url: str, timeout: float) -> None:
     # draw as a speed honoured failed a correct image. [LAW:single-enforcer] That
     # a disclaimed speed never reaches the engine is held where it is decided, by
     # test_capabilities.py's test_a_speed_the_engine_cannot_vary_never_reaches_it.
+    #
+    # These two draws are the one length comparison here not made between
+    # [`APART`]'s texts, and the one that does not ask [`_repeatable`] first. A
+    # margin rather than a guard is what makes it sound: [`PACE_CHANGED`] wants a
+    # quarter off, while every voice that reaches the declaring arm draws within a
+    # percent of itself — piper 40960 against 40704 samples of the same [`TEXT`],
+    # kokoro 39308 twice (gitea run 6362, jobs 9344 and 9343). The engine whose own
+    # draws outrun the distance its texts make ([`APART`]) is Chatterbox, which
+    # declares no speed and is answered by the arm below instead. Gating this on
+    # `repeats` would lose the check rather than tighten it: piper and kokoro both
+    # measure non-repeating on the probe — piper by a few hundred samples, kokoro
+    # by bytes alone, and `piper-pipeline-0uq` is where those draws are recorded —
+    # so the only live proof that a declared speed does anything would stop being
+    # asked of the only two engines that implement one.
+    # `piper-pipeline-0uq` holds what `repeats` should mean at a spread this small.
     paced = _speak(base_url, subject.id, TEXT, speed=FASTER, timeout=budget(TEXT))
     unpaced = _speak(base_url, subject.id, TEXT, timeout=budget(TEXT))
     if subject.paces and paced.samples >= unpaced.samples * PACE_CHANGED:
