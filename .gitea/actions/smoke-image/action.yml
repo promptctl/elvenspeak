@@ -26,24 +26,32 @@ description: >-
 # chose refuses to start, so an image smoked bare proves a shape nothing deploys. Each
 # engine's row in the table below names its own `--memory`, and one width goes to all.
 #
-# The ceilings come from the footprint line `smoke.py` prints for every container, read
-# with no limit set on gitea run 6276 (e93093e), four callers inside each image at once:
+# The ceilings come from the footprint line `smoke.py` prints for every container, four
+# callers inside each image at once. Gitea run 6276 (e93093e) read three of them with no
+# limit set; run 6277 (90a72ce) then read every image under the ceiling chosen for it:
 #
-#   engine          peak   anonymous   page cache     ceiling
-#   piper       1548 MiB    1315 MiB      207 MiB    2560 MiB
-#   kokoro       711 MiB     491 MiB      202 MiB    1280 MiB
-#   router       110 MiB      47 MiB       13 MiB     256 MiB
-#   chatterbox   not yet read: run 6276 went red before the footprint was printed
+#   engine       unconfined (6276)     ceiling   under it (6277)   anonymous there
+#   piper                 1548 MiB    2560 MiB          1454 MiB          1310 MiB
+#   kokoro                 711 MiB    1280 MiB           599 MiB           484 MiB
+#   router                 110 MiB     256 MiB            87 MiB            47 MiB
+#   chatterbox        never printed   7168 MiB          6664 MiB          5010 MiB
 #
-# Each ceiling is its peak times 1.5, rounded up to a whole 256 MiB. The headroom is for
-# the draw a run did not make: `memory.peak` is one run's high-water mark, and piper was
-# OOM-killed in the fleet by a burst that sampling never saw. The peak also counts page
-# cache, which the kernel reclaims before it kills anything, so the margin over what only
-# a kill can free is wider than half again.
+# Each ceiling is its unconfined peak times 1.5, rounded up to a whole 256 MiB. The
+# headroom is for the draw a run did not make: `memory.peak` is one run's high-water mark,
+# and piper was OOM-killed in the fleet by a burst that sampling never saw. The peak also
+# counts page cache, which the kernel reclaims before it kills anything, so the margin
+# over what only a kill can free is wider than half again — and every confined peak came
+# in under its unconfined one because a limit makes the kernel reclaim that cache.
+#
+# CHATTERBOX IS THE ONE CEILING THE RULE DID NOT SET, because it cannot: 1.5 times its
+# 6664 MiB is 9996 MiB, and the runner has 7939 MiB. It keeps the 7168m it was first
+# measured under, which is 1.43 times the 5010 MiB of anonymous memory no reclaim can
+# free. It is also the one row whose peak has only ever been read under a limit: run 6276
+# lost it to a red leg, which is why `smoke.py` now prints the footprint on every path.
 #
 # A ceiling reserves nothing. The four legs run at once on one 7939 MiB runner and their
 # ceilings add up to more than that; what has to fit is what they hold at the same moment.
-# On run 6276 the piper, kokoro and router smokes all overlapped chatterbox's build, and
+# On run 6277 the piper, kokoro and router smokes all overlapped chatterbox's build, and
 # all had finished before its smoke began.
 #
 # ONE WIDTH, `speaks.CALLERS_AT_ONCE`. A ceiling says "this image fits in this much at
@@ -108,9 +116,9 @@ runs:
           # synthesize here, at the 8-33x real time that makes cpu the wrong choice for
           # a deployment, and `speaks.budget` is sized for exactly that.
           #
-          # NOT YET A MEASUREMENT. 7168m is the runner's 7939 MiB less a margin for the
-          # runner itself, set only so this leg's footprint is read under a limit at all.
-          # It is replaced by that reading before piper-build-b4h.scw closes.
+          # The one ceiling the times-1.5 rule could not set — see the table above. It is
+          # the runner's 7939 MiB less a margin for the runner itself, and chatterbox
+          # peaked 504 MiB under it on run 6277, 5010 MiB of that unreclaimable.
           chatterbox) memory=7168m; boot=(--env CHATTERBOX_DEVICE=cpu) ;;
 
           # The router synthesizes nothing, so what it needs is not a setting but
