@@ -679,15 +679,15 @@ def test_the_engine_declares_nothing_it_cannot_do(loads):
 def unfetched(monkeypatch):
     """`_fetch` rigged to fail the test that reaches it.
 
-    Everything a deployment can get wrong about its languages or its speakers is
-    answerable from a static table and a stat on `models_dir`, so `open` answers
-    all of it before it downloads anything. Ordered the other way the same typo
-    costs ~3.06 GiB and several minutes before it is reported — and the two tests
-    below would not notice, because a refusal that arrives late is still a
-    refusal. This is what makes the ordering a property rather than an accident.
+    Everything a deployment can get wrong about its languages, its speakers or
+    its device is answerable before a byte is fetched, so `open` answers all of
+    it first. Ordered the other way the same typo costs ~3.06 GiB and several
+    minutes before it is reported — and the tests below would not notice,
+    because a refusal that arrives late is still a refusal. This is what makes
+    the ordering a property rather than an accident.
 
-    It is also what lets those two tests need no checkpoints: with the fetch
-    refused, they need the library and nothing it would have downloaded.
+    It is also what lets them need no checkpoints: with the fetch refused, they
+    need the library and nothing it would have downloaded.
     """
 
     def unreached(models_dir, allow_download):
