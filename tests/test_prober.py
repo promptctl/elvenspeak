@@ -49,7 +49,7 @@ CLAIMS_DOC = Path(__file__).parent.parent / "docs" / "conformance-claims.md"
 #: because the document's own "Probed by" column is what decides the set, so the
 #: day `piper-conformance-e16.5` lands its claims, this tuple grows by editing the
 #: document and the prober — never this test.
-LANDED_ISSUES = ("e16.3", "e16.4", "e16.5")
+LANDED_ISSUES = ("e16.3", "e16.4", "e16.5", "e16.enf")
 
 #: A row of any claim table in the document: the id in backticks, then the cells.
 _CLAIM_ROW = re.compile(r"^\|\s*`([A-Z]+-\d+)`\s*\|(.*)\|\s*$", re.M)
@@ -3138,3 +3138,680 @@ def test_an_unprintable_voice_id_answered_500_breaks_sub_6() -> None:
 
     assert verdict.word == "broken"
     assert "reached the response headers unescaped" in verdict.why
+
+
+# ------------------------------------------- the timestamp endpoints' body shape
+#
+# Each lie below leaves a real deployment answering real timings and changes one
+# thing about the shape, because that is the failure worth catching: a body that
+# is absent or unparseable breaks these claims through `_timed` and would prove
+# only that the parser runs. The control is the same real server, which the live
+# run and [`test_an_open_deployment_breaks_nothing`] establish holds all five.
+
+
+def _timestamped(answer: Answer) -> list[dict[str, Any]]:
+    """Every timestamped object `answer` carries, parsed."""
+    return [json.loads(line) for line in answer.body.splitlines()]
+
+
+def _relined(answer: Answer, objects: list[dict[str, Any]]) -> Answer:
+    """`answer`, carrying `objects` one per line in place of what it held."""
+    return replace(
+        answer, body=b"\n".join(json.dumps(one).encode() for one in objects)
+    )
+
+
+#: The two per-character timelines an alignment publishes, spelled out rather
+#: than read off `prober` — a test that took these names from the thing under
+#: test could not notice it renaming one ([LAW:behavior-not-structure]).
+_TIME_ARRAYS = ("character_start_times_seconds", "character_end_times_seconds")
+
+
+def _streamed(answer: Answer) -> bool:
+    """Whether `answer` came from the streaming timestamp endpoint."""
+    return answer.path.endswith(prober.STREAMED_TIMESTAMPS)
+
+
+def _plain_timestamped(answer: Answer) -> bool:
+    """Whether `answer` came from the non-streaming timestamp endpoint."""
+    return answer.path.endswith(prober.WITH_TIMESTAMPS) and not _streamed(answer)
+
+
+def test_a_with_timestamps_answer_carrying_no_fidelity_header_breaks_time_2() -> None:
+    """The timings survive; only the header saying what they are worth is dropped.
+
+    A caller handed word-exact timings and a caller handed a span spread evenly
+    over characters receive the same floats, and `x-elvenspeak-alignment` is the
+    only place the non-streaming endpoint can tell them apart. So the lie keeps
+    every number and removes the one value that says what the numbers mean.
+    """
+
+    def unlabelled(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        return replace(
+            answer,
+            headers={
+                name: value
+                for name, value in answer.headers.items()
+                if name.lower() != prober.ALIGNMENT_HEADER
+            },
+        )
+
+    with serving(tampering(unlabelled)) as base_url:
+        verdict = _verdicts(base_url)["TIME-2"]
+
+    assert verdict.word == "broken"
+    assert f"carrying no {prober.ALIGNMENT_HEADER} header" in verdict.why
+
+
+def test_a_fidelity_header_outside_the_published_two_breaks_time_2() -> None:
+    """A header that is present and means nothing, which absence alone cannot catch.
+
+    Without this, `TIME-2` would be satisfied by any deployment that sends the
+    header at all — and a value outside the published two is exactly as unusable
+    to a caller branching on it as no value.
+    """
+
+    def invented(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        return replace(
+            answer,
+            headers={**answer.headers, prober.ALIGNMENT_HEADER: "approximate"},
+        )
+
+    with serving(tampering(invented)) as base_url:
+        verdict = _verdicts(base_url)["TIME-2"]
+
+    assert verdict.word == "broken"
+    assert "'approximate', which is neither of the two values" in verdict.why
+
+
+def test_a_fidelity_header_on_the_streaming_endpoint_breaks_time_3() -> None:
+    """The header is wrong *because* it is on this endpoint, not because it is odd.
+
+    `api.py:998` withholds it deliberately: fidelity is settled per sentence and
+    can differ between the objects of one response, so a single header reports at
+    most one of several answers and would have to be sent before any of them were
+    known. The lie sends a value that is perfectly legal on the other endpoint.
+    """
+
+    def headered(answer: Answer) -> Answer:
+        if not _streamed(answer):
+            return answer
+        return replace(
+            answer,
+            headers={**answer.headers, prober.ALIGNMENT_HEADER: "word-exact"},
+        )
+
+    with serving(tampering(headered)) as base_url:
+        verdict = _verdicts(base_url)["TIME-3"]
+
+    assert verdict.word == "broken"
+    assert f"carrying {prober.ALIGNMENT_HEADER}" in verdict.why
+
+
+def test_a_streamed_object_whose_fidelity_is_unpublished_breaks_time_3() -> None:
+    """The other half of `TIME-3`: each object must say what its own timings are worth.
+
+    Only the second object is spoiled, so a probe reading the first and reporting
+    on the rest cannot pass this.
+    """
+
+    def invented(answer: Answer) -> Answer:
+        if not _streamed(answer):
+            return answer
+        objects = _timestamped(answer)
+        objects[-1]["alignment_fidelity"] = "approximate"
+        return _relined(answer, objects)
+
+    with serving(tampering(invented)) as base_url:
+        verdict = _verdicts(base_url)["TIME-3"]
+
+    assert verdict.word == "broken"
+    assert "`alignment_fidelity` is not published" in verdict.why
+
+
+def test_a_timeline_covering_half_its_audio_breaks_time_4() -> None:
+    """Every time scaled together, so the timeline stays ordered and stops early.
+
+    The failure this catches is a server whose timings are internally consistent
+    and describe a different utterance than the one it sent — subtitles that run
+    out halfway. Scaling rather than truncating is what keeps the end times
+    ascending, so this cannot be passed by a probe that only checks the order.
+    """
+
+    def halved(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            for field in _TIME_ARRAYS:
+                one["alignment"][field] = [
+                    second * 0.5 for second in one["alignment"][field]
+                ]
+        return _relined(answer, objects)
+
+    with serving(tampering(halved)) as base_url:
+        verdict = _verdicts(base_url)["TIME-4"]
+
+    assert verdict.word == "broken"
+    assert "do not account for the samples they arrived with" in verdict.why
+
+
+def test_an_end_time_that_goes_backwards_breaks_time_4() -> None:
+    """`TIME-4`'s other half, and the half a total duration check cannot see.
+
+    Two adjacent end times are swapped, which leaves the first and last untouched
+    — so the timeline still covers exactly its own audio and only its interior
+    reverses. A caller stepping through it word by word goes backwards.
+    """
+
+    def reversed_pair(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        field = "character_end_times_seconds"
+        for one in objects:
+            times = one["alignment"][field]
+            times[1], times[2] = times[2], times[1]
+        return _relined(answer, objects)
+
+    with serving(tampering(reversed_pair)) as base_url:
+        verdict = _verdicts(base_url)["TIME-4"]
+
+    assert verdict.word == "broken"
+    assert "go backwards" in verdict.why
+
+
+def test_a_time_4_parse_fault_names_the_endpoint_that_sent_it() -> None:
+    """`TIME-4` asks both endpoints, so a fault that names neither is half a report.
+
+    A refusal carries its own draw, but the parser only ever saw a body — so
+    without the endpoint put back, a maintainer reading "answered an `alignment`
+    whose ... is not an array of numbers" cannot tell which of the two produced
+    it. Only the non-streaming endpoint is spoiled here, so naming the other one
+    would fail this just as silence does.
+    """
+
+    def unreadable(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            one["alignment"]["character_end_times_seconds"] = ["soon"]
+        return _relined(answer, objects)
+
+    with serving(tampering(unreadable)) as base_url:
+        verdict = _verdicts(base_url)["TIME-4"]
+
+    assert verdict.word == "broken"
+    assert prober.WITH_TIMESTAMPS in verdict.why
+    assert prober.STREAMED_TIMESTAMPS not in verdict.why
+
+
+def test_a_later_streamed_object_whose_times_reverse_breaks_time_4() -> None:
+    """`TIME-4` is asked of every object, not only the one its timeline begins at.
+
+    The streaming endpoint is the only place that can be shown. Every other
+    `TIME-4` test here tampers the non-streaming one, which the parser always
+    turns into exactly one object — so all of them would pass unchanged against a
+    loop narrowed to `objects[:1]`, and the claim's own reason for reading a
+    stream at all is that a cumulative offset slips in the objects after the
+    first. Only the last object reverses here and the first arrives untouched, so
+    the `begins` reading that opens the claim still passes.
+    """
+
+    def reversed_late(answer: Answer) -> Answer:
+        if not _streamed(answer):
+            return answer
+        objects = _timestamped(answer)
+        times = objects[-1]["alignment"]["character_end_times_seconds"]
+        times[1], times[2] = times[2], times[1]
+        return _relined(answer, objects)
+
+    with serving(tampering(reversed_late)) as base_url:
+        verdict = _verdicts(base_url)["TIME-4"]
+
+    assert verdict.word == "broken"
+    assert "go backwards" in verdict.why
+
+
+def test_a_normalized_alignment_that_is_not_the_alignment_breaks_time_5() -> None:
+    """`alignment` stays real, so only a caller reading the other field is broken.
+
+    This is the failure that passes every check pointed at `alignment` — which is
+    the field a prober is most likely to have asked about — while handing the
+    SDK's own documented reader an alignment covering nothing.
+    """
+
+    def hollow(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            one["normalized_alignment"] = {
+                "characters": [],
+                "character_start_times_seconds": [],
+                "character_end_times_seconds": [],
+            }
+        return _relined(answer, objects)
+
+    with serving(tampering(hollow)) as base_url:
+        verdict = _verdicts(base_url)["TIME-5"]
+
+    assert verdict.word == "broken"
+    assert "`normalized_alignment` that is not its `alignment`" in verdict.why
+
+
+def test_a_later_streamed_object_whose_normalization_is_hollow_breaks_time_5() -> None:
+    """Both of `TIME-5`'s loops, which the endpoint above cannot reach either of.
+
+    The test above spoils the non-streaming endpoint's only object, so a claim
+    that read just `_TIMESTAMP_ENDPOINTS[0]`, or just `objects[0]`, would still
+    report it `broken`. Spoiling the streamed run's last object is what makes
+    both loops falsifiable — and it is the failure this claim exists for: the
+    deployment that got `normalized_alignment` right on the endpoint a prober is
+    most likely to ask, and wrong on the one a caller reaches for under load.
+    """
+
+    def hollow_late(answer: Answer) -> Answer:
+        if not _streamed(answer):
+            return answer
+        objects = _timestamped(answer)
+        objects[-1]["normalized_alignment"] = {
+            "characters": [],
+            "character_start_times_seconds": [],
+            "character_end_times_seconds": [],
+        }
+        return _relined(answer, objects)
+
+    with serving(tampering(hollow_late)) as base_url:
+        verdict = _verdicts(base_url)["TIME-5"]
+
+    assert verdict.word == "broken"
+    assert "`normalized_alignment` that is not its `alignment`" in verdict.why
+
+
+def test_streamed_objects_that_each_restart_at_zero_break_time_6() -> None:
+    """Every object correct alone, and the sequence sliding against its own audio.
+
+    The exact bug `api.py:979` carries `elapsed` forward to avoid: a server that
+    aligns each sentence against its own audio and forgets the offset answers
+    objects that each cover their own samples perfectly — so `TIME-4` still holds
+    — and lay on top of each other rather than end to end. Only a reading that
+    puts consecutive objects side by side finds it.
+    """
+
+    def restarted(answer: Answer) -> Answer:
+        if not _streamed(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            offset = one["alignment"]["character_start_times_seconds"][0]
+            for field in _TIME_ARRAYS:
+                one["alignment"][field] = [
+                    second - offset for second in one["alignment"][field]
+                ]
+        return _relined(answer, objects)
+
+    with serving(tampering(restarted)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["TIME-6"].word == "broken"
+    assert "sliding against their own audio" in verdicts["TIME-6"].why
+    assert verdicts["TIME-4"].word == "held", (
+        "each object still covers exactly its own audio, so this lie must be "
+        "invisible to TIME-4 — otherwise the break above is not about the seam "
+        "between objects"
+    )
+
+
+def test_a_declared_timestamp_endpoint_that_refuses_breaks_every_time_claim() -> None:
+    """A refused draw is these claims being false, never these claims being unaskable.
+
+    The reading five review rounds of `piper-conformance-e16.5` got wrong, kept
+    here because the mistake is invisible in a green run: `Asked.spoke` raises
+    `Blocked` on any non-200 and `_finding` turns that into `unasked`, so a
+    deployment refusing the very request a claim tests reports as one the prober
+    could not look at. Every one of these draws is a promise the voice made by
+    publishing `timestamps`, so a refusal is the deployment answering.
+
+    All of them are asserted together rather than one per test because the defect
+    arrives one claim at a time — five instances of it were missed across three
+    rounds — and a list that must be exhaustive is what the next claim added here
+    will fail against. `CAP-3` is that next claim, and it arrived by the predicted
+    route: it read a refusal correctly but through its own inline copy of the
+    rule, so it sat outside the list this test holds. It now routes through
+    [`_refused_own_endpoint`] like the other five, which is the "six claims" that
+    helper's own docstring always named.
+    """
+    refusing = {"CAP-3", "TIME-2", "TIME-3", "TIME-4", "TIME-5", "TIME-6"}
+
+    def unavailable(answer: Answer) -> Answer:
+        if not answer.path.endswith("with-timestamps"):
+            return answer
+        return replace(
+            _rewritten(answer, {"detail": "Service Unavailable"}), status=503
+        )
+
+    with serving(tampering(unavailable)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    for claim_id in sorted(refusing):
+        assert verdicts[claim_id].word == "broken", (
+            f"{claim_id} reported {verdicts[claim_id].word!r} against a "
+            "deployment that refused the endpoint its own voice promised — a "
+            "refusal read through spoke() alone becomes unasked, which is this "
+            "epic's documented defect"
+        )
+        assert "contradicted its own declaration" in verdicts[claim_id].why
+
+
+def test_a_start_time_that_goes_backwards_breaks_time_4() -> None:
+    """`character_end_times_seconds` is left untouched, which is the whole point.
+
+    A deployment that reverses two adjacent *start* times keeps its end times
+    non-decreasing and keeps the span between its first start and its last end
+    matching its audio exactly — so every other reading in `TIME-4` is satisfied,
+    and a caller drawing each character when its start time arrives watches the
+    clock run backwards. Reading `ends` alone reported this `held`.
+    """
+
+    def reversed_starts(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            times = one["alignment"]["character_start_times_seconds"]
+            times[1], times[2] = times[2], times[1]
+        return _relined(answer, objects)
+
+    with serving(tampering(reversed_starts)) as base_url:
+        verdict = _verdicts(base_url)["TIME-4"]
+
+    assert verdict.word == "broken"
+    assert "in `character_start_times_seconds` that go backwards" in verdict.why
+
+
+def test_a_malformed_timing_array_breaks_cap_3() -> None:
+    """The boundary `CAP-3` gained by reading through `_timed`, pinned deliberately.
+
+    `characters` is left real and non-empty — the reading `CAP-3` used to make —
+    and only the times beside it are spoiled. A body like this once held, because
+    the old reader stopped at `characters`. It breaks now, and that is this
+    claim's own argument carried the rest of the way: times that cannot be read
+    are an alignment-shaped hole by exactly the reasoning that rejects an empty
+    `characters` array, and `held` over them is a check that cannot fail.
+
+    Pinned here rather than left implicit so that narrowing the shared parser
+    back to its old tolerance fails a test, instead of quietly returning `CAP-3`
+    to reporting `held` over garbage.
+    """
+
+    def untimed(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            one["alignment"]["character_end_times_seconds"] = ["soon", "later"]
+        return _relined(answer, objects)
+
+    with serving(tampering(untimed)) as base_url:
+        verdict = _verdicts(base_url)["CAP-3"]
+
+    assert verdict.word == "broken"
+    assert "`character_end_times_seconds` is not an array of numbers" in verdict.why
+
+
+def test_an_audio_base64_that_is_not_base64_breaks_cap_3() -> None:
+    """The other half of the widening `probe_cap_3`'s docstring claims is pinned.
+
+    That docstring names two bodies it now refuses — "a malformed timing array or
+    an `audio_base64` that is not base64" — and says the suite holds it to both.
+    Only the timing array was covered, so half the sentence was a promise about
+    tests that did not exist, and loosening the base64 check would have restored
+    the `held`-over-garbage tolerance without turning anything red.
+
+    `characters` and both timelines are left real and ordered; only the audio the
+    alignment claims to describe is spoiled. `TIME-4` has to read that audio to
+    weigh a timeline against it, so a body that cannot produce any is an
+    alignment-shaped hole by the same argument that rejects an empty
+    `characters`.
+    """
+
+    def unreadable_audio(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            one["audio_base64"] = "not base64 at all!!"
+        return _relined(answer, objects)
+
+    with serving(tampering(unreadable_audio)) as base_url:
+        verdict = _verdicts(base_url)["CAP-3"]
+
+    assert verdict.word == "broken"
+    assert "`audio_base64` that is not base64" in verdict.why
+
+
+def test_a_timeline_that_does_not_lay_against_its_text_breaks_cap_3() -> None:
+    """The length branch, pinned — every element still a perfectly good number.
+
+    This is the branch the type check cannot reach: dropping one end time leaves
+    an array of real, ordered, finite floats that simply cannot be laid against
+    the characters it is supposed to time, so the caller has a timeline for every
+    character but one and no way to know which. `test_a_malformed_timing_array_
+    breaks_cap_3` corrupts values and so only ever exercises `_number`.
+
+    Conceded as unpinned in a previous round and pinned here rather than conceded
+    again: the same reviewer quoting my own concession back is the correct
+    outcome for a gap left open twice.
+    """
+
+    def short_a_time(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            one["alignment"]["character_end_times_seconds"].pop()
+        return _relined(answer, objects)
+
+    with serving(tampering(short_a_time)) as base_url:
+        verdict = _verdicts(base_url)["CAP-3"]
+
+    assert verdict.word == "broken"
+    assert "cannot be laid against the text it is supposed to time" in verdict.why
+
+
+def test_a_streamed_body_carrying_one_object_leaves_time_6_unasked() -> None:
+    """`TIME-6`'s `Blocked` arm, which is the one arm a green run never shows.
+
+    A single object is a deployment declining to split a two-sentence text, and
+    nothing documented obliges it to — so there is no pair to lay end to end and
+    no promise broken. `held` there would be the check that cannot fail this
+    epic exists to delete, and `broken` would report a promise nobody made.
+
+    Worth its own test because the failure mode is invisible: swap the `raise
+    Blocked` for `return None` and every run stays green while `TIME-6` quietly
+    reports `held` over a response it never compared.
+    """
+
+    def only_the_first(answer: Answer) -> Answer:
+        if not _streamed(answer):
+            return answer
+        objects = _timestamped(answer)
+        return _relined(answer, objects[:1])
+
+    with serving(tampering(only_the_first)) as base_url:
+        verdict = _verdicts(base_url)["TIME-6"]
+
+    assert verdict.word == "unasked"
+    assert "no consecutive pair to lay end to end" in verdict.blocker
+
+
+def test_a_missing_audio_base64_breaks_cap_3() -> None:
+    """The field's other failure: absent entirely rather than unreadable.
+
+    `_one_timed` refuses a missing or non-string `audio_base64` on a different
+    branch from the one that refuses unparseable base64, and `TIME-4` needs the
+    bytes either way — a timeline weighed against audio that never arrived is
+    weighed against nothing.
+    """
+
+    def no_audio(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            del one["audio_base64"]
+        return _relined(answer, objects)
+
+    with serving(tampering(no_audio)) as base_url:
+        verdict = _verdicts(base_url)["CAP-3"]
+
+    assert verdict.word == "broken"
+    assert "no `audio_base64` string" in verdict.why
+
+
+def test_an_empty_timestamp_body_never_reaches_the_timestamp_parser() -> None:
+    """Review asked for a test of `_timed`'s empty-body branch. This is why not.
+
+    A 200 carrying nothing is refused a layer earlier, by `Asked.spoke`'s own
+    precondition, so the branch below it cannot be reached from any claim — the
+    verdict is `unasked` with "answered 200 carrying no audio at all", never the
+    parser's "carrying no alignment at all". A test asserting the parser's
+    message here would fail, and one asserting `broken` would be asserting
+    something this deployment cannot produce.
+
+    Pinned in the shape it actually has, because the branch is not dead: it is
+    what stops [`_timed`] ever handing back an empty tuple, and `probe_time_4`
+    now reads `objects[0]` on the strength of that.
+    """
+
+    def nothing_at_all(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        return replace(answer, body=b"")
+
+    with serving(tampering(nothing_at_all)) as base_url:
+        verdict = _verdicts(base_url)["CAP-3"]
+
+    assert verdict.word == "unasked"
+    assert "answered 200 carrying no audio at all" in verdict.blocker
+
+
+def test_two_objects_on_one_line_breaks_time_3() -> None:
+    """`TIME-3`'s "one object per line" is enforced by the parser, and that shows.
+
+    Round-3 review read `probe_time_3.fault`, found no `len(objects)` check, and
+    concluded the promise was unfalsifiable. It is not: [`_timed`] splits the body
+    on lines and parses each one, so two objects sharing a line leave trailing
+    data that `json.loads` refuses, and the claim reports `broken`. The mechanism
+    lives one call away from the fault that depends on it, which is exactly why it
+    earns a test named for the property rather than a comment.
+
+    Note what is *not* asserted here. Merging the two sentences into a single
+    object is not this violation — one object on one line satisfies "per line"
+    literally — and nothing documented obliges the endpoint to split sentences,
+    which is why `TIME-6` reports that response `unasked` rather than `broken`.
+    """
+
+    def crammed(answer: Answer) -> Answer:
+        if not _streamed(answer):
+            return answer
+        objects = _timestamped(answer)
+        return replace(
+            answer, body=b" ".join(json.dumps(one).encode() for one in objects)
+        )
+
+    with serving(tampering(crammed)) as base_url:
+        verdict = _verdicts(base_url)["TIME-3"]
+
+    assert verdict.word == "broken"
+    assert "answered a body that is not JSON" in verdict.why
+
+
+def test_a_timeline_shifted_off_its_own_audio_breaks_time_4() -> None:
+    """Every other reading in `TIME-4` is a difference, so none of them sees this.
+
+    A uniform offset added to every time in the response leaves each character's
+    span exact, leaves [`Timed.span`] exact — it subtracts two shifted values —
+    and leaves `TIME-6`'s gaps exact for the same reason. The caller is handed
+    subtitles that are uniformly late against the very audio the times arrived
+    with, and before this check every claim reported `held`.
+
+    The shift is the shape of a real bug rather than an invented one: `api.py:979`
+    carries an `elapsed` accumulator forward between the sentences of one
+    response, and an engine that fails to reset it between top-level requests
+    produces exactly this.
+    """
+
+    def shifted(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            for field in _TIME_ARRAYS:
+                one["alignment"][field] = [
+                    second + 37.0 for second in one["alignment"][field]
+                ]
+        return _relined(answer, objects)
+
+    with serving(tampering(shifted)) as base_url:
+        verdict = _verdicts(base_url)["TIME-4"]
+
+    assert verdict.word == "broken"
+    assert "begins at 37.000s rather than at the start of the audio" in verdict.why
+
+
+@pytest.mark.parametrize(
+    "unusable",
+    [float("nan"), float("inf"), float("-inf"), 10**400],
+    ids=["nan", "infinity", "-infinity", "wider-than-a-float"],
+)
+def test_a_time_no_comparison_can_answer_breaks_time_4(unusable: float) -> None:
+    """Each of these is shaped like a time and answers no question a claim asks.
+
+    `json` reads all four off the wire: `NaN`, `Infinity` and `-Infinity` are
+    non-standard tokens `json.dumps` itself writes for those floats, and Python's
+    `int` has no width at all.
+
+    All four are refused the same way and in the same place — `_number`'s range
+    comparison, inside `_one_timed`, before any claim does arithmetic — which is
+    why one assertion covers the four and why the message names the array rather
+    than the reading that would have tripped over the value.
+
+    What differs is only what each would do *were `_number` to admit it*, and
+    that is the whole argument for refusing them at the crossing rather than
+    inland. Measured by dropping the range clause and rerunning this test:
+
+    - `NaN` — verdict `held`. It answers `False` to `<` and to `>` alike, so the
+      reversal check and the length check both go quiet over a scrambled
+      timeline. The silent one, and the reason this belongs in the parser.
+    - `Infinity` and `-Infinity` — verdict `broken`, but from the reversal check
+      ("the first infs followed by 0.013605s"), which reports a timeline that
+      reverses rather than a time that cannot be read. Right word, wrong account.
+    - an integer wider than a `float` — no verdict at all: `OverflowError` out of
+      `float(second)` in `_one_timed`, which ends the run instead of judging the
+      deployment.
+
+    Rejecting all four at `_number` is what lets [`Timed`]'s stamp mean what its
+    docstring says, and lets the claims downstream go on comparing without ever
+    asking.
+    """
+
+    def unusable_time(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            one["alignment"]["character_end_times_seconds"][1] = unusable
+        return _relined(answer, objects)
+
+    with serving(tampering(unusable_time)) as base_url:
+        verdict = _verdicts(base_url)["TIME-4"]
+
+    assert verdict.word == "broken"
+    assert "`character_end_times_seconds` is not an array of numbers" in verdict.why

@@ -74,9 +74,9 @@ completed, and the prober is reporting on itself. A draw that was composed, sent
 and answered with a non-200 is the deployment speaking, and for a claim that
 promised the request would be served, the refusal *is* the promise not being kept
 — which is why `CAP-1`, `CAP-2`, `CAP-3`, `CAP-6`, `CAP-8`, `CAP-9`, `CAP-10`,
-`MOD-3`, `MOD-6` and `SUB-5` read one as `broken`. A draw that carries no such
-promise keeps the other reading: a refused plain synthesis request is `FMT-1`'s
-subject, and neither `CAP-7`'s nor `CAP-9`'s.
+`MOD-3`, `MOD-6`, `SUB-5` and `TIME-2` through `TIME-6` read one as `broken`. A
+draw that carries no such promise keeps the other reading: a refused plain
+synthesis request is `FMT-1`'s subject, and neither `CAP-7`'s nor `CAP-9`'s.
 Read it the other way and a voice that publishes `timestamps` in its own
 `capabilities` list and then refuses both timestamp endpoints is reported as
 something the prober could not look at, rather than as the capability lie it is —
@@ -423,7 +423,7 @@ The rule is stated over refusals generally rather than over these five rows, so
 | `TIME-1` | `/with-timestamps` returns `audio_base64`, `alignment`, `normalized_alignment` and `alignment_fidelity` | api.py:1299 | falsifiable | e16.2 |
 | `TIME-2` | `/with-timestamps` carries `x-elvenspeak-alignment`, whose value is `word-exact` or `interpolated` | README:187, alignment.py:51 | falsifiable | e16.enf |
 | `TIME-3` | `/stream/with-timestamps` emits one JSON object per line, each with its own `alignment_fidelity`, and carries no `x-elvenspeak-alignment` header | README:188, api.py:998 | falsifiable | e16.enf |
-| `TIME-4` | Character end times ascend and the last one accounts for the whole utterance — every sample is covered | engine.py:370, speaks.py:694 | falsifiable against `pcm_*` | e16.enf — `speaks.py` |
+| `TIME-4` | Character end times ascend and the last one accounts for the whole utterance — every sample is covered | engine.py:370, speaks.py:694 | falsifiable against its own `audio_base64` | e16.enf — `speaks.py` |
 | `TIME-5` | `alignment` and `normalized_alignment` are the same object | api.py:1303 | falsifiable | e16.enf |
 | `TIME-6` | A streamed run's objects lay end to end — each sentence starts where the last one ended | api.py:979 | falsifiable | e16.enf |
 
@@ -436,9 +436,20 @@ These five began as `piper-conformance-e16.5`'s and were moved to a sibling of i
 rather than dropped, because they are the one group in that issue whose subject is
 not a voice. `e16.5` asks what each voice's own declaration promises; these ask
 what one endpoint's body looks like, which is the same question however many
-voices a deployment offers. The move costs nothing to ask: `_voice_draws` already
-puts both timestamp endpoints and a `pcm_22050` draw to every voice declaring
-`timestamps`, so all five are readers over draws that have already been made.
+voices a deployment offers. The move adds no draw: `_voice_draws` already puts
+both timestamp endpoints to every voice declaring `timestamps`, so all five are
+readers over requests that were already being made.
+
+It does add one utterance, and the reason is that two of the five were otherwise
+unfalsifiable. The streaming draw is asked a two-sentence text, because over a
+one-sentence run `TIME-3`'s "one object per line" cannot be told from "one object
+in total" and `TIME-6` has no consecutive pair to lay end to end — and the
+endpoint synthesizes once per sentence, so a voice reporting timings now costs 11
+utterances across 10 requests rather than 10 across 10. `TIME-4` reads each
+object's own `audio_base64` rather than a separate `pcm_*` draw's byte count:
+those are the very samples the alignment describes, so there is one synthesis
+involved and the sampling that leaves `CAP-1`, `FMT-4` and `FMT-7` unaskable
+against the live piper deployment (`piper-conformance-e16.ysu`) cannot reach it.
 
 ### Routes this server does not serve
 
