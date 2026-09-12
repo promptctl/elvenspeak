@@ -286,9 +286,10 @@ fact about the encoder instead of about the utterance." Verifying that an `mp3_*
 | `REF-6` | A `language_code` that is not a string is a 422 | api.py:224 | falsifiable | e16.4 |
 | `REF-7` | An unmodelled body field is kept and reported, never a 422 | api.py:148 | falsifiable | e16.4 |
 
-**The two refusal bodies have different shapes, and e16.4 has to decide about it.**
-`README.md:32` promises "a `422` quoting the value you sent" for all of them, and
-all of them do quote it — but under different keys:
+**The two refusal bodies have different shapes, and e16.4 decided about it: the
+prober accepts both and reads neither.** `README.md:32` promises "a `422` quoting
+the value you sent" for all of them, and all of them do quote it — but under
+different keys:
 
     REF-1  {"detail": {"message": "unsupported output_format: 'mp3_9999'",
                        "supported": [...]}}
@@ -299,12 +300,33 @@ all of them do quote it — but under different keys:
 
 The first two are this service's own refusals and are objects; the last is
 pydantic's, an array of error records, and it quotes the value under `input`. Both
-satisfy the README as written. The recommendation is that the prober accept both
-shapes and check that the offending value appears *somewhere* in the body, rather
-than that the repo unify them: the pydantic shape is what a stock ElevenLabs client
-already receives from FastAPI-shaped servers, and rewriting it to match ours would
-be inventing a body no other server sends. Whoever takes e16.4 should record the
-decision either way rather than letting the prober's leniency stand in for one.
+satisfy the README as written, so `elvenspeak/prober.py` requires neither: no probe
+there reads `detail` as an object, and none reads it as an array. Demanding the
+object shape would report `broken` against a deployment keeping its documented
+promise, and the only way to make a deployment satisfy that demand would be to
+rewrite pydantic's refusal into a body no other FastAPI-shaped server sends —
+worse compatibility, which is the whole product.
+
+**What replaces the shape is not this file's recommendation, which cannot be taken
+literally.** "The offending value appears *somewhere* in the body" is unfalsifiable
+for the two refusals that matter most: `REF-2` sends `""` and `REF-3` sends
+`"   "`, and a check for those as substrings passes against every 422 ever
+written. That is the shape of a check that cannot fail, which is the defect this
+epic exists to remove rather than one it may inherit.
+
+The rule the prober enforces instead is that **the body must name what was
+wrong** — the offending value where it is distinctive enough to be named back
+(`REF-1`'s `mp3_9999`, plus the word `supported`), and the offending *field* where
+it is not (`text` for `REF-2`, `REF-3` and `REF-4`; `language_code` for `REF-6`).
+It is checked as raw-byte substrings against the whole body, which is what lets
+one rule over a table serve both shapes rather than a shape read five ways: this
+service's object names the field in prose, and pydantic's array names it in `loc`.
+`Refusal.named` carries it, and `tests/test_prober.py` asks the same five claims of
+two stand-ins that agree on every fact and share no byte of structure, requiring
+all ten verdicts to be `held`.
+
+The rule is stated over refusals generally rather than over these five rows, so
+`MOD-4` above inherits it when `piper-conformance-e16.5` lands its model claims.
 
 ### Timestamps
 
