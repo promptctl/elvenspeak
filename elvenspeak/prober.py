@@ -3700,6 +3700,15 @@ def probe_cap_5(deployment: Deployment) -> Verdict:
     Self-consistent. A caller reads this list to decide whether to send a rate at
     all, and a union that overstates it sends them to a voice that reports the
     parameter ignored — which is rule 2 kept per voice and broken per deployment.
+
+    Deployment-wide by contract, and deliberately not scoped per `model_id` the
+    way `MOD-7` scopes `languages` beside it: the README makes this field "what
+    this deployment can do at all", to be read when choosing a deployment rather
+    than when deciding a request, and [`_model_json`] derives it once for every
+    entry — where the reason the two fields differ is written, because the two
+    overclaims do not cost the same. Read as `MOD-7`'s twin this looks like a
+    missing filter, and scoping it here would report an honestly-differentiated
+    router broken for publishing each engine's real capabilities.
     """
     entries = _model_entries(deployment)
     declared = frozenset[str]().union(
