@@ -1344,7 +1344,7 @@ class Asked:
         promised the draw would be served the difference decides the verdict: a
         draw that could not be **composed** is a precondition failing and `unasked`
         is right, while one composed, sent and **refused** is the deployment
-        answering. [`refusal`] is the reading for the second, and the five claims
+        answering. [`refusal`] is the reading for the second, and the six claims
         that require a served draw ask it first.
         """
         return _served(self.answers[draw], f"{self.voice.id!r} {draw}")
@@ -1354,13 +1354,13 @@ class Asked:
 
         The half of [`spoke`]'s blocker that is a verdict rather than a
         precondition. A claim promising that a draw is served — `CAP-1`, `CAP-2`,
-        `CAP-3`, `MOD-3` and `MOD-6` — is *false* when the deployment refuses it,
-        and reading that through [`spoke`] alone reported five capability lies as
-        "could not be asked". [`answered`] still raises for a draw that never got
-        an answer at all, so the two readings partition what can become of a draw
-        at exactly the line where the deployment's own answer begins
-        ([LAW:single-enforcer] — what a refusal means to a claim that needed the
-        audio is decided here, not in each of the five faults that read it).
+        `CAP-3`, `MOD-3`, `MOD-6` and `SUB-5` — is *false* when the deployment
+        refuses it, and reading that through [`spoke`] alone reported six
+        capability lies as "could not be asked". [`answered`] still raises for a
+        draw that never got an answer at all, so the two readings partition what
+        can become of a draw at exactly the line where the deployment's own answer
+        begins ([LAW:single-enforcer] — what a refusal means to a claim that needed
+        the audio is decided here, not in each of the six faults that read it).
         """
         answer = self.answered(draw)
         if answer.status == 200:
@@ -3497,8 +3497,18 @@ def probe_sub_5(deployment: Deployment) -> Verdict:
             "empty by design"
         )
     for asked, alias in aliased:
-        answer = asked.spoke(_alias_draw(alias))
-        spoke = _spoke_in(answer)
+        draw = _alias_draw(alias)
+        # Before the routing, because an alias the deployment refused reached no
+        # voice at all, which is this claim being false rather than a reason it
+        # could not be asked.
+        refused = asked.refusal(draw)
+        if refused is not None:
+            return Broken(
+                f"the alias {alias!r} is published on voice {asked.voice.id!r} "
+                f"and then {refused} — an alias a voice publishes as its own is "
+                "one that voice must serve"
+            )
+        spoke = _spoke_in(asked.spoke(draw))
         if spoke != asked.voice.id:
             return Broken(
                 f"the alias {alias!r} is published on voice {asked.voice.id!r} and "

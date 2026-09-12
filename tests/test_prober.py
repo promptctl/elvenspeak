@@ -2668,7 +2668,7 @@ def test_a_region_tagged_variant_reported_ignored_breaks_cap_10() -> None:
     assert "the tag was compared before it was reduced to its family" in verdict.why
 
 
-# ------------------------- the five claims that require a draw to be served
+# ------------------------- the six claims that require a draw to be served
 
 
 #: Each of these promises a draw is *served*, and until `e16.5`'s review they read
@@ -2789,6 +2789,29 @@ def test_a_model_id_that_ends_the_request_breaks_mod_6() -> None:
     assert verdict.word == "broken"
     assert f"was addressed and then answered {prober.UNMAPPED_DRAW} with 503" in verdict.why
     assert "outranked the voice" in verdict.why
+
+
+def test_a_published_alias_refused_outright_breaks_sub_5() -> None:
+    """An alias this deployment lists and then will not answer to at all.
+
+    The mis-routing arm cannot see this one: a refused request reached no voice,
+    so there is no id to read against the one that published the alias, and
+    reading it through `spoke` alone reported a listing contradicting itself as
+    something that could not be asked. `SUB-5` promises the alias *reaches* the
+    voice, which is the same promise `MOD-3` makes about a published model id.
+    """
+
+    def disowning(answer: Answer) -> Answer:
+        if _spoke(answer) and _sent_to(answer) == "eleven-legacy-id":
+            return _refusing(answer)
+        return _publishing(answer, "eleven-legacy-id", FIRST)
+
+    with serving(tampering(disowning)) as base_url:
+        verdict = _verdicts(base_url)["SUB-5"]
+
+    assert verdict.word == "broken"
+    assert f"is published on voice {FIRST!r} and then answered " in verdict.why
+    assert f"{prober._alias_draw('eleven-legacy-id')} with 503" in verdict.why
 
 
 # ------------------------------------------- the six substitution claims
