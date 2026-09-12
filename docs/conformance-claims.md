@@ -436,9 +436,20 @@ These five began as `piper-conformance-e16.5`'s and were moved to a sibling of i
 rather than dropped, because they are the one group in that issue whose subject is
 not a voice. `e16.5` asks what each voice's own declaration promises; these ask
 what one endpoint's body looks like, which is the same question however many
-voices a deployment offers. The move costs nothing to ask: `_voice_draws` already
-puts both timestamp endpoints and a `pcm_22050` draw to every voice declaring
-`timestamps`, so all five are readers over draws that have already been made.
+voices a deployment offers. The move adds no draw: `_voice_draws` already puts
+both timestamp endpoints to every voice declaring `timestamps`, so all five are
+readers over requests that were already being made.
+
+It does add one utterance, and the reason is that two of the five were otherwise
+unfalsifiable. The streaming draw is asked a two-sentence text, because over a
+one-sentence run `TIME-3`'s "one object per line" cannot be told from "one object
+in total" and `TIME-6` has no consecutive pair to lay end to end — and the
+endpoint synthesizes once per sentence, so a voice reporting timings now costs 11
+utterances across 10 requests rather than 10 across 10. `TIME-4` reads each
+object's own `audio_base64` rather than a separate `pcm_*` draw's byte count:
+those are the very samples the alignment describes, so there is one synthesis
+involved and the sampling that leaves `CAP-1`, `FMT-4` and `FMT-7` unaskable
+against the live piper deployment (`piper-conformance-e16.ysu`) cannot reach it.
 
 ### Routes this server does not serve
 

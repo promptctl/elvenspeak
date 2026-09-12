@@ -112,6 +112,7 @@ is the property that makes a routed deployment comparable against a direct one.
 from __future__ import annotations
 
 import argparse
+import base64
 import http.client
 import json
 import math
@@ -1106,11 +1107,35 @@ class Catalogue:
 # ------------------------------------------------------- the per-voice draws
 
 
-#: The endpoint suffixes the two timestamp claims read, in the order
-#: `README.md:44` lists them. Both, because `CAP-3` and `CAP-4` are claims about
-#: *both* endpoints and a deployment answering one of them correctly is half a
-#: verdict.
-_TIMESTAMP_ENDPOINTS = ("/with-timestamps", "/stream/with-timestamps")
+WITH_TIMESTAMPS = "/with-timestamps"
+STREAMED_TIMESTAMPS = "/stream/with-timestamps"
+
+#: A second sentence, so what the streaming endpoint is asked really streams.
+#: `TIME-3` promises *one object per line* and `TIME-6` that consecutive objects
+#: lay end to end, and neither is falsifiable against a one-sentence run: the
+#: endpoint emits one object per sentence, so [`PROBE_TEXT`] alone makes "one per
+#: line" indistinguishable from "one in total" and leaves `TIME-6` with no pair
+#: to compare. Built from [`PROBE_TEXT`] rather than spelled out, so the two texts
+#: cannot drift in the words an engine has to pronounce
+#: ([LAW:one-source-of-truth]).
+STREAMED_TEXT = f"{PROBE_TEXT} Four five six."
+
+#: The endpoint suffixes the timestamp claims read, in the order `README.md:44`
+#: lists them, each with the text it is asked. Both, because `CAP-3` and `CAP-4`
+#: are claims about *both* endpoints and a deployment answering one of them
+#: correctly is half a verdict.
+#:
+#: The text is carried here rather than chosen where the draw is composed because
+#: it is a fact about the endpoint — one of them streams and the other does not —
+#: and a table is what keeps that from becoming a conditional at the one call site
+#: that builds these draws ([LAW:dataflow-not-control-flow]).
+_TIMESTAMP_TEXTS: Mapping[str, str] = {
+    WITH_TIMESTAMPS: PROBE_TEXT,
+    STREAMED_TIMESTAMPS: STREAMED_TEXT,
+}
+
+#: The endpoints alone, derived so the two orders cannot disagree.
+_TIMESTAMP_ENDPOINTS = tuple(_TIMESTAMP_TEXTS)
 
 #: The name of each draw, which is what a probe asks for and what a report quotes.
 #: Written as words rather than as identifiers because a blocker naming one goes
@@ -1172,8 +1197,14 @@ def _voice_draws(voice: Declared, catalogue: Catalogue) -> dict[str, Draw | Bloc
 
     **The budget, decided here and nowhere else.** Eight of these synthesize, plus
     two where the voice declares `timestamps` and none where it does not, plus one
-    refusal that costs nothing — so a voice costs 8 utterances, 10 if it reports
-    timings. That multiplies by the catalogue, on top of the 30 [`Spoken`] spends.
+    refusal that costs nothing — so a voice costs 8 utterances, and a voice
+    reporting timings costs 11 across 10 requests: the streaming draw is one
+    request that synthesizes once per *sentence*, and [`STREAMED_TEXT`] carries
+    two. That extra utterance is what `TIME-3` and `TIME-6` cost, and it is
+    deliberately spent here rather than on a draw of their own — a second draw
+    would cost the same two syntheses plus a request, and would still have to be
+    gated on the same declaration. That multiplies by the catalogue, on top of the
+    30 [`Spoken`] spends.
 
     Eight is the answer to "which claims are really about *this voice*", and the
     rule is: **a claim is asked of every voice when its subject is that voice's
@@ -1209,9 +1240,9 @@ def _voice_draws(voice: Declared, catalogue: Catalogue) -> dict[str, Draw | Bloc
         UNMAPPED_DRAW: _carrying(voice.id, "model_id", catalogue.unmapped()),
         **{
             _timestamp_draw(endpoint): Draw(
-                voice_id=voice.id, endpoint=endpoint, body={"text": PROBE_TEXT}
+                voice_id=voice.id, endpoint=endpoint, body={"text": asked}
             )
-            for endpoint in _TIMESTAMP_ENDPOINTS
+            for endpoint, asked in _TIMESTAMP_TEXTS.items()
         },
         **{_alias_draw(alias): _saying(alias) for alias in voice.aliases},
         # Last, so the two draws [`Asked.repeats`] compares are genuinely two asks
@@ -1395,7 +1426,7 @@ class Asking:
     utterances against a backend that samples ([LAW:one-source-of-truth]).
 
     **What a run costs, stated where it is spent.** [`_voice_draws`] spends 8
-    utterances per voice and 10 for a voice reporting timings;
+    utterances per voice and 11 for a voice reporting timings;
     [`_handling_draws`] spends 4 more, once. So a catalogue of `V` voices costs
     `8V + 4` at least, against `Spoken`'s flat 30 — the per-voice half multiplies
     and the deployment-wide half does not, which is the whole of the decision
@@ -2581,6 +2612,15 @@ NO_VOICE_OFFERED = (
 )
 
 
+#: What `CAP-3` and the five timestamp claims all say when the catalogue selects
+#: the other arm. One sentence rather than six, so six accounts of one state
+#: cannot drift apart ([LAW:one-source-of-truth]).
+NO_TIMESTAMP_VOICE = (
+    f"no voice here declares {CAPABILITY_TIMESTAMPS!r}, so there is none owed "
+    "an alignment — CAP-4 is the arm this deployment's voices select"
+)
+
+
 def _of_every(
     subjects: tuple[Asked, ...],
     unasked: str,
@@ -2679,20 +2719,91 @@ def _detail_of(reply: Reply) -> Any:
     return body.get("detail") if isinstance(body, dict) else body
 
 
-def _first_alignment(body: bytes) -> list[Any] | str:
-    """The `characters` of the first alignment in `body`, or why there is none.
+#: The two per-character timelines every alignment publishes, in the order a
+#: reader lays them side by side.
+_TIME_ARRAYS = ("character_start_times_seconds", "character_end_times_seconds")
 
-    One reader for both timestamp endpoints, because one answers a single object
-    and the other one object per line — and the first line of a single object is
-    that object. `TIME-3` owns the claim that the streaming shape really is one
-    per line; what `CAP-3` needs is that a voice declaring `timestamps` returned
-    timings at all.
+
+@dataclass(frozen=True)
+class Timed:
+    """One object off a timestamp endpoint, parsed into what a claim reads.
+
+    [LAW:parse-dont-validate] Built only by [`_timed`], so holding one is proof
+    that this object carried an alignment whose three arrays are non-empty and
+    the same length, a fidelity, and audio that really decoded. That is why the
+    five claims about these endpoints contain no shape guards at all: the
+    question of whether the body had what they read is answered once, at the
+    crossing, and cannot be asked again inland.
     """
-    first = body.splitlines()[0] if body.splitlines() else b""
+
+    #: `alignment` and `normalized_alignment` exactly as they arrived. `TIME-5`'s
+    #: whole claim is that the two are one object, and a comparison of two
+    #: re-parsed projections could hold while the published objects differed.
+    alignment: Mapping[str, Any]
+    normalized: Any
+    #: `alignment_fidelity` as it arrived, unnarrowed: `TIME-3` judges the value
+    #: against the two words README:187 publishes, so a parse that admitted only
+    #: those two could never report a third ([LAW:no-silent-failure]).
+    fidelity: Any
+    characters: tuple[str, ...]
+    starts: tuple[float, ...]
+    ends: tuple[float, ...]
+    #: This object's own audio, decoded. What makes `TIME-4` arithmetic within one
+    #: answer rather than a comparison across two draws: these are the very
+    #: samples this alignment describes, so a deployment that samples — which
+    #: `piper-conformance-e16.ysu` records the live piper one doing — cannot make
+    #: the claim unaskable the way it does the length-comparison claims.
+    audio: bytes
+
+    @property
+    def span(self) -> float:
+        """How long this object's own timeline says its own audio runs.
+
+        Read as a span rather than as `ends[-1]` because a streamed object after
+        the first starts partway through the run: `api.py:979` lays each sentence
+        where the last ended, so the second object's end time is absolute across
+        the whole response while its audio is only its own sentence. The
+        difference is the one reading true of both endpoints.
+        """
+        return self.ends[-1] - self.starts[0]
+
+
+def _number(value: Any) -> bool:
+    """Whether `value` is a JSON number rather than something shaped like one.
+
+    `bool` is excluded because Python makes it an `int`, so a timeline carrying
+    `true` would otherwise parse as a time of 1 second.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _timed(body: bytes) -> tuple[Timed, ...] | str:
+    """Every timestamped object `body` carries, or why it carries none.
+
+    One reader for both timestamp endpoints, because `api.py:1299` gives them one
+    body shape and the non-streaming answer is the one-line case of the streaming
+    one. Parsed here once rather than by a reader per claim, so six claims cannot
+    hold six accounts of what a malformed alignment is
+    ([LAW:one-source-of-truth]).
+    """
+    lines = body.splitlines()
+    if not lines:
+        return "answered an empty body, carrying no alignment at all"
+    parsed = []
+    for line in lines:
+        one = _one_timed(line)
+        if isinstance(one, str):
+            return one
+        parsed.append(one)
+    return tuple(parsed)
+
+
+def _one_timed(line: bytes) -> Timed | str:
+    """One object of a timestamp endpoint's body, or why it could not be read."""
     try:
-        parsed = json.loads(first)
+        parsed = json.loads(line)
     except ValueError:
-        return f"answered a body that is not JSON: {body[:200]!r}"
+        return f"answered a body that is not JSON: {line[:200]!r}"
     if not isinstance(parsed, dict):
         return f"answered {parsed!r:.200} rather than an object carrying an alignment"
     alignment = parsed.get("alignment")
@@ -2701,7 +2812,43 @@ def _first_alignment(body: bytes) -> list[Any] | str:
     characters = alignment.get("characters")
     if not isinstance(characters, list):
         return f"answered an `alignment` with no `characters` array: {alignment!r:.200}"
-    return characters
+    if not characters:
+        return (
+            "answered an empty `characters` array — a caller is handed an "
+            "alignment covering none of the utterance"
+        )
+    times = []
+    for field in _TIME_ARRAYS:
+        seconds = alignment.get(field)
+        if not isinstance(seconds, list) or not all(map(_number, seconds)):
+            return (
+                f"answered an `alignment` whose `{field}` is not an array of "
+                f"numbers: {alignment!r:.200}"
+            )
+        if len(seconds) != len(characters):
+            return (
+                f"answered {_counted(len(characters), 'character')} and "
+                f"{len(seconds)} `{field}` — a timeline that cannot be laid "
+                "against the text it is supposed to time"
+            )
+        times.append(tuple(float(second) for second in seconds))
+    encoded = parsed.get("audio_base64")
+    if not isinstance(encoded, str):
+        return f"answered no `audio_base64` string: {parsed!r:.200}"
+    try:
+        audio = base64.b64decode(encoded, validate=True)
+    except ValueError:
+        return f"answered an `audio_base64` that is not base64: {encoded[:200]!r}"
+    starts, ends = times
+    return Timed(
+        alignment=alignment,
+        normalized=parsed.get("normalized_alignment"),
+        fidelity=parsed.get("alignment_fidelity"),
+        characters=tuple(str(character) for character in characters),
+        starts=starts,
+        ends=ends,
+        audio=audio,
+    )
 
 
 # -------------------------------------------------- per-voice capability probes
@@ -2829,24 +2976,14 @@ def probe_cap_3(deployment: Deployment) -> Verdict:
                     "and not this arm's"
                 )
             answer = asked.spoke(_timestamp_draw(endpoint))
-            characters = _first_alignment(answer.body)
-            if isinstance(characters, str):
-                return (
-                    f"declares {CAPABILITY_TIMESTAMPS!r} and {endpoint} "
-                    f"{characters}"
-                )
-            if not characters:
-                return (
-                    f"declares {CAPABILITY_TIMESTAMPS!r} and {endpoint} answered "
-                    "an empty `characters` array — a caller is handed an "
-                    "alignment covering none of the utterance"
-                )
+            objects = _timed(answer.body)
+            if isinstance(objects, str):
+                return f"declares {CAPABILITY_TIMESTAMPS!r} and {endpoint} {objects}"
         return None
 
     return _of_every(
         deployment.asking().declaring(CAPABILITY_TIMESTAMPS),
-        f"no voice here declares {CAPABILITY_TIMESTAMPS!r}, so there is none owed "
-        "an alignment — CAP-4 is the arm this deployment's voices select",
+        NO_TIMESTAMP_VOICE,
         fault,
         f"declaring {CAPABILITY_TIMESTAMPS!r} each answered both timestamp "
         "endpoints with a non-empty alignment",
@@ -3775,6 +3912,299 @@ def probe_cap_9(deployment: Deployment) -> Verdict:
     )
 
 
+# ------------------------------------------------- the timestamp endpoints' shape
+
+
+#: The two values README:187 publishes for `x-elvenspeak-alignment`, which are
+#: also the two an object's `alignment_fidelity` may take. Spelled here rather
+#: than imported from `elvenspeak.alignment` for the reason this module imports
+#: nothing else from the package: the deployment under test is routinely a
+#: different build, so a vocabulary read out of this checkout would be asserting
+#: the implementation against itself ([LAW:behavior-not-structure]).
+PUBLISHED_FIDELITIES = ("word-exact", "interpolated")
+
+ALIGNMENT_HEADER = f"{_ELVENSPEAK_HEADER}alignment"
+
+def _refused_own_endpoint(asked: Asked, endpoint: str) -> str | None:
+    """How this voice turned down an endpoint its own declaration promised.
+
+    Judged before any claim reads a body, because [`Asked.spoke`] raises
+    [`Blocked`] on a refusal and [`_finding`] turns that into `unasked` — so a
+    deployment refusing the very request a claim tests would be reported as one
+    the prober could not look at. The declaration is what makes the refusal a
+    verdict here rather than a precondition: the voice published `timestamps`,
+    so this draw is a promise it made ([LAW:single-enforcer] — what a refusal
+    means to these six claims is decided once, not remembered six times).
+    """
+    refused = asked.refusal(_timestamp_draw(endpoint))
+    if refused is None:
+        return None
+    return (
+        f"declares {CAPABILITY_TIMESTAMPS!r} and then {refused} — a voice that "
+        "refuses the endpoint it promises timings from has contradicted its own "
+        "declaration"
+    )
+
+
+def _timings(asked: Asked, endpoint: str) -> tuple[Timed, ...] | str:
+    """`endpoint`'s objects for this voice, or the fault a claim about them reports.
+
+    The whole preamble every claim that reads a timestamped body needs, so none
+    of them can reach the objects without the refusal already judged.
+    """
+    refused = _refused_own_endpoint(asked, endpoint)
+    if refused is not None:
+        return refused
+    return _timed(asked.spoke(_timestamp_draw(endpoint)).body)
+
+
+def probe_time_2(deployment: Deployment) -> Verdict:
+    """`/with-timestamps` names which of the two kinds of timing it measured.
+
+    The header is the only place the non-streaming endpoint can say it.
+    `alignment.py:20` takes word boundaries from the model where it reports them
+    and spreads the utterance evenly where it does not, and those two timelines
+    are worth very different amounts to a caller aligning subtitles — but they
+    are the same floats. A deployment answering timings and naming no fidelity
+    has published a timeline whose worth cannot be known.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        refused = _refused_own_endpoint(asked, WITH_TIMESTAMPS)
+        if refused is not None:
+            return refused
+        reported = asked.spoke(_timestamp_draw(WITH_TIMESTAMPS)).headers.get(
+            ALIGNMENT_HEADER
+        )
+        if reported is None:
+            return (
+                f"answered {WITH_TIMESTAMPS} carrying no {ALIGNMENT_HEADER} "
+                "header — a caller cannot tell measured word boundaries from a "
+                "span spread evenly over characters, and only one of those is "
+                "worth aligning against"
+            )
+        if reported not in PUBLISHED_FIDELITIES:
+            return (
+                f"answered {ALIGNMENT_HEADER}: {reported!r}, which is neither of "
+                f"the two values published for it ({' and '.join(PUBLISHED_FIDELITIES)})"
+            )
+        return None
+
+    return _of_every(
+        deployment.asking().declaring(CAPABILITY_TIMESTAMPS),
+        NO_TIMESTAMP_VOICE,
+        fault,
+        f"declaring {CAPABILITY_TIMESTAMPS!r} each answered {WITH_TIMESTAMPS} "
+        f"with an {ALIGNMENT_HEADER} of "
+        f"{' or '.join(PUBLISHED_FIDELITIES)}",
+    )
+
+
+def probe_time_3(deployment: Deployment) -> Verdict:
+    """The streaming endpoint reports fidelity per object and never in a header.
+
+    Both halves, because they are one decision: `api.py:998` withholds the header
+    precisely because fidelity is settled per sentence and can differ between the
+    objects of one response, so a single header could only report one of several
+    answers and would have to be sent before any of them were known. A deployment
+    that sends it anyway has published a value it could not have known, and one
+    whose objects carry no fidelity of their own has left the caller with
+    nowhere to read it.
+
+    [`STREAMED_TEXT`] is what makes this falsifiable rather than decorative: over
+    a one-sentence run "one object per line" and "one object in total" are the
+    same observation.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        objects = _timings(asked, STREAMED_TIMESTAMPS)
+        if isinstance(objects, str):
+            return objects
+        carried = asked.spoke(_timestamp_draw(STREAMED_TIMESTAMPS)).headers.get(
+            ALIGNMENT_HEADER
+        )
+        if carried is not None:
+            return (
+                f"answered {STREAMED_TIMESTAMPS} carrying {ALIGNMENT_HEADER}: "
+                f"{carried!r} — fidelity is settled per object here, so one "
+                f"header over {_counted(len(objects), 'object')} reports at most "
+                "one of them and was sent before any was known"
+            )
+        unpublished = tuple(
+            timed.fidelity
+            for timed in objects
+            if timed.fidelity not in PUBLISHED_FIDELITIES
+        )
+        if unpublished:
+            return (
+                f"answered {STREAMED_TIMESTAMPS} with "
+                f"{_counted(len(unpublished), 'object')} whose "
+                f"`alignment_fidelity` is not published: {unpublished!r:.200} — "
+                f"the two published are {' and '.join(PUBLISHED_FIDELITIES)}"
+            )
+        return None
+
+    return _of_every(
+        deployment.asking().declaring(CAPABILITY_TIMESTAMPS),
+        NO_TIMESTAMP_VOICE,
+        fault,
+        f"declaring {CAPABILITY_TIMESTAMPS!r} each answered "
+        f"{STREAMED_TIMESTAMPS} as one object per line, every one carrying its "
+        f"own `alignment_fidelity` and none carrying {ALIGNMENT_HEADER}",
+    )
+
+
+def probe_time_4(deployment: Deployment) -> Verdict:
+    """Every object's timeline ascends and accounts for its own audio.
+
+    The claim that makes an alignment worth anything: a timeline that runs
+    backwards, or that stops halfway through the samples, is a caller's subtitles
+    drifting away from the speech. Read against the object's **own**
+    `audio_base64` rather than against a second draw's byte count, which is what
+    lets it be asked of a deployment that samples — the sampling that leaves
+    `CAP-1`, `FMT-4` and `FMT-7` unaskable against the live piper deployment
+    (`piper-conformance-e16.ysu`) cannot touch this, because there is only one
+    synthesis involved and the alignment describes exactly those bytes.
+
+    Asked of both endpoints and of every object, because a streamed response is
+    where a cumulative offset can slip: `TIME-6` checks that consecutive objects
+    meet, and this checks that each one really covers the audio it carries.
+
+    Non-decreasing rather than strictly ascending, deliberately. "Ascend" is what
+    the document says and a *descending* end time is unambiguously a broken
+    timeline, but a zero-width character — a word whose measured span rounds to
+    nothing — is a fact about an engine rather than a promise this service
+    breaks, and demanding strict ascent would report a legitimate deployment
+    broken ([LAW:behavior-not-structure]).
+    """
+    rate = _published(PCM_FORMAT).sample_rate
+
+    def fault(asked: Asked) -> str | None:
+        for endpoint in _TIMESTAMP_ENDPOINTS:
+            objects = _timings(asked, endpoint)
+            if isinstance(objects, str):
+                return objects
+            for timed in objects:
+                backwards = tuple(
+                    (before, after)
+                    for before, after in zip(timed.ends, timed.ends[1:])
+                    if after < before
+                )
+                if backwards:
+                    return (
+                        f"answered {endpoint} with "
+                        f"{_counted(len(backwards), 'end time')} that go "
+                        f"backwards, the first {backwards[0][0]:.6f}s followed by "
+                        f"{backwards[0][1]:.6f}s — a caller reading this forwards "
+                        "is handed a timeline that reverses"
+                    )
+                seconds = len(timed.audio) / BYTES_PER_SAMPLE / rate
+                if abs(timed.span - seconds) > _LENGTH_SPREAD_SECONDS:
+                    return (
+                        f"answered {endpoint} with a timeline running "
+                        f"{timed.span:.3f}s over audio of {seconds:.3f}s — a "
+                        f"{abs(timed.span - seconds):.3f}s disagreement, so the "
+                        "timings do not account for the samples they arrived with"
+                    )
+        return None
+
+    return _of_every(
+        deployment.asking().declaring(CAPABILITY_TIMESTAMPS),
+        NO_TIMESTAMP_VOICE,
+        fault,
+        f"declaring {CAPABILITY_TIMESTAMPS!r} each answered both timestamp "
+        f"endpoints with end times that never reverse and a timeline covering "
+        f"its own audio within {_LENGTH_SPREAD_SECONDS:g}s",
+    )
+
+
+def probe_time_5(deployment: Deployment) -> Verdict:
+    """`alignment` and `normalized_alignment` are one object, not two.
+
+    ElevenLabs distinguishes the alignment of the text as written from the text
+    as normalized for speech, and `api.py:1303` answers both with the same object
+    because the engine is fed the text as written. A caller that reads
+    `normalized_alignment` — the SDK's own examples do — must get a timeline, and
+    a deployment answering an empty or differently-timed one there has broken
+    exactly those callers while satisfying every check that reads `alignment`.
+
+    Asked of every object of both endpoints, because the two are built by one
+    function and a deployment that got it right on the endpoint a prober is most
+    likely to ask is the failure worth catching.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        for endpoint in _TIMESTAMP_ENDPOINTS:
+            objects = _timings(asked, endpoint)
+            if isinstance(objects, str):
+                return objects
+            for timed in objects:
+                if timed.normalized != timed.alignment:
+                    return (
+                        f"answered {endpoint} with a `normalized_alignment` that "
+                        f"is not its `alignment`: {timed.normalized!r:.200} "
+                        f"against {timed.alignment!r:.200}"
+                    )
+        return None
+
+    return _of_every(
+        deployment.asking().declaring(CAPABILITY_TIMESTAMPS),
+        NO_TIMESTAMP_VOICE,
+        fault,
+        f"declaring {CAPABILITY_TIMESTAMPS!r} each answered every object of both "
+        "timestamp endpoints with `normalized_alignment` equal to `alignment`",
+    )
+
+
+def probe_time_6(deployment: Deployment) -> Verdict:
+    """A streamed run's objects lay end to end, leaving no gap and no overlap.
+
+    The claim a caller concatenating a stream depends on and the one a server is
+    most likely to get quietly wrong: `api.py:979` carries the elapsed time
+    forward from each sentence's own alignment, and a deployment that restarted
+    every object at zero, or derived the offset from the audio instead, would
+    answer objects that each look correct alone and slide against each other in
+    sequence. Only laying consecutive objects side by side finds it.
+
+    A response carrying one object is reported `unasked` rather than `held`.
+    There is no pair to compare, so a verdict of `held` would be a check that
+    cannot fail — which is the shape `docs/conformance-claims.md` refuses — and
+    the reason is a precondition of this deployment's, not a promise it broke:
+    nothing documented here obliges the endpoint to split a text into sentences.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        objects = _timings(asked, STREAMED_TIMESTAMPS)
+        if isinstance(objects, str):
+            return objects
+        if len(objects) < 2:
+            raise Blocked(
+                f"voice {asked.voice.id!r} answered {STREAMED_TIMESTAMPS} with "
+                f"one object for a text of two sentences ({STREAMED_TEXT!r}), so "
+                "there is no consecutive pair to lay end to end"
+            )
+        for before, after in zip(objects, objects[1:]):
+            if abs(after.starts[0] - before.ends[-1]) > _LENGTH_SPREAD_SECONDS:
+                return (
+                    f"answered {STREAMED_TIMESTAMPS} with an object ending at "
+                    f"{before.ends[-1]:.3f}s and the next starting at "
+                    f"{after.starts[0]:.3f}s — a "
+                    f"{abs(after.starts[0] - before.ends[-1]):.3f}s "
+                    "step, so a caller laying these out in sequence has them "
+                    "sliding against their own audio"
+                )
+        return None
+
+    return _of_every(
+        deployment.asking().declaring(CAPABILITY_TIMESTAMPS),
+        NO_TIMESTAMP_VOICE,
+        fault,
+        f"declaring {CAPABILITY_TIMESTAMPS!r} each answered "
+        f"{STREAMED_TIMESTAMPS} with consecutive objects meeting within "
+        f"{_LENGTH_SPREAD_SECONDS:g}s",
+    )
+
+
 # ------------------------------------------------------------------ the claims
 
 
@@ -3853,6 +4283,11 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("REF-5", FALSIFIABLE, probe_ref_5),
     Claim("REF-6", FALSIFIABLE, partial(probe_refusal, REFUSALS["REF-6"])),
     Claim("REF-7", FALSIFIABLE, probe_ref_7),
+    Claim("TIME-2", FALSIFIABLE, probe_time_2),
+    Claim("TIME-3", FALSIFIABLE, probe_time_3),
+    Claim("TIME-4", FALSIFIABLE, probe_time_4),
+    Claim("TIME-5", FALSIFIABLE, probe_time_5),
+    Claim("TIME-6", FALSIFIABLE, probe_time_6),
 )
 
 
