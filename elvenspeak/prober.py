@@ -61,14 +61,15 @@ disagreeing with the document, is a test failure rather than a report nobody can
 trace back to a promise.
 
 Discovery reads `GET /v1/voices` — for the catalogue and, keyless, for whether
-anything is guarded. `GET /v1/models` is deliberately not read yet: no claim
-this file owns needs it, and a discovered field with no reader is a map nothing
-keeps true. `piper-conformance-e16.5` owns every model claim and adds it beside
-[`Deployment.listing`], in the same shape.
+anything is guarded — and `GET /v1/models`, which every `MOD-` and `CAP-5` claim
+reads for the deployment's account of what its voices answer to.
 
-Discovery also *speaks*, once per published format, and [`Spoken`] says why that
-belongs there rather than in the claims that read it — and counts them, so this
-line does not have to.
+Discovery also *speaks*: once per published format, which [`Spoken`] owns, and
+then once per voice per question that voice's own declaration selects, which
+[`Asking`] owns. Both belong there rather than in the claims that read them,
+because claims compare one answer against another and two draws of one request
+are two utterances against a backend that samples. [`Asking`] states the budget
+that buys, so this line does not have to.
 
 # The two shapes a 422 arrives in, decided here
 
@@ -331,14 +332,21 @@ def _posted(
     key: str | None,
     wire_name: str | None,
     body: Mapping[str, Any],
+    endpoint: str = "",
 ) -> Reply:
-    """`body` posted to `voice_id`'s synthesis endpoint in `wire_name`.
+    """`body` posted to `voice_id`'s `endpoint`, in `wire_name`.
 
-    [LAW:dataflow-not-control-flow] The format a request names and the body it
-    carries are values crossing one boundary rather than a function per
-    combination: twenty-eight format draws, five refusals and an unmodelled-field
-    request differ in what is passed here and in nothing else. `AUTH-2` addresses
-    its own syntheses and shares only [`_in_format`].
+    [LAW:dataflow-not-control-flow] The format a request names, the body it
+    carries and which of the four synthesis endpoints it goes to are values
+    crossing one boundary rather than a function per combination: twenty-eight
+    format draws, five refusals, an unmodelled-field request and every per-voice
+    draw [`Asking`] makes differ in what is passed here and in nothing else.
+    `AUTH-2` addresses its own syntheses and shares only [`_in_format`].
+
+    `endpoint` is what follows the voice id, and its default is the empty string
+    because the other three documented syntheses are that same path with a suffix
+    — `README.md`'s own table reads that way. The plain endpoint is therefore one
+    value of this parameter rather than the absence of one.
 
     `wire_name` of `None` names no format at all, which is not the absence of an
     argument but one of the requests this file has to be able to make: `FMT-7`'s
@@ -347,7 +355,7 @@ def _posted(
     quoted = urllib.parse.quote(voice_id, safe="")
     return _ask(
         target,
-        _in_format(f"/v1/text-to-speech/{quoted}", wire_name),
+        _in_format(f"/v1/text-to-speech/{quoted}{endpoint}", wire_name),
         key,
         method="POST",
         body=body,
@@ -499,11 +507,19 @@ class Deployment:
     #: deployment and not by how it was invoked.
     guarded: bool
     listing: Reply | Blocked
+    #: `GET /v1/models`, which every `MOD-` claim and `CAP-5` read. Held as the
+    #: answer rather than as the ids parsed out of it, because `MOD-1` and `MOD-2`
+    #: are claims about the document itself and a parse here would decide them
+    #: before they were asked.
+    models: Reply | Blocked
     #: Every published format asked of one voice, or the [`Blocked`] that stopped
     #: them being asked. Drawn in [`discover`] for the reason `listing` is, and
     #: the same shape: one field with two shapes rather than an answer beside a
     #: reason that could both be present at once.
     drawn: "Spoken | Blocked"
+    #: Every voice asked what its own declaration selects, in the same shape and
+    #: for the same reason. [`Asking`] states what it costs.
+    asked: "Asking | Blocked"
 
     def listed(self) -> Reply:
         """`GET /v1/voices`' answer, or [`Blocked`] if it could not be asked.
@@ -536,6 +552,18 @@ class Deployment:
             raise self.drawn
         return self.drawn
 
+    def asking(self) -> "Asking":
+        """The per-voice draws, or [`Blocked`] saying why none were made."""
+        if isinstance(self.asked, Blocked):
+            raise self.asked
+        return self.asked
+
+    def listed_models(self) -> Reply:
+        """`GET /v1/models`' answer, or [`Blocked`] if it could not be asked."""
+        if isinstance(self.models, Blocked):
+            raise self.models
+        return self.models
+
 
 def discover(target: Target) -> Deployment:
     """Ask `target` what it is, or raise [`Blocked`] if it never answered.
@@ -566,8 +594,22 @@ def discover(target: Target) -> Deployment:
         drawn: Spoken | Blocked = _draw(target, listing, guarded)
     except Blocked as undrawn:
         drawn = undrawn
+    try:
+        models: Reply | Blocked = _ask(target, "/v1/models", _key_for(target, guarded))
+    except Blocked as unlisted:
+        models = unlisted
+    try:
+        asked: Asking | Blocked = _ask_each_voice(target, listing, guarded)
+    except Blocked as unasked:
+        asked = unasked
     return Deployment(
-        target=target, health=health, guarded=guarded, listing=listing, drawn=drawn
+        target=target,
+        health=health,
+        guarded=guarded,
+        listing=listing,
+        models=models,
+        drawn=drawn,
+        asked=asked,
     )
 
 
@@ -838,6 +880,646 @@ def _draw(target: Target, listing: Reply | Blocked, guarded: bool) -> Spoken:
         # Last, so the two draws `repeats` compares are genuinely two asks
         # separated by every other request this function makes.
         again=drawn(PCM_FORMAT),
+    )
+
+
+# ------------------------------------------- what each voice says about itself
+
+
+#: The two capability words `README.md:100` publishes on every voice. This
+#: service's own extension vocabulary, not ElevenLabs', and written out for the
+#: reason [`_CONTENT_TYPES`] is written out: importing `engine.Capability` would
+#: hold this file's reading of a declaration equal to the build under test by
+#: construction, and the deployment is routinely a different build
+#: ([LAW:behavior-not-structure]).
+CAPABILITY_SPEED = "speed"
+CAPABILITY_TIMESTAMPS = "timestamps"
+
+#: What `voice_settings.speed` is set to where a voice declares it. Two, because
+#: the claim is that the audio really gets faster and a rate a hair off 1.0 would
+#: make that a measurement of the encoder's padding instead.
+FASTER = 2.0
+
+#: How much shorter a doubled speed must really come back. Far below the half a
+#: linear engine gives and far above any padding: `_LENGTH_SPREAD_SECONDS` worth
+#: of frame alignment is under a percent of this utterance, so a tenth is a
+#: threshold rather than a guess, and a deployment honouring the rate by a
+#: rounding error fails it.
+_FASTER_BY = 0.10
+
+#: Language families to offer a voice that speaks none of them, tried in order.
+#: `CAP-8`'s named-back arm needs a tag *no offered voice speaks*, and the reason
+#: is observed rather than reasoned: `Catalog.resolve` narrows by language before
+#: it matches the id, so asking an `en` voice for `es` on a deployment that also
+#: offers an `es` voice **substitutes to that voice** and honours the tag. A
+#: prober sending a language some other voice speaks would report `CAP-8` broken
+#: against a deployment doing exactly what it documents.
+#:
+#: Several, so a deployment speaking one of them is not a prober that cannot ask:
+#: every entry is a real ISO 639-1 family, so each is a tag this service reduces
+#: to itself rather than to `None`.
+UNSPOKEN_LANGUAGES = ("zu", "mi", "gd", "yo", "ha", "si", "km", "am")
+
+#: A `model_id` shaped like one ElevenLabs publishes that no build here maps.
+#: Dated for the reason [`INVENTED_FIELD`] is: `MOD-5`'s subject is the stock
+#: client sending a real ElevenLabs model this deployment has never heard of.
+#: Checked against the deployment's own served set before it is sent, so a
+#: deployment that does declare it leaves `MOD-5` unasked rather than reporting a
+#: correct 200 broken.
+UNMAPPED_MODEL = "eleven_unmapped_2027"
+
+#: A `voice_settings` leaf this service models and no engine can honour, which is
+#: `CAP-6`'s subject. It is not [`INVENTED_FIELD`]: `REF-7` already asks what
+#: happens to a body field nobody modelled, and `CAP-6`'s promise is the wider one
+#: — *any* parameter that cannot be honoured is named, the enumerated ones
+#: included. A deployment reporting only what it failed to parse keeps `REF-7` and
+#: breaks this.
+UNHONOURABLE_SETTING = "stability"
+
+#: A voice id nothing can be offering, which is `SUB-1`'s and `SUB-4`'s subject —
+#: one request, and the arm it lands on says whether substitution is configured.
+FOREIGN_VOICE = "no-voice-named-this-2027"
+
+#: A voice id whose bytes are not latin-1, which is `SUB-6`'s subject. A header
+#: value must be latin-1 on the wire, so a server echoing this one into
+#: `x-elvenspeak-voice-requested` unescaped answers 500 — observed on this build
+#: before `api.py:1118` escaped it.
+UNPRINTABLE_VOICE = "vøîce-ñ"
+
+
+@dataclass(frozen=True)
+class Declared:
+    """One voice's own account of itself, in the words it published.
+
+    [LAW:parse-dont-validate] Built only by [`_declared`], so every per-voice
+    claim reads a declaration whose four fields are present and well-typed and
+    none of them asks again. This is the stamp [`ProbedVoice`] deliberately does
+    not carry: that type is thin because `DISC-1` is the claim these fields are
+    all there, and a parser strict enough to refuse a voice missing its
+    `capabilities` would crash before that verdict could be reported.
+
+    So both types exist and neither is redundant. `ProbedVoice` is what a claim
+    addressing a voice needs; `Declared` is what a claim reading a voice's
+    promises needs, and the crossing between them is where `DISC-1`'s subject
+    stops being a precondition and starts being a fact.
+    """
+
+    id: str
+    #: What this voice says speaking in it really does, out of
+    #: [`CAPABILITY_SPEED`] and [`CAPABILITY_TIMESTAMPS`]. Unknown words are kept
+    #: rather than dropped: a capability this build has not heard of is a
+    #: deployment ahead of this checkout, not a malformed listing.
+    capabilities: frozenset[str]
+    models: frozenset[str]
+    language: str
+    aliases: tuple[str, ...]
+
+
+#: What [`_declared`] requires of a voice: the field, the JSON type, and whether
+#: the elements of a list must be non-empty strings. A subset of
+#: [`_PUBLISHED_FIELDS`] on purpose — `DISC-1` owns the whole shape, and this
+#: table names only what a per-voice claim actually reads
+#: ([FRAMING:representation] — a field with no reader is a map nothing keeps true).
+_DECLARED_FIELDS: tuple[tuple[str, type], ...] = (
+    ("capabilities", list),
+    ("models", list),
+    ("language", str),
+    ("aliases", list),
+)
+
+
+def _declared(voice: ProbedVoice) -> Declared | str:
+    """`voice`'s declaration, or the complaint saying why it published none.
+
+    Returned rather than raised for the reason [`_parsed_voices`] returns its own:
+    to `DISC-1`, whose claim *is* that these fields are present and well-typed, a
+    voice missing one is the promise broken, while to a claim that needed the
+    declaration to choose an input it is a precondition that failed. One parser,
+    two readings ([LAW:decomposition] — parsing and judging are two jobs).
+    """
+    for field, expected in _DECLARED_FIELDS:
+        value = voice.published.get(field)
+        if not isinstance(value, expected):
+            return (
+                f"published {field!r} as {type(value).__name__} rather than "
+                f"{expected.__name__}: {value!r:.100}"
+            )
+        if expected is list and not all(
+            isinstance(item, str) and item for item in value
+        ):
+            return f"published a {field!r} holding something that is not a name: {value!r:.100}"
+    language = voice.published["language"]
+    if not language:
+        return "published an empty 'language', so no tag can be read against it"
+    return Declared(
+        id=voice.id,
+        capabilities=frozenset(voice.published["capabilities"]),
+        models=frozenset(voice.published["models"]),
+        language=language,
+        aliases=tuple(voice.published["aliases"]),
+    )
+
+
+def _declarations(listing: Reply | Blocked) -> tuple[Declared, ...]:
+    """Every offered voice's declaration, or [`Blocked`] if one cannot be read.
+
+    All or nothing, because a per-voice claim's subject is *every* voice: asking
+    it of the readable ones and reporting `held` would be the sampling this epic
+    exists to remove, wearing a parse failure as the excuse.
+    """
+    read = []
+    for voice in _voices_of(listing):
+        parsed = _declared(voice)
+        if isinstance(parsed, str):
+            raise Blocked(
+                f"voice {voice.id!r} {parsed} — so no per-voice claim can read "
+                "what it promises, and DISC-1 is the claim that reports it"
+            )
+        read.append(parsed)
+    return tuple(read)
+
+
+@dataclass(frozen=True)
+class Catalogue:
+    """Every probe input this deployment's own account of itself decides.
+
+    Derived once, in [`discover`], so the language `CAP-8` sends and the model id
+    `MOD-4` sends are chosen from one reading of the listing rather than from as
+    many readings as there are claims ([LAW:one-source-of-truth]).
+
+    The two choosers return the [`Blocked`] rather than raising it, because each
+    is a *draw* that cannot be composed and [`Asking`] already carries an
+    uncomposable draw as a value — raising would make the whole voice's table
+    fail for one input it could not pick ([LAW:dataflow-not-control-flow]).
+    """
+
+    voices: tuple[Declared, ...]
+
+    @property
+    def served(self) -> frozenset[str]:
+        """Every `model_id` some offered voice answers to.
+
+        The union this deployment's `GET /v1/models` is claimed to publish —
+        derived here from the voices rather than read from that endpoint, because
+        `MOD-2` is the claim that the two agree and a probe reading only one of
+        them could not tell.
+        """
+        return frozenset[str]().union(*(voice.models for voice in self.voices))
+
+    @property
+    def spoken(self) -> frozenset[str]:
+        """Every language family some offered voice speaks."""
+        return frozenset(voice.language for voice in self.voices)
+
+    def unspoken(self) -> str | Blocked:
+        """A language family no offered voice speaks."""
+        for family in UNSPOKEN_LANGUAGES:
+            if family not in self.spoken:
+                return family
+        return Blocked(
+            f"this deployment speaks every one of {list(UNSPOKEN_LANGUAGES)}, so "
+            "the prober has no language left to ask for that no voice here speaks"
+        )
+
+    def elsewhere_than(self, voice: Declared) -> str | Blocked:
+        """A `model_id` this deployment serves that `voice` does not answer to."""
+        others = sorted(self.served - voice.models)
+        if not others:
+            return Blocked(
+                f"every model_id this deployment publishes is answered by voice "
+                f"{voice.id!r}, so none of them names an engine that is not "
+                "speaking it — which is the state a single-engine deployment is "
+                "always in, and the state a router fronting two engines is not"
+            )
+        return others[0]
+
+    def unmapped(self) -> str | Blocked:
+        """A `model_id` this deployment maps to nothing at all."""
+        if UNMAPPED_MODEL in self.served:
+            return Blocked(
+                f"this deployment serves {UNMAPPED_MODEL!r}, which the prober "
+                "sends as a model id naming no engine — it names one here"
+            )
+        return UNMAPPED_MODEL
+
+
+# ------------------------------------------------------- the per-voice draws
+
+
+#: The endpoint suffixes the two timestamp claims read, in the order
+#: `README.md:44` lists them. Both, because `CAP-3` and `CAP-4` are claims about
+#: *both* endpoints and a deployment answering one of them correctly is half a
+#: verdict.
+_TIMESTAMP_ENDPOINTS = ("/with-timestamps", "/stream/with-timestamps")
+
+#: The name of each draw, which is what a probe asks for and what a report quotes.
+#: Written as words rather than as identifiers because a blocker naming one goes
+#: to an operator ([LAW:one-source-of-truth] — the probe and the table agree by
+#: sharing the constant, not by two spellings staying in step).
+PLAIN = "asking for nothing but the text"
+AGAIN = "asking for nothing but the text, a second time"
+FASTER_DRAW = f"voice_settings.speed of {FASTER:g}"
+OWN_FAMILY = "a language_code this voice speaks"
+OWN_VARIANT = "that same language, region-tagged and upper-cased"
+UNSPOKEN_DRAW = "a language_code no voice here speaks"
+LISTED_MODEL = "a model_id this voice lists"
+ELSEWHERE_MODEL = "a model_id another voice here lists"
+UNMAPPED_DRAW = "a model_id naming no engine here"
+UNHONOURABLE_DRAW = f"a voice_settings.{UNHONOURABLE_SETTING} no engine honours"
+EMPTY_LANGUAGE = "an empty language_code"
+BLANK_LANGUAGE = "a language_code of nothing but whitespace"
+FOREIGN_DRAW = "a voice_id nothing here offers"
+UNPRINTABLE_DRAW = "a voice_id whose bytes are not latin-1"
+
+
+@dataclass(frozen=True)
+class Draw:
+    """One synthesis request: who it addresses, where it goes, what it carries.
+
+    [LAW:dataflow-not-control-flow] Every per-voice question is a value of this
+    type, so the eleven a voice is asked and the five the deployment is asked
+    differ in the rows of a table and in nothing else. `voice_id` is carried
+    rather than taken from the voice the table is about, because two of the
+    deployment's own draws address an id no voice has — which is their whole
+    point, and a field defaulting to "this table's voice" would make them a mode.
+    """
+
+    voice_id: str
+    endpoint: str
+    body: Mapping[str, Any]
+
+
+def _saying(voice_id: str, **asked: Any) -> Draw:
+    """[`PROBE_TEXT`] asked of `voice_id`'s plain endpoint, carrying `asked`."""
+    return Draw(voice_id=voice_id, endpoint="", body={"text": PROBE_TEXT, **asked})
+
+
+def _carrying(voice_id: str, field: str, value: str | Blocked) -> Draw | Blocked:
+    """[`_saying`] with `field` set to `value`, or the [`Blocked`] that picked none.
+
+    One adapter for both fallible inputs — the language `CAP-8` needs and the two
+    model ids `MOD-4` and `MOD-5` need — so a chooser that could not pick becomes
+    an uncomposable draw once rather than at each of the three call sites
+    ([LAW:single-enforcer]).
+    """
+    if isinstance(value, Blocked):
+        return value
+    return _saying(voice_id, **{field: value})
+
+
+def _voice_draws(voice: Declared, catalogue: Catalogue) -> dict[str, Draw | Blocked]:
+    """Every request `voice` is asked, because its own declaration selects it.
+
+    **The budget, decided here and nowhere else.** Eight of these synthesize, plus
+    two where the voice declares `timestamps` and none where it does not, plus one
+    refusal that costs nothing — so a voice costs 8 utterances, 10 if it reports
+    timings. That multiplies by the catalogue, on top of the 30 [`Spoken`] spends.
+
+    Eight is the answer to "which claims are really about *this voice*", and the
+    rule is: **a claim is asked of every voice when its subject is that voice's
+    own declaration** — the `capabilities` list, the `models` list, the `language`
+    on it. Every one of the eight reads one of those three. A claim whose subject
+    is instead this deployment's *request handling* is asked once, of one voice,
+    by [`_handling_draws`], because asking it again of a second voice re-asks one
+    code path at the price of an utterance.
+
+    There is deliberately no sampling shortcut, for the reason [`Spoken`] has
+    none: "a voice declaring `speed` really changes the rate" is a claim about
+    every voice, and behind a router the voices come from different engines in one
+    process — which is the whole reason this epic exists. A prober asking one
+    voice and reporting `held` would be making a claim about all of them having
+    checked one, and that is the defect being removed, not a cost being saved.
+
+    The alias rows are the one place the count is not fixed, and they are per voice
+    for the same reason as the rest: an alias is something the voice itself
+    published. A router publishes none (`piper-routing-7e2.15`), so `SUB-5` costs
+    nothing there and the report shows an empty alias set rather than an absent
+    claim.
+    """
+    return {
+        PLAIN: _saying(voice.id),
+        FASTER_DRAW: _saying(voice.id, voice_settings={"speed": FASTER}),
+        OWN_FAMILY: _saying(voice.id, language_code=voice.language),
+        OWN_VARIANT: _saying(voice.id, language_code=_mangled(voice.language)),
+        UNSPOKEN_DRAW: _carrying(voice.id, "language_code", catalogue.unspoken()),
+        LISTED_MODEL: _carrying(voice.id, "model_id", _one_model(voice)),
+        ELSEWHERE_MODEL: _carrying(
+            voice.id, "model_id", catalogue.elsewhere_than(voice)
+        ),
+        UNMAPPED_DRAW: _carrying(voice.id, "model_id", catalogue.unmapped()),
+        **{
+            _timestamp_draw(endpoint): Draw(
+                voice_id=voice.id, endpoint=endpoint, body={"text": PROBE_TEXT}
+            )
+            for endpoint in _TIMESTAMP_ENDPOINTS
+        },
+        **{_alias_draw(alias): _saying(alias) for alias in voice.aliases},
+        # Last, so the two draws [`Asked.repeats`] compares are genuinely two asks
+        # separated by every other request this table makes — the ordering
+        # [`Spoken.again`] keeps, and for the same reason.
+        AGAIN: _saying(voice.id),
+    }
+
+
+def _timestamp_draw(endpoint: str) -> str:
+    """The name of the draw asking `endpoint`."""
+    return f"POST {endpoint}"
+
+
+def _alias_draw(alias: str) -> str:
+    """The name of the draw asking for `alias`."""
+    return f"the alias {alias!r}"
+
+
+def _mangled(family: str) -> str:
+    """`family` spelled the three ways `CAP-10` says are one request.
+
+    One draw rather than three, and that is a strengthening rather than a saving:
+    upper-casing, an underscore separator and a region subtag are the three
+    reductions `engine.spoken_language` performs, so a tag carrying all three at
+    once is honoured only by a deployment doing all three. Three separate draws
+    would each leave the other two unasked and cost two more utterances per voice.
+
+    The region is numeric so it cannot be read as a language of its own: `es-419`
+    is a real tag of this shape, where an `EN_GB` would leave a reader wondering
+    whether `gb` was the family that got compared.
+    """
+    return f"{family.upper()}_419"
+
+
+def _one_model(voice: Declared) -> str | Blocked:
+    """A `model_id` `voice` itself lists, or [`Blocked`] if it lists none."""
+    if not voice.models:
+        return Blocked(
+            f"voice {voice.id!r} lists no model_id at all, so there is none of "
+            "its own to send — it is unreachable by engine, which DISC-1 reports"
+        )
+    return sorted(voice.models)[0]
+
+
+def _handling_draws(voice: Declared, catalogue: Catalogue) -> dict[str, Draw | Blocked]:
+    """Every request about this deployment's handling rather than about a voice.
+
+    Asked once, of `voice`, because each is a claim about one code path: what a
+    blank `language_code` means, what happens to a parameter nothing can honour,
+    what an unknown voice id earns. Asking them again of a second voice would
+    re-ask the same path at the price of an utterance, which is the half of the
+    budget [`_voice_draws`] does *not* spend per voice.
+
+    These rows join the first voice's own table rather than making a second
+    [`Asked`] beside it, and that is what keeps every draw name readable from one
+    place. Two tables for one voice meant a claim had to know which of them held
+    the name it wanted, and nothing in the type said: `CAP-7` and `CAP-9` both
+    read [`PLAIN`] off the deployment-wide table, which never drew it, and every
+    run raised `KeyError` before a report could be printed
+    ([LAW:types-are-the-program] — the lookup that cannot fail is the one where
+    there is only one table to look in).
+
+    Five requests, four of which synthesize — [`FOREIGN_DRAW`] synthesizes only
+    where substitution is configured, and answers 404 where it is not, which is
+    `SUB-4`.
+    """
+    return {
+        UNHONOURABLE_DRAW: _saying(
+            voice.id, voice_settings={UNHONOURABLE_SETTING: 0.4}
+        ),
+        EMPTY_LANGUAGE: _saying(voice.id, language_code=""),
+        BLANK_LANGUAGE: _saying(voice.id, language_code="   "),
+        FOREIGN_DRAW: _saying(FOREIGN_VOICE),
+        UNPRINTABLE_DRAW: _saying(UNPRINTABLE_VOICE),
+    }
+
+
+@dataclass(frozen=True)
+class Asked:
+    """One voice, and what it answered to every draw made of it.
+
+    `answers` holds a [`Blocked`] where a draw could not be composed or never
+    finished, rather than dropping the row, for the reason [`Spoken.answers`] does:
+    a claim whose draw is missing must report that it could not be asked, and a
+    row quietly absent is a claim nobody notices went unasked
+    ([LAW:no-silent-failure]).
+
+    [LAW:parse-dont-validate] Built only by [`_asked_of`], which derives both maps
+    from one table in one pass, so they carry the same keys by construction rather
+    than by two comprehensions staying in step. `draws` is kept beside the answers
+    because `SUB-2` is a claim about the relationship between the two — that
+    `x-elvenspeak-voice-requested` appears exactly when the voice that spoke is not
+    the id that was addressed — and an answer alone cannot say what was asked for.
+    """
+
+    voice: Declared
+    draws: Mapping[str, Draw | Blocked]
+    answers: Mapping[str, Reply | Blocked]
+
+    def addressed(self, draw: str) -> str:
+        """The voice id `draw` was sent to."""
+        composed = self.draws[draw]
+        if isinstance(composed, Blocked):
+            raise composed
+        return composed.voice_id
+
+    def answered(self, draw: str) -> Reply:
+        """`draw`'s answer, or [`Blocked`] saying why there is none.
+
+        [LAW:parse-dont-validate] The one crossing between a draw and the claims
+        that read it, so none of them asks again whether an answer arrived. A
+        `KeyError` here is a probe naming a draw this table does not make, which
+        is a bug in the prober and deliberately not caught by [`_finding`].
+        """
+        answer = self.answers[draw]
+        if isinstance(answer, Blocked):
+            raise answer
+        return answer
+
+    def spoke(self, draw: str) -> Reply:
+        """`draw`'s answer, proven to carry audio.
+
+        The reading every claim about a *successful* synthesis needs, so a refusal
+        leaves it unasked behind one blocker rather than being read as a 200 whose
+        headers say nothing ([LAW:single-enforcer] — one account of what counts as
+        having spoken, wherever the question comes from).
+
+        What this cannot separate is *why* there is no audio, and for a claim that
+        promised the draw would be served the difference decides the verdict: a
+        draw that could not be **composed** is a precondition failing and `unasked`
+        is right, while one composed, sent and **refused** is the deployment
+        answering. [`refusal`] is the reading for the second, and every claim that
+        requires a served draw asks it first.
+        """
+        return _served(self.answers[draw], f"{self.voice.id!r} {draw}")
+
+    def refusal(self, draw: str) -> str | None:
+        """How this deployment turned `draw` down, or `None` if it served it.
+
+        The half of [`spoke`]'s blocker that is a verdict rather than a
+        precondition. A claim promising that a draw is served — `CAP-1`, `CAP-2`,
+        `CAP-3`, `CAP-6`, `CAP-8`, `CAP-9`, `CAP-10`, `MOD-3`, `MOD-6` and
+        `SUB-5` — is *false* when the deployment refuses it, and reading that
+        through [`spoke`] alone reported every one of them as "could not be
+        asked". A draw carrying no such promise keeps [`spoke`]'s reading: a
+        refused `PLAIN` is `FMT-1`'s subject, not `CAP-7`'s or `CAP-9`'s. [`answered`] still raises for a
+        draw that never got an answer at all, so the two readings partition what
+        can become of a draw at exactly the line where the deployment's own answer
+        begins ([LAW:single-enforcer] — what a refusal means to a claim that needed
+        the audio is decided here, not in each of the faults that read it).
+        """
+        answer = self.answered(draw)
+        if answer.status == 200:
+            return None
+        return f"answered {draw} with {answer.status}: {answer.body[:200]!r}"
+
+    def repeats(self) -> bool:
+        """Whether this voice answered two identical requests identically.
+
+        [`Spoken.repeats`] asks this of the one voice the format draws were made
+        of; this asks it of each voice in turn, because behind a router they are
+        different engines and one of them sampling says nothing about the next.
+        `CAP-1` is the claim that needs it: a length read against another length
+        is evidence only where the backend is a function of the request.
+        """
+        return self.spoke(AGAIN).body == self.spoke(PLAIN).body
+
+    def declares(self, capability: str) -> bool:
+        """Whether this voice's own list names `capability`."""
+        return capability in self.voice.capabilities
+
+
+@dataclass(frozen=True)
+class Asking:
+    """Every voice asked what its own declaration selects, drawn once.
+
+    Drawn in [`discover`] rather than inside the claims that read it, for the
+    reason [`Spoken`] is: `CAP-1` reads one of a voice's lengths against another,
+    and a prober re-synthesizing per claim would be comparing two different
+    utterances against a backend that samples ([LAW:one-source-of-truth]).
+
+    **What a run costs, stated where it is spent.** [`_voice_draws`] spends 8
+    utterances per voice and 10 for a voice reporting timings;
+    [`_handling_draws`] spends 4 more, once. So a catalogue of `V` voices costs
+    `8V + 4` at least, against `Spoken`'s flat 30 — the per-voice half multiplies
+    and the deployment-wide half does not, which is the whole of the decision
+    [`_voice_draws`] records. [`syntheses`] reports what it really came to, so an
+    operator reads the price off the run rather than off this docstring.
+    """
+
+    catalogue: Catalogue
+    #: One entry per offered voice, in the order the listing published them. The
+    #: first also carries the deployment-wide draws [`_handling_draws`] makes,
+    #: which is what [`once`] names.
+    voices: tuple[Asked, ...]
+
+    @property
+    def once(self) -> Asked:
+        """The table carrying the draws asked of this deployment rather than of a voice.
+
+        The first offered voice's own table, because that is where
+        [`_handling_draws`] puts them — a derived name for one of `voices` rather
+        than a second [`Asked`] holding a copy of them ([LAW:one-source-of-truth]).
+        A claim reading `once` and a claim reading `voices[0]` are therefore
+        reading one set of answers, and every draw name this run makes is readable
+        from either.
+        """
+        return self.voices[0]
+
+    def syntheses(self) -> int:
+        """How many of these requests really made audio.
+
+        Derived rather than counted as the draws are made, so there is no second
+        number free to disagree with the answers it describes
+        ([LAW:one-source-of-truth]). A 200 is the test because every draw here is
+        a synthesis endpoint: a refusal and a 501 spent no engine time, which is
+        exactly the difference an operator pricing a run cares about.
+        """
+        return sum(
+            1
+            for asked in self.voices
+            for answer in asked.answers.values()
+            if isinstance(answer, Reply) and answer.status == 200
+        )
+
+    def declaring(self, capability: str) -> tuple[Asked, ...]:
+        """The voices whose own list names `capability`."""
+        return tuple(asked for asked in self.voices if asked.declares(capability))
+
+    def omitting(self, capability: str) -> tuple[Asked, ...]:
+        """The voices whose own list omits `capability`.
+
+        The other arm of [`declaring`], and a method rather than the caller's
+        negation so the two arms are one partition of the catalogue. A voice is in
+        exactly one of them, which is what makes a claim per arm add up to a claim
+        about every voice ([LAW:dataflow-not-control-flow] — the declaration is
+        the discriminator, read off the deployment rather than guessed from which
+        engine the prober thinks it is talking to).
+        """
+        return tuple(asked for asked in self.voices if not asked.declares(capability))
+
+
+def _ask_each_voice(
+    target: Target, listing: Reply | Blocked, guarded: bool
+) -> Asking:
+    """Every offered voice asked what its declaration selects, plus the five.
+
+    Each draw is caught on its own, so one request that never answered leaves
+    every other readable and the claim that owns it reports the failure. A draw
+    that failed is a value here, never a row quietly missing
+    ([LAW:no-silent-failure]).
+    """
+    voices = _declarations(listing)
+    if not voices:
+        raise Blocked(
+            "this deployment lists no voice, so no claim about what a voice "
+            "promises has a subject"
+        )
+    key = _key_for(target, guarded)
+    catalogue = Catalogue(voices=voices)
+    first, rest = voices[0], voices[1:]
+    return Asking(
+        catalogue=catalogue,
+        # The deployment-wide draws are made first so [`_voice_draws`]' own
+        # ordering survives the merge — [`AGAIN`] stays the last request of this
+        # table, which is what makes it a second ask rather than a repeat of the
+        # one before it.
+        voices=(
+            _asked_of(
+                target,
+                first,
+                key,
+                {
+                    **_handling_draws(first, catalogue),
+                    **_voice_draws(first, catalogue),
+                },
+            ),
+            *(
+                _asked_of(target, voice, key, _voice_draws(voice, catalogue))
+                for voice in rest
+            ),
+        ),
+    )
+
+
+def _asked_of(
+    target: Target,
+    voice: Declared,
+    key: str | None,
+    draws: Mapping[str, Draw | Blocked],
+) -> Asked:
+    """`draws` all made, each failure kept as the value that stops its own claim."""
+
+    def answered(draw: Draw | Blocked) -> Reply | Blocked:
+        if isinstance(draw, Blocked):
+            return draw
+        try:
+            return _posted(
+                target, draw.voice_id, key, PCM_FORMAT, draw.body, draw.endpoint
+            )
+        except Blocked as unanswered:
+            return unanswered
+
+    return Asked(
+        voice=voice,
+        draws=draws,
+        answers={name: answered(draw) for name, draw in draws.items()},
     )
 
 
@@ -1120,6 +1802,30 @@ def _keyless_asks(voice_id: str) -> tuple[_KeylessAsk, ...]:
     return reads + syntheses
 
 
+def _answered_keylessly(reply: Reply) -> bool:
+    """Whether `reply` is an answer a keyless caller really got.
+
+    Two non-2xx statuses are answers rather than refusals, and both belong to
+    another claim. A 404 is a documented path this build does not route. A 501
+    carrying [`CANNOT_REPORT_TIMINGS`] is a voice that cannot report timings —
+    `CAP-4` owns that refusal and *requires* exactly it, so judging it here means
+    this file demands a 2xx from the same request another of its claims demands a
+    501 for, and a deployment whose voices honour nothing beyond plain speech is
+    reported broken for being conformant ([LAW:single-enforcer] — whether a status
+    is the documented capability refusal is one question, answered by the sentence
+    `CAP-4` already reads rather than by a second status table drifting beside it).
+
+    The sentence is what selects the arm, not the bare 501: a deployment guarding
+    its endpoints behind an undocumented 501 turned a keyless caller away, and
+    that is this claim failing.
+    """
+    return (
+        200 <= reply.status < 300
+        or reply.status == 404
+        or (reply.status == 501 and _detail_of(reply) == CANNOT_REPORT_TIMINGS)
+    )
+
+
 def probe_auth_2(deployment: Deployment) -> Verdict:
     """With nothing configured, every documented endpoint answers without a key.
 
@@ -1129,13 +1835,11 @@ def probe_auth_2(deployment: Deployment) -> Verdict:
     completely. One voice, and an utterance per documented synthesis, which is
     what that costs.
 
-    A 404 is the one status not judged: the claim is about keylessness, so a
-    documented path this build does not route answers 404 and belongs to some
-    other claim. Every other non-2xx is this claim failing, named by its status.
-    Judging only a 401 would be assuming a foreign deployment shares this
-    checkout's choice of status for a refusal — a proxy in front of it refusing
-    403, or the deployment answering 500, is an endpoint a keyless caller did not
-    get an answer from either way.
+    What counts as an answer is [`_answered_keylessly`]. Every other non-2xx is
+    this claim failing, named by its status: judging only a 401 would be assuming
+    a foreign deployment shares this checkout's choice of status for a refusal —
+    a proxy in front of it refusing 403, or the deployment answering 500, is an
+    endpoint a keyless caller did not get an answer from either way.
     """
     if deployment.guarded:
         return Unasked(
@@ -1152,7 +1856,7 @@ def probe_auth_2(deployment: Deployment) -> Verdict:
     asks = _keyless_asks(voice_id)
     for method, path, body in asks:
         reply = _ask(deployment.target, path, key=None, method=method, body=body)
-        if not (200 <= reply.status < 300 or reply.status == 404):
+        if not _answered_keylessly(reply):
             return Broken(
                 f"{method} {path} answered {reply.status} to a keyless request "
                 "while GET /v1/voices allows one — a deployment configuring no "
@@ -1852,6 +2556,1225 @@ def probe_ref_7(deployment: Deployment) -> Verdict:
     )
 
 
+# --------------------------------------------------- per-voice claim machinery
+
+
+#: What a voice that does not report timings answers both timestamp endpoints,
+#: verbatim. Quoted rather than matched loosely because `CAP-4`'s promise is that a
+#: caller can *tell* this refusal from every other 501 — README:106 publishes the
+#: sentence, and a bare 501 leaves a client guessing whether the route exists.
+CANNOT_REPORT_TIMINGS = (
+    "this service cannot report how long each part of an utterance took"
+)
+
+
+#: What [`_of_every`] says when a claim asked of the *whole* catalogue has no
+#: subject — which no run reaches: [`_ask_each_voice`] raises [`Blocked`] on an
+#: empty listing before an [`Asking`] exists to pass here, so only the filtered
+#: callers ([`Asking.declaring`] and [`Asking.omitting`], which are `CAP-1`/`CAP-2`
+#: and `CAP-3`/`CAP-4` selecting their arm) can really be empty and they say which
+#: arm the deployment chose instead. Named once rather than spelled six times, so
+#: six sentences about one unreachable state cannot drift into six accounts of it
+#: ([LAW:one-source-of-truth]).
+NO_VOICE_OFFERED = (
+    "this deployment lists no voice, so a claim asked of every voice has no subject"
+)
+
+
+def _of_every(
+    subjects: tuple[Asked, ...],
+    unasked: str,
+    fault: Callable[[Asked], str | None],
+    held: str,
+) -> Verdict:
+    """`fault` asked of every subject: the first one found, or `held` over all.
+
+    [LAW:one-type-per-behavior] Eleven per-voice claims are this same loop — an
+    empty set of subjects is `unasked`, the first fault is `broken`, and a clean
+    sweep is `held` over a count — and what separates them is only which fault a
+    voice can have. That is a value, so they are instances of one claim shape
+    rather than eleven copies of a loop free to drift in how a claim over an empty
+    catalogue reads ([LAW:single-enforcer] — what "no subject" means is decided
+    here).
+
+    A [`Blocked`] out of `fault` is left to propagate, and that is deliberate: the
+    claim is about *every* subject, so a draw that never answered for one of them
+    is a claim that could not be asked in full. Catching it to carry on would
+    report `held` over the voices that happened to answer, which is the sampling
+    this epic exists to remove.
+    """
+    if not subjects:
+        return Unasked(unasked)
+    for subject in subjects:
+        found = fault(subject)
+        if found is not None:
+            return Broken(f"voice {subject.voice.id!r} {found}")
+    return Held(f"{_counted(len(subjects), 'voice')} {held}")
+
+
+def _ignored_header(reply: Reply) -> str | None:
+    """`x-elvenspeak-ignored` as it arrived, or `None` if it did not.
+
+    `None` and `""` are different answers and `CAP-7` is the claim about the
+    difference: absent means everything asked for was honoured, while an empty
+    header is a server saying "these were dropped" and naming none of them.
+    """
+    return reply.headers.get(f"{_ELVENSPEAK_HEADER}ignored")
+
+
+def _ignored(reply: Reply) -> tuple[str, ...]:
+    """Every parameter `reply` names as not honoured."""
+    named = _ignored_header(reply)
+    return () if named is None else tuple(part.strip() for part in named.split(","))
+
+
+def _spoke_in(reply: Reply) -> str | None:
+    """The voice `reply` says spoke, or `None` if it named none."""
+    return reply.headers.get(f"{_ELVENSPEAK_HEADER}voice")
+
+
+def _asked_for(reply: Reply) -> str | None:
+    """The voice `reply` says was requested, or `None` if it named none."""
+    return reply.headers.get(f"{_ELVENSPEAK_HEADER}voice-requested")
+
+
+def _echoed(requested: str | None, addressed: str) -> bool:
+    """Whether `requested` is this deployment's record of `addressed`.
+
+    Equality wherever a header value can hold the id as it was sent, and presence
+    alone where it cannot. An id outside the printable ASCII range reaches the
+    caller *escaped* — a caller who sends a bare CRLF in a voice id must not get
+    it back unescaped — and which escape a build picks is that build's own
+    business. Holding this file to one spelling would report `broken` against a
+    deployment doing the only safe thing: a real server answered
+    [`UNPRINTABLE_VOICE`] with `'v\\xf8\\xeece-\\xf1'`, and `SUB-2` read that as a
+    substitution misrecording what was asked for.
+
+    Backslash and comma count as unholdable for the same reason rather than a
+    different one: a backslash is what introduces an escape and a comma is what
+    separates the parts of these headers, so an id carrying either cannot be told
+    apart from the rendering. That is a fact about the wire, so the two arms are
+    selected by the id rather than by which draw is asking
+    ([LAW:dataflow-not-control-flow]) — and it is deliberately not this build's
+    escape table, which the prober must never assert against a foreign deployment
+    ([LAW:behavior-not-structure]). [`probe_sub_6`] reads its own id the same way
+    and says why at greater length.
+    """
+    if all(" " <= char <= "~" and char not in "\\," for char in addressed):
+        return requested == addressed
+    return requested is not None
+
+
+def _detail_of(reply: Reply) -> Any:
+    """`reply`'s `detail`, or the raw bytes where it carries none.
+
+    The raw bytes rather than `None`, so a complaint quoting this shows what really
+    came back: a body that is not JSON and one whose `detail` is genuinely absent
+    are both answers a claim reports, and neither should print as nothing.
+    """
+    try:
+        body = json.loads(reply.body)
+    except ValueError:
+        return reply.body
+    return body.get("detail") if isinstance(body, dict) else body
+
+
+def _first_alignment(body: bytes) -> list[Any] | str:
+    """The `characters` of the first alignment in `body`, or why there is none.
+
+    One reader for both timestamp endpoints, because one answers a single object
+    and the other one object per line — and the first line of a single object is
+    that object. `TIME-3` owns the claim that the streaming shape really is one
+    per line; what `CAP-3` needs is that a voice declaring `timestamps` returned
+    timings at all.
+    """
+    first = body.splitlines()[0] if body.splitlines() else b""
+    try:
+        parsed = json.loads(first)
+    except ValueError:
+        return f"answered a body that is not JSON: {body[:200]!r}"
+    if not isinstance(parsed, dict):
+        return f"answered {parsed!r:.200} rather than an object carrying an alignment"
+    alignment = parsed.get("alignment")
+    if not isinstance(alignment, dict):
+        return f"answered no `alignment` object: {parsed!r:.200}"
+    characters = alignment.get("characters")
+    if not isinstance(characters, list):
+        return f"answered an `alignment` with no `characters` array: {alignment!r:.200}"
+    return characters
+
+
+# -------------------------------------------------- per-voice capability probes
+
+
+def probe_cap_1(deployment: Deployment) -> Verdict:
+    """A voice declaring `speed` really speaks faster when asked to.
+
+    The falsifiable half of the capability contract, and the reason the whole
+    per-voice pass is worth its price: a deployment can publish `speed` on every
+    voice, report it honoured in every header, and hand back the same audio every
+    time. Only the byte count gives it away, and only in `pcm_*`, where a byte
+    count is a sample count.
+
+    The header is judged beside it because the two can disagree in one direction
+    that matters behind a router: a backend with the capability withheld reports
+    `voice_settings.speed` ignored while the listing that reached the caller still
+    declares it, and a caller reading the listing to decide has been told the
+    opposite of what happened.
+
+    Read against this voice's own neutral draw rather than against a duration this
+    file holds, because how long an engine takes to say three words is the
+    engine's business. That comparison is evidence only where the backend is a
+    function of the request, which [`Asked.repeats`] establishes per voice.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        # Before the lengths, because a refused rate has no length to read and is
+        # this claim being false rather than a reason it could not be asked.
+        refused = asked.refusal(FASTER_DRAW)
+        if refused is not None:
+            return (
+                f"declares {CAPABILITY_SPEED!r} and then {refused} — a rate this "
+                "voice promises to speak at is one it must accept when asked"
+            )
+        if not asked.repeats():
+            raise Blocked(
+                f"voice {asked.voice.id!r} answered two identical {PCM_FORMAT} "
+                "requests with two different utterances, so a length at one speed "
+                "cannot be read against a length at another"
+            )
+        named = _ignored(asked.spoke(FASTER_DRAW))
+        if "voice_settings.speed" in named:
+            return (
+                f"declares {CAPABILITY_SPEED!r} and then reported "
+                f"voice_settings.speed ignored — a caller reading the listing to "
+                "decide whether to send a rate was told the opposite of what this "
+                "deployment did"
+            )
+        neutral = len(asked.spoke(PLAIN).body)
+        faster = len(asked.spoke(FASTER_DRAW).body)
+        if faster > neutral * (1 - _FASTER_BY):
+            return (
+                f"declares {CAPABILITY_SPEED!r} but answered {faster} bytes at "
+                f"speed {FASTER:g} against {neutral} at the neutral rate — "
+                f"{1 - _FASTER_BY:.0%} of the audio or more, so the rate reached "
+                "no engine and the declaration is a promise nothing keeps"
+            )
+        return None
+
+    return _of_every(
+        deployment.asking().declaring(CAPABILITY_SPEED),
+        f"no voice here declares {CAPABILITY_SPEED!r}, so there is none whose rate "
+        "could be varied — CAP-2 is the arm this deployment's voices select",
+        fault,
+        f"declaring {CAPABILITY_SPEED!r} each answered materially shorter audio at "
+        f"speed {FASTER:g}",
+    )
+
+
+def probe_cap_2(deployment: Deployment) -> Verdict:
+    """A voice not declaring `speed` says so rather than dropping the rate.
+
+    `CAP-1`'s other arm, selected by the voice's own list. The failure this
+    catches is the quiet one: a server that accepts the rate, ignores it, and
+    answers 200 with no header has told the caller their whole request was
+    honoured when part of it was discarded — README:24's rule 2 exactly inverted.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        refused = asked.refusal(FASTER_DRAW)
+        if refused is not None:
+            return (
+                f"omits {CAPABILITY_SPEED!r} and then {refused} — a rate it does "
+                "not honour is one to serve and report ignored, never one to "
+                "refuse over"
+            )
+        named = _ignored(asked.spoke(FASTER_DRAW))
+        if "voice_settings.speed" not in named:
+            return (
+                f"omits {CAPABILITY_SPEED!r} and was asked for speed "
+                f"{FASTER:g} anyway, answering 200 with "
+                f"{_ELVENSPEAK_HEADER}ignored {named or 'absent'} — the rate was "
+                "dropped without a word, so the caller believes it was honoured"
+            )
+        return None
+
+    return _of_every(
+        deployment.asking().omitting(CAPABILITY_SPEED),
+        f"every voice here declares {CAPABILITY_SPEED!r}, so there is none that "
+        "must report the rate ignored — CAP-1 is the arm they select",
+        fault,
+        "omitting it each named voice_settings.speed as ignored",
+    )
+
+
+def probe_cap_3(deployment: Deployment) -> Verdict:
+    """A voice declaring `timestamps` answers both endpoints with real timings.
+
+    Both, because a deployment answering one of them is half a verdict and the
+    streaming half is the one a caller reaches for under load. A non-empty
+    `characters` array is what separates timings from an alignment-shaped hole:
+    the endpoint can answer 200 with every array empty and satisfy every check
+    that reads a status.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        for endpoint in _TIMESTAMP_ENDPOINTS:
+            refused = asked.refusal(_timestamp_draw(endpoint))
+            if refused is not None:
+                return (
+                    f"declares {CAPABILITY_TIMESTAMPS!r} and then {refused} — a "
+                    "voice that refuses the endpoint it promises timings from has "
+                    "contradicted its own declaration, which is CAP-4's answer "
+                    "and not this arm's"
+                )
+            answer = asked.spoke(_timestamp_draw(endpoint))
+            characters = _first_alignment(answer.body)
+            if isinstance(characters, str):
+                return (
+                    f"declares {CAPABILITY_TIMESTAMPS!r} and {endpoint} "
+                    f"{characters}"
+                )
+            if not characters:
+                return (
+                    f"declares {CAPABILITY_TIMESTAMPS!r} and {endpoint} answered "
+                    "an empty `characters` array — a caller is handed an "
+                    "alignment covering none of the utterance"
+                )
+        return None
+
+    return _of_every(
+        deployment.asking().declaring(CAPABILITY_TIMESTAMPS),
+        f"no voice here declares {CAPABILITY_TIMESTAMPS!r}, so there is none owed "
+        "an alignment — CAP-4 is the arm this deployment's voices select",
+        fault,
+        f"declaring {CAPABILITY_TIMESTAMPS!r} each answered both timestamp "
+        "endpoints with a non-empty alignment",
+    )
+
+
+def probe_cap_4(deployment: Deployment) -> Verdict:
+    """A voice not declaring `timestamps` refuses both endpoints, saying why.
+
+    501 and the published sentence, not merely a non-200: a caller that gets a
+    bare 501 cannot tell a route this build does not serve from a voice that
+    cannot report timings, and the second is a reason to try another voice.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        for endpoint in _TIMESTAMP_ENDPOINTS:
+            answer = asked.answered(_timestamp_draw(endpoint))
+            if answer.status != 501:
+                return (
+                    f"omits {CAPABILITY_TIMESTAMPS!r} and {endpoint} answered "
+                    f"{answer.status}: {answer.body[:200]!r} — a voice that cannot "
+                    "report timings must refuse rather than invent them"
+                )
+            if _detail_of(answer) != CANNOT_REPORT_TIMINGS:
+                return (
+                    f"omits {CAPABILITY_TIMESTAMPS!r} and {endpoint} refused 501 "
+                    f"with {answer.body[:200]!r} rather than the published "
+                    f"{CANNOT_REPORT_TIMINGS!r} — a caller cannot tell this from a "
+                    "route this build does not serve"
+                )
+        return None
+
+    return _of_every(
+        deployment.asking().omitting(CAPABILITY_TIMESTAMPS),
+        f"every voice here declares {CAPABILITY_TIMESTAMPS!r}, so there is none "
+        "that must refuse — CAP-3 is the arm they select",
+        fault,
+        "omitting it each refused both timestamp endpoints 501, saying why",
+    )
+
+
+def probe_cap_6(deployment: Deployment) -> Verdict:
+    """A parameter this service cannot honour is named rather than dropped.
+
+    Asked with a `voice_settings` leaf this service *models* and no engine
+    honours, which is the half of README:24's rule 2 that `REF-7` does not reach:
+    `REF-7` sends a field nobody modelled, so a deployment reporting only what its
+    parser could not place keeps that claim and breaks this one. The two together
+    say the rule holds for the parameters this build enumerates *and* for the ones
+    it has never heard of.
+    """
+    asked = deployment.asking().once
+    # Rule 2 is a promise about a request that is *served*: the parameter is
+    # dropped and named back in the header, so a refusal over one is the rule
+    # broken rather than a draw this claim could not read.
+    refused = asked.refusal(UNHONOURABLE_DRAW)
+    if refused is not None:
+        return Broken(
+            f"{refused} — README:24's rule 2 is that a parameter this service "
+            "cannot honour is dropped and named back, so a request carrying one "
+            "is served rather than refused over"
+        )
+    named = _ignored(asked.spoke(UNHONOURABLE_DRAW))
+    wanted = f"voice_settings.{UNHONOURABLE_SETTING}"
+    if wanted not in named:
+        return Broken(
+            f"a request carrying {wanted} was answered 200 with "
+            f"{_ELVENSPEAK_HEADER}ignored {named or 'absent'} — a setting no "
+            "engine here honours was dropped without a word"
+        )
+    return Held(f"{wanted} was named as ignored rather than silently dropped")
+
+
+def probe_cap_7(deployment: Deployment) -> Verdict:
+    """`x-elvenspeak-ignored` is absent, not empty, when nothing was dropped.
+
+    The distinction is the whole claim: a caller reading the header's *presence*
+    as "something was dropped" is reading it exactly as README:22 documents, and an
+    empty header sends them hunting for a parameter nobody dropped. Read off the
+    draw that asks for nothing but the text, which is the only request in this run
+    with nothing to report.
+    """
+    asked = deployment.asking().once
+    header = _ignored_header(asked.spoke(PLAIN))
+    if header is not None:
+        return Broken(
+            f"a request asking for nothing but the text came back with "
+            f"{_ELVENSPEAK_HEADER}ignored {header!r} — the header is present where "
+            "nothing was dropped, so its presence no longer means anything"
+        )
+    return Held(
+        f"a request asking for nothing but the text carried no "
+        f"{_ELVENSPEAK_HEADER}ignored header at all"
+    )
+
+
+def probe_cap_8(deployment: Deployment) -> Verdict:
+    """A language a voice does not speak is named back; one it speaks is not.
+
+    Both arms per voice, because a header that names every `language_code` and one
+    that names none each satisfy half of this and a prober asking one arm cannot
+    tell them apart.
+
+    The unspoken tag is chosen from a family *no offered voice speaks*, and
+    [`UNSPOKEN_LANGUAGES`] records why: this service narrows the eligible voices by
+    language before it matches the id, so asking an `en` voice for `es` where an
+    `es` voice exists substitutes to that voice and honours the tag. The resolved
+    voice is therefore checked here too — the claim is about the language the voice
+    that *spoke* does not speak, and a substitution means a different voice
+    answered and this claim was never asked of the one addressed.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        refused = asked.refusal(UNSPOKEN_DRAW)
+        if refused is not None:
+            return (
+                f"speaks {asked.voice.language!r} and then {refused} — a language "
+                "it does not speak is one to serve and report ignored, never one "
+                "to refuse over"
+            )
+        unspoken = asked.spoke(UNSPOKEN_DRAW)
+        spoke = _spoke_in(unspoken)
+        if spoke != asked.voice.id:
+            raise Blocked(
+                f"a language no voice here speaks was answered by {spoke!r} rather "
+                f"than by {asked.voice.id!r}, which was addressed — this "
+                "deployment substituted, so the claim has a different subject "
+                "than the one asked"
+            )
+        if "language_code" not in _ignored(unspoken):
+            return (
+                f"speaks {asked.voice.language!r} and was asked for a language no "
+                f"voice here speaks, answering 200 with "
+                f"{_ELVENSPEAK_HEADER}ignored {_ignored(unspoken) or 'absent'} — "
+                "the preference was dropped and the caller was not told"
+            )
+        refused_own = asked.refusal(OWN_FAMILY)
+        if refused_own is not None:
+            return (
+                f"publishes {asked.voice.language!r}, was asked for exactly that, "
+                f"and {refused_own} — a voice that refuses the language it "
+                "publishes has contradicted its own listing, which is the same "
+                "lie as `MOD-3`'s over a model id"
+            )
+        own = asked.spoke(OWN_FAMILY)
+        if "language_code" in _ignored(own):
+            return (
+                f"speaks {asked.voice.language!r}, was asked for exactly that, and "
+                "reported language_code ignored — a preference this voice met was "
+                "reported as dropped"
+            )
+        return None
+
+    return _of_every(
+        deployment.asking().voices,
+        NO_VOICE_OFFERED,
+        fault,
+        "each named an unspeakable language_code as ignored and an honoured one not",
+    )
+
+
+def probe_cap_10(deployment: Deployment) -> Verdict:
+    """A region-tagged, upper-cased tag is the same request as the bare family.
+
+    `en-GB`, `es_MX` and `ES` are one question, and this asks all three reductions
+    at once: [`_mangled`] upper-cases the family, separates with an underscore and
+    adds a numeric region, so only a deployment performing every reduction answers
+    it as it answered the bare family. A server comparing raw strings honours the
+    bare tag and reports the variant ignored, which is the failure — and it is
+    invisible to any check that sends only the canonical spelling.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        mangled = _mangled(asked.voice.language)
+        # Both spellings, because this claim's subject is that they are one
+        # request: refusing either is the deployment reading a tag it should have
+        # reduced as a value it can reject.
+        for draw, spelling in ((OWN_VARIANT, mangled), (OWN_FAMILY, asked.voice.language)):
+            refused = asked.refusal(draw)
+            if refused is not None:
+                return (
+                    f"speaks {asked.voice.language!r} and then {refused} — "
+                    f"{spelling!r} spells the language this voice publishes, so it "
+                    "is one to reduce and serve rather than to refuse over"
+                )
+        variant = asked.spoke(OWN_VARIANT)
+        bare = asked.spoke(OWN_FAMILY)
+        if _ignored(variant) != _ignored(bare):
+            return (
+                f"speaks {asked.voice.language!r} and answered {mangled!r} with "
+                f"{_ELVENSPEAK_HEADER}ignored {_ignored(variant) or 'absent'} "
+                f"where the bare {asked.voice.language!r} got "
+                f"{_ignored(bare) or 'absent'} — the tag was compared before it "
+                "was reduced to its family"
+            )
+        if _spoke_in(variant) != _spoke_in(bare):
+            return (
+                f"answered {mangled!r} in {_spoke_in(variant)!r} and the bare "
+                f"{asked.voice.language!r} in {_spoke_in(bare)!r} — two spellings "
+                "of one language reached two different voices"
+            )
+        return None
+
+    return _of_every(
+        deployment.asking().voices,
+        NO_VOICE_OFFERED,
+        fault,
+        "each answered a region-tagged upper-cased tag exactly as its bare family",
+    )
+
+
+# ---------------------------------------------------------------- model probes
+
+
+def _model_entries(deployment: Deployment) -> list[Mapping[str, Any]]:
+    """`GET /v1/models`' entries, or [`Blocked`] saying why it published none.
+
+    `MOD-1` — that this endpoint answers a bare array — is `e16.2`'s claim, so a
+    body of the wrong shape is a precondition failing here rather than a verdict
+    this file writes twice ([LAW:single-enforcer]).
+    """
+    reply = deployment.listed_models()
+    if reply.status != 200:
+        raise Blocked(
+            f"GET /v1/models answered {reply.status}: {reply.body[:200]!r}, so "
+            "this deployment published no account of what its voices answer to"
+        )
+    try:
+        listing = json.loads(reply.body)
+    except ValueError:
+        raise Blocked(
+            f"GET /v1/models answered a body that is not JSON: {reply.body[:200]!r}"
+        ) from None
+    if not isinstance(listing, list) or not all(
+        isinstance(entry, dict) for entry in listing
+    ):
+        raise Blocked(
+            f"GET /v1/models answered {listing!r:.200} rather than an array of "
+            "model objects — MOD-1 is the claim that reports it"
+        )
+    return listing
+
+
+def _model_ids(entries: list[Mapping[str, Any]]) -> tuple[str, ...]:
+    """Every `model_id` `entries` names, or [`Blocked`] if one is not a name."""
+    named = [entry.get("model_id") for entry in entries]
+    if not all(isinstance(one, str) and one for one in named):
+        raise Blocked(
+            f"GET /v1/models published an entry with no usable `model_id`: "
+            f"{named!r:.200} — nothing can be sent to it"
+        )
+    return tuple(str(one) for one in named)
+
+
+def _model_sent(asked: Asked, draw: str) -> str:
+    """The `model_id` `draw` carried, for a complaint to quote back.
+
+    Read off the draw rather than re-derived from the voice, so the id a fault
+    names is the id that was really sent ([LAW:one-source-of-truth]). A draw that
+    could not be composed raises past here, which is the same [`Blocked`] the
+    answer it has no answer for would have raised.
+    """
+    composed = asked.draws[draw]
+    if isinstance(composed, Blocked):
+        raise composed
+    return str(composed.body["model_id"])
+
+
+def probe_mod_2(deployment: Deployment) -> Verdict:
+    """The models listing is the union of the offered voices', and never `router`.
+
+    Self-consistent, and it is the claim that makes a router's account of the
+    fleet behind it observable at all: `piper-routing-7e2.17` moved the served set
+    onto the voice so this listing could be derived from the voices instead of from
+    the process's own name, and a router that regressed to naming itself advertises
+    an id no voice answers to. A deployment wrong in both places passes this, which
+    is why the report counts it apart from the falsifiable claims.
+    """
+    published = set(_model_ids(_model_entries(deployment)))
+    served = set(deployment.asking().catalogue.served)
+    faults = tuple(
+        f"{word} {sorted(names)!r:.200}"
+        for word, names in (("omits", served - published), ("invents", published - served))
+        if names
+    )
+    if "router" in published:
+        return Broken(
+            "GET /v1/models offers 'router', which is the name of a deployment "
+            "that synthesizes nothing — a caller sending it reaches no engine"
+        )
+    if faults:
+        return Broken(
+            f"GET /v1/models {' and '.join(faults)} against the union of what the "
+            "offered voices answer to — the two accounts of one fact disagree"
+        )
+    return Held(
+        f"{_counted(len(published), 'model id')}, exactly the union of what "
+        f"{_counted(len(deployment.asking().voices), 'offered voice')} answer to"
+    )
+
+
+def probe_mod_3(deployment: Deployment) -> Verdict:
+    """A `model_id` the resolved voice lists is served and reported honoured.
+
+    Per voice, because behind a router the voices answer to different ids in one
+    process: an id piper's voices list is honoured for them and must be refused
+    for kokoro's, and a deployment-wide check could not tell a server reading the
+    voice from one reading its own name.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        refused = asked.refusal(LISTED_MODEL)
+        if refused is not None:
+            return (
+                f"lists {_model_sent(asked, LISTED_MODEL)!r} among its own models "
+                f"and then {refused} — an id a voice publishes as its own is one "
+                "that voice must serve"
+            )
+        served = asked.spoke(LISTED_MODEL)
+        if "model_id" in _ignored(served):
+            return (
+                f"lists {_model_sent(asked, LISTED_MODEL)!r} among its own models "
+                "and then reported model_id ignored — the id chose the engine that "
+                "spoke, so calling it ignored is the header lying in the one "
+                "direction rule 2 cannot afford"
+            )
+        return None
+
+    return _of_every(
+        deployment.asking().voices,
+        NO_VOICE_OFFERED,
+        fault,
+        "each served a model_id it lists without reporting it ignored",
+    )
+
+
+def probe_mod_4(deployment: Deployment) -> Verdict:
+    """An id naming an engine that is not speaking this voice is a 422 that says so.
+
+    The refusal `piper-routing-7e2.2` exists to force: a caller asks for kokoro,
+    hears fluent piper, and nothing in the response says the engine it named never
+    spoke. A voice may substitute because a substitute voice is still an answer;
+    an engine may not, because the engine *is* the answer.
+
+    The body must name all three things a caller needs to act — the id they sent,
+    the voice that resolved, and the set that would have worked — and it is matched
+    on a word boundary by [`_names`], the rule `e16.4` settled for every refusal
+    here. Reused rather than re-derived: three copies of that rule existed and two
+    of them were satisfied by `context` for `text`.
+
+    Unasked on a single-engine deployment, and that is the honest verdict rather
+    than a gap: every id such a deployment publishes is answered by every voice it
+    offers, so from outside there is no published id that names an engine which is
+    not speaking. [`Catalogue.elsewhere_than`] says so in the blocker. Behind a
+    router fronting two engines the claim becomes askable, which is one of the
+    real differences between the two deployments this epic compares.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        answer = asked.answered(ELSEWHERE_MODEL)
+        named = _model_sent(asked, ELSEWHERE_MODEL)
+        if answer.status != 422:
+            return (
+                f"answered {answer.status} to model_id {named!r}, which another "
+                "voice here lists and this one does not: "
+                f"{answer.body[:200]!r} — a caller who named an engine heard "
+                "another one and was not told"
+            )
+        missing = [
+            word
+            for word in (named, asked.voice.id, "served")
+            if not _names(answer.body, word)
+        ]
+        if missing:
+            return (
+                f"refused model_id {named!r} 422 with a body naming none of "
+                f"{missing}: {answer.body[:200]!r} — a caller cannot read out of "
+                "it which engine they reached or what would have worked"
+            )
+        return None
+
+    return _of_every(
+        deployment.asking().voices,
+        NO_VOICE_OFFERED,
+        fault,
+        "each refused another voice's model_id 422, naming the id, itself and the "
+        "served set",
+    )
+
+
+def probe_mod_5(deployment: Deployment) -> Verdict:
+    """A `model_id` naming no engine here is served, and named back as ignored.
+
+    `MOD-4`'s other reading of one decision, and the doc says why both are needed:
+    a prober asking only one of them cannot tell a server that refuses everything
+    from one that ignores everything. Every stock ElevenLabs client sends a
+    `model_id` this service has never mapped, so this arm is the one that decides
+    whether such a client works at all.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        answer = asked.answered(UNMAPPED_DRAW)
+        if answer.status == 422:
+            return (
+                f"refused model_id {UNMAPPED_MODEL!r} 422: {answer.body[:200]!r} — "
+                "it names no engine here, so it contradicted nothing, and every "
+                "stock client sending an unmapped model is now refused"
+            )
+        if answer.status != 200:
+            return f"answered {answer.status} to model_id {UNMAPPED_MODEL!r}: {answer.body[:200]!r}"
+        if "model_id" not in _ignored(answer):
+            return (
+                f"served model_id {UNMAPPED_MODEL!r} with "
+                f"{_ELVENSPEAK_HEADER}ignored {_ignored(answer) or 'absent'} — the "
+                "id steered nothing and the caller was told it was honoured"
+            )
+        return None
+
+    return _of_every(
+        deployment.asking().voices,
+        NO_VOICE_OFFERED,
+        fault,
+        f"each served {UNMAPPED_MODEL!r} and named model_id as ignored",
+    )
+
+
+def probe_mod_6(deployment: Deployment) -> Verdict:
+    """`voice_id` decides who speaks and `model_id` is only read against that.
+
+    Read off the two `model_id` draws that are served — the voice's own id and one
+    naming no engine — because a server letting `model_id` choose the speaker
+    would answer them in two different voices, and neither answer alone shows it.
+    The claim is the ranking between the two parameters, so it needs both.
+    """
+
+    def fault(asked: Asked) -> str | None:
+        for draw in (LISTED_MODEL, UNMAPPED_DRAW):
+            refused = asked.refusal(draw)
+            if refused is not None:
+                return (
+                    f"was addressed and then {refused} — the request named this "
+                    "voice and its model_id ended it, so the id outranked the "
+                    "voice rather than being read against it"
+                )
+            spoke = _spoke_in(asked.spoke(draw))
+            if spoke != asked.voice.id:
+                return (
+                    f"was addressed and then answered by {spoke!r} when the "
+                    f"request carried {draw} — model_id moved the speaker, so a "
+                    "caller naming a voice cannot rely on reaching it"
+                )
+        return None
+
+    return _of_every(
+        deployment.asking().voices,
+        NO_VOICE_OFFERED,
+        fault,
+        "each spoke for itself whichever model_id the request carried",
+    )
+
+
+def probe_mod_7(deployment: Deployment) -> Verdict:
+    """Each model entry's `languages` are the languages the id really reaches.
+
+    Self-consistent, and a second way a router's account of its fleet is
+    observable: an id reaching only piper's English voices must not advertise the
+    Spanish a kokoro voice speaks, or a caller picks a model that cannot say what
+    they sent. Derived from the voices that list each id rather than from the
+    deployment's own summary, which is the only reading that can disagree.
+    """
+    entries = _model_entries(deployment)
+    voices = deployment.asking().catalogue.voices
+    for entry, model_id in zip(entries, _model_ids(entries), strict=True):
+        reached = frozenset(
+            voice.language for voice in voices if model_id in voice.models
+        )
+        published = entry.get("languages")
+        if not isinstance(published, list) or not all(
+            isinstance(one, dict) and isinstance(one.get("language_id"), str)
+            for one in published
+        ):
+            return Broken(
+                f"model {model_id!r} published `languages` as {published!r:.200} "
+                "rather than an array of objects carrying a `language_id`"
+            )
+        stated = frozenset(str(one["language_id"]) for one in published)
+        if stated != reached:
+            return Broken(
+                f"model {model_id!r} advertises {sorted(stated)} while the voices "
+                f"listing it speak {sorted(reached)} — a caller choosing it by "
+                "language reaches a voice that cannot say what they sent"
+            )
+    return Held(
+        f"{_counted(len(entries), 'model')} each advertise exactly the languages "
+        "of the voices that list them"
+    )
+
+
+# --------------------------------------------------------- substitution probes
+
+
+def probe_sub_1(deployment: Deployment) -> Verdict:
+    """An unknown `voice_id` is answered in audio, saying what spoke and what was asked.
+
+    One of two arms of one request, and the prober reports which it got rather
+    than requiring one: a deployment with substitution switched off answers 404
+    and that is `SUB-4`, keeping a different documented promise. Both headers are
+    required together — the voice that spoke is useless to a caption without the
+    id that was asked for, and either alone leaves a caller unable to tell a
+    substitution from a direct hit.
+    """
+    asked = deployment.asking().once
+    answer = asked.answered(FOREIGN_DRAW)
+    if answer.status == 404:
+        return Unasked(
+            f"a voice_id nothing here offers answered 404, so this deployment has "
+            "substitution switched off and the arm that returns audio has no "
+            "subject — SUB-4 is the arm it selects"
+        )
+    if answer.status != 200:
+        return Broken(
+            f"a voice_id nothing here offers answered {answer.status}: "
+            f"{answer.body[:200]!r} — neither audio from a substitute nor the 404 "
+            "of a deployment that refuses to substitute"
+        )
+    spoke, requested = _spoke_in(answer), _asked_for(answer)
+    if spoke is None or requested != FOREIGN_VOICE:
+        return Broken(
+            f"a voice_id nothing here offers was answered with audio, "
+            f"{_ELVENSPEAK_HEADER}voice {spoke!r} and "
+            f"{_ELVENSPEAK_HEADER}voice-requested {requested!r} — a caller cannot "
+            f"tell that {FOREIGN_VOICE!r} was not what spoke"
+        )
+    return Held(
+        f"{FOREIGN_VOICE!r} was answered in {spoke!r}, with both the voice that "
+        "spoke and the voice that was asked for named"
+    )
+
+
+def probe_sub_2(deployment: Deployment) -> Verdict:
+    """Every synthesis names what spoke, and names what was asked only when they differ.
+
+    Read across every draw this run made rather than one, because the header is
+    assembled once for every synthesis path and a leak or an omission on the
+    timestamp endpoints would pass a check of the plain one. The `only when they
+    differ` half is what makes the header readable at all: a `voice-requested` on
+    every response tells a caller nothing, and one that never appears hides every
+    substitution.
+    """
+    checked = 0
+    for asked in deployment.asking().voices:
+        for name, answer in asked.answers.items():
+            if not (isinstance(answer, Reply) and answer.status == 200):
+                continue
+            checked += 1
+            spoke, requested = _spoke_in(answer), _asked_for(answer)
+            addressed = asked.addressed(name)
+            if spoke is None:
+                return Broken(
+                    f"{name} answered 200 with no {_ELVENSPEAK_HEADER}voice — "
+                    "README:115 promises it on every synthesis response, and "
+                    "without it no caller knows who spoke"
+                )
+            substituted = spoke != addressed
+            if substituted and not _echoed(requested, addressed):
+                return Broken(
+                    f"{name} was addressed at {addressed!r}, answered by {spoke!r}, "
+                    f"and named {requested!r} as requested — a substitution whose "
+                    "own record of what was asked for is wrong"
+                )
+            if not substituted and requested is not None:
+                return Broken(
+                    f"{name} was answered by the very voice it addressed "
+                    f"({spoke!r}) and still carried "
+                    f"{_ELVENSPEAK_HEADER}voice-requested {requested!r} — the "
+                    "header no longer means a substitution happened"
+                )
+    if not checked:
+        return Unasked(
+            "no draw in this run was answered with audio, so no synthesis "
+            "response's headers could be read"
+        )
+    return Held(
+        # "synthesis response" rather than "synthesis": [`_counted`] pluralises by
+        # appending an `s`, which is every noun in this file but that one.
+        f"{_counted(checked, 'synthesis response')} each named the voice that "
+        "spoke, and named the requested one exactly where the two differed"
+    )
+
+
+def probe_sub_3(deployment: Deployment) -> Verdict:
+    """`x-elvenspeak-voice` always names a voice the listing offers.
+
+    Self-consistent, and the fifth of the five claims a router misreporting its
+    fleet passes: a substitute this deployment cannot name in `GET /v1/voices` is
+    one a caller can hear and never address again, which makes the substitution
+    unreproducible.
+    """
+    offered = {voice.id for voice in deployment.asking().catalogue.voices}
+    spoken = set()
+    for asked in deployment.asking().voices:
+        for name, answer in asked.answers.items():
+            if isinstance(answer, Reply) and answer.status == 200:
+                spoke = _spoke_in(answer)
+                if spoke is None:
+                    # Whether a 200 must name the voice that spoke at all is
+                    # `SUB-2`'s claim, not this one. Counted here it would sit in
+                    # `spoken` as a voice no listing could offer and never be read
+                    # against `offered`, leaving `held` reporting a count of voices
+                    # one of which was never named ([LAW:no-silent-failure]).
+                    continue
+                if spoke not in offered:
+                    return Broken(
+                        f"{name} was answered by {spoke!r}, which GET /v1/voices "
+                        "does not offer — a caller who heard it cannot ask for it "
+                        "again"
+                    )
+                spoken.add(spoke)
+    if not spoken:
+        return Unasked(
+            "no draw in this run was answered with audio, so no voice was named "
+            "as having spoken"
+        )
+    return Held(
+        f"{_counted(len(spoken), 'voice')} spoke across this run, every one of "
+        "them offered by GET /v1/voices"
+    )
+
+
+def probe_sub_4(deployment: Deployment) -> Verdict:
+    """With substitution off, an unknown `voice_id` is a 404 rather than audio.
+
+    `SUB-1`'s other arm, and the one a deployment that must never answer in the
+    wrong voice depends on. Unasked where substitution is configured, because
+    there the request is answered in a substitute and this promise has no subject
+    — which is what `SUB-1` reports.
+    """
+    asked = deployment.asking().once
+    answer = asked.answered(FOREIGN_DRAW)
+    if 200 <= answer.status < 300:
+        return Unasked(
+            f"a voice_id nothing here offers was answered {answer.status} with "
+            "audio, so this deployment has substitution configured and the arm "
+            "that refuses has no subject — SUB-1 is the arm it selects"
+        )
+    if answer.status != 404:
+        return Broken(
+            f"a voice_id nothing here offers answered {answer.status}: "
+            f"{answer.body[:200]!r} — a deployment that will not substitute owes a "
+            "404 for a voice it does not have"
+        )
+    if not _names(answer.body, "voice"):
+        return Broken(
+            f"a voice_id nothing here offers was refused 404 with "
+            f"{answer.body[:200]!r}, which names no voice — a caller cannot tell "
+            "this from a path this build does not serve"
+        )
+    return Held(f"{FOREIGN_VOICE!r} was refused 404 rather than answered by a substitute")
+
+
+def probe_sub_5(deployment: Deployment) -> Verdict:
+    """An alias a voice lists really reaches that voice.
+
+    Asked of every alias of every voice, because an alias table is exactly the
+    kind of map that drifts: the ids are foreign by definition, so nothing but
+    this check reads them.
+
+    An empty alias set leaves this `unasked` rather than `held`, and
+    `probe_health_2` settled that question first in this file: zero aliases all
+    resolving correctly is the shape of a check that cannot fail. Behind a router
+    that is the expected state — the router's table is empty and aliases do not
+    resolve through it (`piper-routing-7e2.15`) — so the blocker names the empty
+    set, which is the real difference between a routed and a direct deployment
+    rather than a defect in either.
+    """
+    aliased = tuple(
+        (asked, alias)
+        for asked in deployment.asking().voices
+        for alias in asked.voice.aliases
+    )
+    if not aliased:
+        return Unasked(
+            "no voice here publishes an alias, so there is no foreign id to try — "
+            "which is what a routed deployment looks like, its alias table being "
+            "empty by design"
+        )
+    for asked, alias in aliased:
+        draw = _alias_draw(alias)
+        # Before the routing, because an alias the deployment refused reached no
+        # voice at all, which is this claim being false rather than a reason it
+        # could not be asked.
+        refused = asked.refusal(draw)
+        if refused is not None:
+            return Broken(
+                f"the alias {alias!r} is published on voice {asked.voice.id!r} "
+                f"and then {refused} — an alias a voice publishes as its own is "
+                "one that voice must serve"
+            )
+        spoke = _spoke_in(asked.spoke(draw))
+        if spoke != asked.voice.id:
+            return Broken(
+                f"the alias {alias!r} is published on voice {asked.voice.id!r} and "
+                f"reached {spoke!r} instead — the listing promises a mapping this "
+                "deployment does not make"
+            )
+    return Held(
+        f"{_counted(len(aliased), 'published alias')} each reached the voice that "
+        "published it"
+    )
+
+
+def probe_sub_6(deployment: Deployment) -> Verdict:
+    """A voice id whose bytes are not latin-1 substitutes rather than answering 500.
+
+    A header value must be latin-1 on the wire, so a server echoing this id into
+    `x-elvenspeak-voice-requested` unencoded raises inside its own response
+    assembly — after the status is chosen — and answers 500 to a request it had
+    already decided to serve. The escaping is not checked against a spelling:
+    which escape a build picks is its own business, and holding this file to one
+    would go red on a version skew that is not a defect. What is checked is that
+    the caller got audio and a named substitute.
+    """
+    asked = deployment.asking().once
+    answer = asked.answered(UNPRINTABLE_DRAW)
+    if answer.status == 404:
+        return Unasked(
+            "a voice_id whose bytes are not latin-1 answered 404, so this "
+            "deployment refuses to substitute and there is no header for it to "
+            "have escaped — SUB-4 is where that refusal is reported"
+        )
+    if answer.status != 200:
+        return Broken(
+            f"a voice_id whose bytes are not latin-1 answered {answer.status}: "
+            f"{answer.body[:200]!r} — the id reached the response headers "
+            "unescaped, so a request this deployment meant to serve failed on the "
+            "way out"
+        )
+    spoke, requested = _spoke_in(answer), _asked_for(answer)
+    if spoke is None or requested is None:
+        return Broken(
+            f"a voice_id whose bytes are not latin-1 was answered 200 with "
+            f"{_ELVENSPEAK_HEADER}voice {spoke!r} and voice-requested "
+            f"{requested!r} — the substitution happened and was not reported"
+        )
+    return Held(
+        f"{UNPRINTABLE_VOICE!r} was answered in {spoke!r}, its requested id "
+        f"escaped into the header as {requested!r}"
+    )
+
+
+# --------------------------------------------------- per-voice discovery probes
+
+
+def probe_disc_2(deployment: Deployment) -> Verdict:
+    """`GET /v1/voices/{id}` returns that voice, and 404s an id it does not have.
+
+    Discovery never substitutes, and that is the point of asking it beside
+    `SUB-1`: the same unknown id that earns audio from a synthesis endpoint must
+    earn a 404 here, because a client reading the catalogue to populate a picker
+    would otherwise list a voice that does not exist. Reads only, so this costs
+    one request per voice and no synthesis at all.
+    """
+    key = deployment.key_or_blocked()
+    # [`ProbedVoice`] rather than the declarations, because the id is the whole of
+    # what this claim reads and [`_declarations`] is all-or-nothing across four
+    # fields: gating a read-back on every voice's `capabilities` parsing would
+    # leave this unasked over a deployment it could have caught red-handed.
+    voices = deployment.voices
+    for voice in voices:
+        path = f"/v1/voices/{urllib.parse.quote(voice.id, safe='')}"
+        reply = _ask(deployment.target, path, key)
+        if reply.status != 200:
+            return Broken(
+                f"GET {path} answered {reply.status} for a voice GET /v1/voices "
+                f"offers: {reply.body[:200]!r}"
+            )
+        try:
+            body = json.loads(reply.body)
+        except ValueError:
+            return Broken(
+                f"GET {path} answered a body that is not JSON: {reply.body[:200]!r}"
+            )
+        if not isinstance(body, dict) or body.get("voice_id") != voice.id:
+            return Broken(
+                f"GET {path} answered {body!r:.200} — a read addressed at one "
+                "voice came back describing another, so a client cannot trust "
+                "which voice it is holding"
+            )
+    unknown = f"/v1/voices/{FOREIGN_VOICE}"
+    refused = _ask(deployment.target, unknown, key)
+    if refused.status != 404:
+        return Broken(
+            f"GET {unknown} answered {refused.status} rather than 404: "
+            f"{refused.body[:200]!r} — discovery substituted, so a client reading "
+            "the catalogue would list a voice nothing offers"
+        )
+    return Held(
+        f"{_counted(len(voices), 'offered voice')} each read back as itself, and "
+        "an id nothing offers was refused 404"
+    )
+
+
+def probe_disc_5(deployment: Deployment) -> Verdict:
+    """Each voice's `language` is the bare family a `language_code` is compared in.
+
+    Checked as reduction-idempotence rather than against a list of the 184
+    registered codes, and the difference is deliberate. What makes this claim
+    matter is that the published string is *comparable* to what a caller sends:
+    `piper` once published `family: "ES"`, which no caller's `es` could ever
+    equal, leaving the voice unreachable by language while the listing said it
+    spoke Spanish. A tag already in its reduced form is exactly the falsifiable
+    half of that, and it catches `ES`, `en-GB`, `en_US` and a padded ` en`. Whether
+    a well-formed code is *registered* would need a table this file does not carry,
+    for the reason [`DOCUMENTED_READS`] carries no route table: it would be this
+    checkout's vocabulary asserted against a different build's.
+    """
+    # The language off [`ProbedVoice.published`] rather than off a [`Declared`],
+    # for the reason `DISC-2` reads the thin stamp: this claim reads one field, and
+    # [`_declarations`] would gate it on every voice's `capabilities`, `models` and
+    # `aliases` parsing too. So a malformed `aliases` elsewhere no longer decides
+    # whether a language can be read, and a language that is itself unusable still
+    # does — that one is the precondition this claim genuinely has.
+    voices = deployment.voices
+    for voice in voices:
+        language = voice.published.get("language")
+        if not isinstance(language, str) or not language:
+            raise Blocked(
+                f"voice {voice.id!r} publishes {language!r:.100} as its language, "
+                "so there is no tag to reduce — DISC-1 is the claim that every "
+                "published field is present and well-typed"
+            )
+        reduced = language.strip().lower().replace("_", "-").split("-")[0]
+        if language != reduced:
+            return Broken(
+                f"voice {voice.id!r} publishes language {language!r}, which "
+                f"reduces to {reduced!r} — a caller sending {reduced!r} cannot "
+                "match it, so the voice is unreachable by the language it claims"
+            )
+    return Held(
+        f"{_counted(len(voices), 'voice')} each publish a language already in the "
+        "family form a language_code is compared in"
+    )
+
+
+# --------------------------------------------------- deployment-wide capability
+
+
+def probe_cap_5(deployment: Deployment) -> Verdict:
+    """`GET /v1/models`' `capabilities` is the union over the offered voices.
+
+    Self-consistent. A caller reads this list to decide whether to send a rate at
+    all, and a union that overstates it sends them to a voice that reports the
+    parameter ignored — which is rule 2 kept per voice and broken per deployment.
+
+    Deployment-wide by contract, and deliberately not scoped per `model_id` the
+    way `MOD-7` scopes `languages` beside it: the README makes this field "what
+    this deployment can do at all", to be read when choosing a deployment rather
+    than when deciding a request, and [`_model_json`] derives it once for every
+    entry — where the reason the two fields differ is written, because the two
+    overclaims do not cost the same. Read as `MOD-7`'s twin this looks like a
+    missing filter, and scoping it here would report an honestly-differentiated
+    router broken for publishing each engine's real capabilities.
+    """
+    entries = _model_entries(deployment)
+    declared = frozenset[str]().union(
+        *(voice.capabilities for voice in deployment.asking().catalogue.voices)
+    )
+    for entry, model_id in zip(entries, _model_ids(entries), strict=True):
+        published = entry.get("capabilities")
+        if not isinstance(published, list) or not all(
+            isinstance(one, str) for one in published
+        ):
+            return Broken(
+                f"model {model_id!r} published `capabilities` as "
+                f"{published!r:.200} rather than an array of names"
+            )
+        if frozenset(published) != declared:
+            return Broken(
+                f"model {model_id!r} advertises capabilities {sorted(published)} "
+                f"while the offered voices between them declare {sorted(declared)} "
+                "— a caller reading the models listing to decide what to send is "
+                "reading a different answer than the voices give"
+            )
+    return Held(
+        f"{_counted(len(entries), 'model')} each advertise {sorted(declared)}, the "
+        "union over the offered voices"
+    )
+
+
+def probe_cap_9(deployment: Deployment) -> Verdict:
+    """A blank, whitespace-only or absent `language_code` expresses no preference.
+
+    All three, because they are one fact arriving in three shapes and a server
+    handling two of them is the bug this claim was written from: `""` is what a
+    form or a JS client sends for "unset", and taken literally it is a language no
+    voice speaks, so every such request came back reporting `language_code`
+    dropped. A caller who expressed no preference was told their preference was
+    ignored.
+    """
+    asked = deployment.asking().once
+    # The two shapes that carry a `language_code` at all. `PLAIN` carries none,
+    # so a refusal of it says nothing about how this service reads an unset tag
+    # and is `FMT-1`'s subject — the claim that judges a refusal of a plain
+    # synthesis request — rather than this one's.
+    expressed = (EMPTY_LANGUAGE, BLANK_LANGUAGE)
+    for draw in expressed:
+        refused = asked.refusal(draw)
+        if refused is not None:
+            return Broken(
+                f"{refused} — a caller who expressed no preference was refused "
+                "over the absence, which is the literal reading this claim was "
+                "written from made louder: the empty tag was taken for a value "
+                "rather than for no preference at all"
+            )
+    for draw in (*expressed, PLAIN):
+        named = _ignored(asked.spoke(draw))
+        if "language_code" in named:
+            return Broken(
+                f"{draw} came back naming language_code in "
+                f"{_ELVENSPEAK_HEADER}ignored {named} — nothing was asked for, so "
+                "there was nothing to report as dropped"
+            )
+    return Held(
+        "an empty, a whitespace-only and an absent language_code were each read as "
+        "no preference and none was reported ignored"
+    )
+
+
 # ------------------------------------------------------------------ the claims
 
 
@@ -1891,6 +3814,30 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("AUTH-1", FALSIFIABLE, probe_auth_1),
     Claim("AUTH-2", FALSIFIABLE, probe_auth_2),
     Claim("DISC-1", FALSIFIABLE, probe_disc_1),
+    Claim("DISC-2", FALSIFIABLE, probe_disc_2),
+    Claim("DISC-5", FALSIFIABLE, probe_disc_5),
+    Claim("MOD-2", SELF_CONSISTENT, probe_mod_2),
+    Claim("MOD-3", FALSIFIABLE, probe_mod_3),
+    Claim("MOD-4", FALSIFIABLE, probe_mod_4),
+    Claim("MOD-5", FALSIFIABLE, probe_mod_5),
+    Claim("MOD-6", FALSIFIABLE, probe_mod_6),
+    Claim("MOD-7", SELF_CONSISTENT, probe_mod_7),
+    Claim("CAP-1", FALSIFIABLE, probe_cap_1),
+    Claim("CAP-2", FALSIFIABLE, probe_cap_2),
+    Claim("CAP-3", FALSIFIABLE, probe_cap_3),
+    Claim("CAP-4", FALSIFIABLE, probe_cap_4),
+    Claim("CAP-5", SELF_CONSISTENT, probe_cap_5),
+    Claim("CAP-6", FALSIFIABLE, probe_cap_6),
+    Claim("CAP-7", FALSIFIABLE, probe_cap_7),
+    Claim("CAP-8", FALSIFIABLE, probe_cap_8),
+    Claim("CAP-9", FALSIFIABLE, probe_cap_9),
+    Claim("CAP-10", FALSIFIABLE, probe_cap_10),
+    Claim("SUB-1", FALSIFIABLE, probe_sub_1),
+    Claim("SUB-2", FALSIFIABLE, probe_sub_2),
+    Claim("SUB-3", SELF_CONSISTENT, probe_sub_3),
+    Claim("SUB-4", FALSIFIABLE, probe_sub_4),
+    Claim("SUB-5", FALSIFIABLE, probe_sub_5),
+    Claim("SUB-6", FALSIFIABLE, probe_sub_6),
     Claim("FMT-1", FALSIFIABLE, probe_fmt_1),
     Claim("FMT-2", FALSIFIABLE, probe_fmt_2),
     Claim("FMT-3", FALSIFIABLE, probe_fmt_3),

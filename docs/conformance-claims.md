@@ -65,6 +65,26 @@ So `unasked` means a precondition genuinely failed — the voice listing did not
 parse, so no per-voice claim could be attempted — and not that a claim turned out
 not to apply.
 
+Nor is a deployment refusing a request a precondition failing. Two different things
+can stop a claim reading the audio it needed, and the line between them is where the
+deployment's own answer begins. A draw — one request a probe composes and sends —
+that could never be composed, or that never got an answer at all, leaves the claim
+genuinely unasked: the listing gave no voice to address, the request never
+completed, and the prober is reporting on itself. A draw that was composed, sent
+and answered with a non-200 is the deployment speaking, and for a claim that
+promised the request would be served, the refusal *is* the promise not being kept
+— which is why `CAP-1`, `CAP-2`, `CAP-3`, `CAP-6`, `CAP-8`, `CAP-9`, `CAP-10`,
+`MOD-3`, `MOD-6` and `SUB-5` read one as `broken`. A draw that carries no such
+promise keeps the other reading: a refused plain synthesis request is `FMT-1`'s
+subject, and neither `CAP-7`'s nor `CAP-9`'s.
+Read it the other way and a voice that publishes `timestamps` in its own
+`capabilities` list and then refuses both timestamp endpoints is reported as
+something the prober could not look at, rather than as the capability lie it is —
+and nothing else catches that one, because `CAP-4`'s subject is the voices that
+*omit* the capability. The division to carry away is that `unasked` is about what
+the prober could not do and `broken` about what the deployment did, and a refusal
+is always something the deployment did.
+
 ## Exit codes
 
 | Code | Condition |
@@ -162,6 +182,24 @@ verdict against every row. Where a claim is already asked of a built image by
 Observed: a wrong key and an absent key produce the same 401 and the same body;
 `/health` answered 200 in both cases.
 
+**`AUTH-2` and `CAP-4` demanded opposite answers to the same request, and
+`piper-conformance-e16.5` settled it by exempting one published sentence.** `AUTH-2`
+judged every non-2xx status as a keyless caller turned away, exempting only 404 on
+the grounds that a documented path this build does not route belongs to another
+claim. But `CAP-4` below *requires* a 501 carrying `{"detail":"this service cannot
+report how long each part of an utterance took"}` from a voice that does not declare
+`timestamps`, so a deployment doing exactly what one claim in this file asks of it
+broke another. The deployment that triggers it is legitimate rather than
+hypothetical: the prober's own `_PUBLISHED_FIELDS` note says "an engine may honour
+nothing beyond plain speech", and such a deployment was reported broken for
+conforming. `AUTH-2` now exempts that 501 the way it exempts 404 — but keyed on the
+published sentence, not on the bare status, so a deployment guarding its endpoints
+behind an undocumented 501 still breaks the claim. Exempting the status alone would
+have turned the fix into a hole. This is the third defect of one family found in this
+prober; the other two are recorded under "Per-voice capability honesty" and
+"Substitution" below, and all three have the same shape — a conformant deployment
+reported broken.
+
 ### Voice discovery
 
 | Id | Claim | Source | Evidence | Probed by |
@@ -208,6 +246,19 @@ returned 200 with `x-elvenspeak-ignored: model_id`. `MOD-4` and `MOD-5` are one
 decision read two ways, so a prober that asks only one of them cannot tell a server
 that refuses everything from one that ignores everything.
 
+**`MOD-4` is the only claim that moves between a direct engine and a router**, which
+`piper-conformance-e16.5` established by running the prober against both. Against a
+direct piper engine it reported 38 `held`, 0 `broken` and 7 `unasked`; against a
+router fronting piper and kokoro, 39 `held`, 0 `broken` and 6 `unasked`. Exit code 3
+in both cases. The seven unasked against the direct engine are `HEALTH-3`, `AUTH-1`,
+`MOD-4`, `CAP-2`, `CAP-4`, `SUB-4` and `SUB-5`, and `MOD-4` is the one that changes
+when a second engine appears behind the base URL — the one claim only a multi-engine
+deployment can be asked. From outside a single-engine deployment it is not merely
+unasked but unaskable, and that is the honest verdict rather than a gap in the
+prober: the server answers *elsewhere* for a `model_id` in `served` union `known`,
+and `known` is published nowhere, so a prober cannot construct the request without
+guessing engine names. Guessing is what would make the verdict a lie.
+
 ### Per-voice capability honesty
 
 | Id | Claim | Source | Evidence | Probed by |
@@ -236,6 +287,17 @@ and is named back. A value that is not a string at all is refused. Observed: `""
 `"fr"` returned 200 naming `language_code`; `5` returned 422. `en-GB` was honoured
 against an `en` voice, which is `CAP-10`.
 
+**`probe_cap_7` and `probe_cap_9` raised `KeyError` on every run**, which is the
+first of two defects `piper-conformance-e16.5` found in the prober it inherited. Both
+read the `PLAIN` draw — the request asking for nothing but the text — off the
+deployment-wide draw table, and that table never contained a `PLAIN` row, so a run
+died before any report could print. It was fixed at the seam rather than in the two
+probes: the deployment-wide draws now join the first voice's own table, so there is
+exactly one table to look in, and `once` became a derived name for that voice rather
+than a second table standing beside it. One consequence is worth recording because it
+is easy to undo — three readers that previously swept `(*voices, once)` now sweep the
+voices only. They had been double-counting the first voice.
+
 ### Substitution
 
 | Id | Claim | Source | Evidence | Probed by |
@@ -248,11 +310,33 @@ against an `en` voice, which is `CAP-10`.
 | `SUB-6` | A voice id whose bytes are not latin-1 substitutes and is escaped into the header rather than answering 500 | api.py:1118 | falsifiable | e16.5 |
 
 `SUB-1` and `SUB-4` are two arms of one claim, and the prober reports which arm it
-got rather than requiring one. `SUB-5` is vacuous behind a router on purpose: the
-router's alias table is empty and aliases do not resolve through it
-(`piper-routing-7e2.15`), so the listing offers nothing to try and the claim holds
-trivially. That is a real difference between a routed and a direct deployment, and
-the report should show it as an empty alias set rather than as an absent claim.
+got rather than requiring one.
+
+`SUB-5` has no subject behind a router on purpose: the router's alias table is
+empty and aliases do not resolve through it (`piper-routing-7e2.15`), so the
+listing offers nothing to try. **That is `unasked`, not a claim that holds
+trivially** — this paragraph said "holds trivially" until `piper-conformance-e16.5`
+implemented it, and the sentence was contradicting the rest of this file. Zero
+aliases all resolving correctly is a check that cannot fail, which is the same
+defect the "Verdicts" section rejects two pages above and which
+`HEALTH-2` had already settled the other way in the same prober: a deployment
+offering no voices blocks that claim rather than passing it on an empty set. The
+half of the sentence that was right stands: the report shows the empty alias set,
+in the blocker, rather than dropping the claim — so a routed and a direct
+deployment differ visibly here, which is the difference worth seeing.
+
+**`SUB-2` reported a conformant server broken**, which is the second of the two
+defects `piper-conformance-e16.5` found in the prober it inherited. `probe_sub_2`
+required `x-elvenspeak-voice-requested` to equal the addressed voice id byte for
+byte, but the server escapes everything outside the printable ASCII range, plus
+backslash and comma — so the voice id `vøîce-ñ` comes back as the literal text
+`v\xf8\xeece-\xf1` and the comparison failed against a server keeping its promise.
+The fix compares only where a header can hold the id as it was sent, and checks
+presence alone where it cannot: which escape a build picks is that build's own
+business, and holding the prober to one spelling would go red on a version skew that
+is not a defect. The first attempted fix was wrong, and the reason is instructive
+enough to record — it tested latin-1 encodability, and `vøîce-ñ` *is* latin-1. The
+rule is the printable ASCII range, not the latin-1 range.
 
 ### Output formats
 
@@ -337,15 +421,24 @@ The rule is stated over refusals generally rather than over these five rows, so
 | Id | Claim | Source | Evidence | Probed by |
 |---|---|---|---|---|
 | `TIME-1` | `/with-timestamps` returns `audio_base64`, `alignment`, `normalized_alignment` and `alignment_fidelity` | api.py:1299 | falsifiable | e16.2 |
-| `TIME-2` | `/with-timestamps` carries `x-elvenspeak-alignment`, whose value is `word-exact` or `interpolated` | README:187, alignment.py:51 | falsifiable | e16.5 |
-| `TIME-3` | `/stream/with-timestamps` emits one JSON object per line, each with its own `alignment_fidelity`, and carries no `x-elvenspeak-alignment` header | README:188, api.py:998 | falsifiable | e16.5 |
-| `TIME-4` | Character end times ascend and the last one accounts for the whole utterance — every sample is covered | engine.py:370, speaks.py:694 | falsifiable against `pcm_*` | e16.5 — `speaks.py` |
-| `TIME-5` | `alignment` and `normalized_alignment` are the same object | api.py:1303 | falsifiable | e16.5 |
-| `TIME-6` | A streamed run's objects lay end to end — each sentence starts where the last one ended | api.py:979 | falsifiable | e16.5 |
+| `TIME-2` | `/with-timestamps` carries `x-elvenspeak-alignment`, whose value is `word-exact` or `interpolated` | README:187, alignment.py:51 | falsifiable | e16.enf |
+| `TIME-3` | `/stream/with-timestamps` emits one JSON object per line, each with its own `alignment_fidelity`, and carries no `x-elvenspeak-alignment` header | README:188, api.py:998 | falsifiable | e16.enf |
+| `TIME-4` | Character end times ascend and the last one accounts for the whole utterance — every sample is covered | engine.py:370, speaks.py:694 | falsifiable against `pcm_*` | e16.enf — `speaks.py` |
+| `TIME-5` | `alignment` and `normalized_alignment` are the same object | api.py:1303 | falsifiable | e16.enf |
+| `TIME-6` | A streamed run's objects lay end to end — each sentence starts where the last one ended | api.py:979 | falsifiable | e16.enf |
 
 Observed: a voice declaring `timestamps` answered `x-elvenspeak-alignment:
 word-exact`; the same request against a voice without it answered 501 on both
-endpoints.
+endpoints. `e16.5` observed the other half of `TIME-3` on its way past:
+`/stream/with-timestamps` really does carry no `x-elvenspeak-alignment` header.
+
+These five began as `piper-conformance-e16.5`'s and were moved to a sibling of it
+rather than dropped, because they are the one group in that issue whose subject is
+not a voice. `e16.5` asks what each voice's own declaration promises; these ask
+what one endpoint's body looks like, which is the same question however many
+voices a deployment offers. The move costs nothing to ask: `_voice_draws` already
+puts both timestamp endpoints and a `pcm_22050` draw to every voice declaring
+`timestamps`, so all five are readers over draws that have already been made.
 
 ### Routes this server does not serve
 
