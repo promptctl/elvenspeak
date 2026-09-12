@@ -1339,8 +1339,33 @@ class Asked:
         leaves it unasked behind one blocker rather than being read as a 200 whose
         headers say nothing ([LAW:single-enforcer] — one account of what counts as
         having spoken, wherever the question comes from).
+
+        What this cannot separate is *why* there is no audio, and for a claim that
+        promised the draw would be served the difference decides the verdict: a
+        draw that could not be **composed** is a precondition failing and `unasked`
+        is right, while one composed, sent and **refused** is the deployment
+        answering. [`refusal`] is the reading for the second, and the five claims
+        that require a served draw ask it first.
         """
         return _served(self.answers[draw], f"{self.voice.id!r} {draw}")
+
+    def refusal(self, draw: str) -> str | None:
+        """How this deployment turned `draw` down, or `None` if it served it.
+
+        The half of [`spoke`]'s blocker that is a verdict rather than a
+        precondition. A claim promising that a draw is served — `CAP-1`, `CAP-2`,
+        `CAP-3`, `MOD-3` and `MOD-6` — is *false* when the deployment refuses it,
+        and reading that through [`spoke`] alone reported five capability lies as
+        "could not be asked". [`answered`] still raises for a draw that never got
+        an answer at all, so the two readings partition what can become of a draw
+        at exactly the line where the deployment's own answer begins
+        ([LAW:single-enforcer] — what a refusal means to a claim that needed the
+        audio is decided here, not in each of the five faults that read it).
+        """
+        answer = self.answered(draw)
+        if answer.status == 200:
+            return None
+        return f"answered {draw} with {answer.status}: {answer.body[:200]!r}"
 
     def repeats(self) -> bool:
         """Whether this voice answered two identical requests identically.
@@ -2541,6 +2566,19 @@ CANNOT_REPORT_TIMINGS = (
 )
 
 
+#: What [`_of_every`] says when a claim asked of the *whole* catalogue has no
+#: subject — which no run reaches: [`_ask_each_voice`] raises [`Blocked`] on an
+#: empty listing before an [`Asking`] exists to pass here, so only the filtered
+#: callers ([`Asking.declaring`] and [`Asking.omitting`], which are `CAP-1`/`CAP-2`
+#: and `CAP-3`/`CAP-4` selecting their arm) can really be empty and they say which
+#: arm the deployment chose instead. Named once rather than spelled six times, so
+#: six sentences about one unreachable state cannot drift into six accounts of it
+#: ([LAW:one-source-of-truth]).
+NO_VOICE_OFFERED = (
+    "this deployment lists no voice, so a claim asked of every voice has no subject"
+)
+
+
 def _of_every(
     subjects: tuple[Asked, ...],
     unasked: str,
@@ -2689,6 +2727,14 @@ def probe_cap_1(deployment: Deployment) -> Verdict:
     """
 
     def fault(asked: Asked) -> str | None:
+        # Before the lengths, because a refused rate has no length to read and is
+        # this claim being false rather than a reason it could not be asked.
+        refused = asked.refusal(FASTER_DRAW)
+        if refused is not None:
+            return (
+                f"declares {CAPABILITY_SPEED!r} and then {refused} — a rate this "
+                "voice promises to speak at is one it must accept when asked"
+            )
         if not asked.repeats():
             raise Blocked(
                 f"voice {asked.voice.id!r} answered two identical {PCM_FORMAT} "
@@ -2734,6 +2780,13 @@ def probe_cap_2(deployment: Deployment) -> Verdict:
     """
 
     def fault(asked: Asked) -> str | None:
+        refused = asked.refusal(FASTER_DRAW)
+        if refused is not None:
+            return (
+                f"omits {CAPABILITY_SPEED!r} and then {refused} — a rate it does "
+                "not honour is one to serve and report ignored, never one to "
+                "refuse over"
+            )
         named = _ignored(asked.spoke(FASTER_DRAW))
         if "voice_settings.speed" not in named:
             return (
@@ -2765,6 +2818,14 @@ def probe_cap_3(deployment: Deployment) -> Verdict:
 
     def fault(asked: Asked) -> str | None:
         for endpoint in _TIMESTAMP_ENDPOINTS:
+            refused = asked.refusal(_timestamp_draw(endpoint))
+            if refused is not None:
+                return (
+                    f"declares {CAPABILITY_TIMESTAMPS!r} and then {refused} — a "
+                    "voice that refuses the endpoint it promises timings from has "
+                    "contradicted its own declaration, which is CAP-4's answer "
+                    "and not this arm's"
+                )
             answer = asked.spoke(_timestamp_draw(endpoint))
             characters = _first_alignment(answer.body)
             if isinstance(characters, str):
@@ -2914,7 +2975,7 @@ def probe_cap_8(deployment: Deployment) -> Verdict:
 
     return _of_every(
         deployment.asking().voices,
-        "this deployment lists no voice, so no language can be read against one",
+        NO_VOICE_OFFERED,
         fault,
         "each named an unspeakable language_code as ignored and an honoured one not",
     )
@@ -2953,7 +3014,7 @@ def probe_cap_10(deployment: Deployment) -> Verdict:
 
     return _of_every(
         deployment.asking().voices,
-        "this deployment lists no voice, so no tag can be spelled two ways at one",
+        NO_VOICE_OFFERED,
         fault,
         "each answered a region-tagged upper-cased tag exactly as its bare family",
     )
@@ -3059,6 +3120,13 @@ def probe_mod_3(deployment: Deployment) -> Verdict:
     """
 
     def fault(asked: Asked) -> str | None:
+        refused = asked.refusal(LISTED_MODEL)
+        if refused is not None:
+            return (
+                f"lists {_model_sent(asked, LISTED_MODEL)!r} among its own models "
+                f"and then {refused} — an id a voice publishes as its own is one "
+                "that voice must serve"
+            )
         served = asked.spoke(LISTED_MODEL)
         if "model_id" in _ignored(served):
             return (
@@ -3071,7 +3139,7 @@ def probe_mod_3(deployment: Deployment) -> Verdict:
 
     return _of_every(
         deployment.asking().voices,
-        "this deployment lists no voice, so no voice's own model id can be sent",
+        NO_VOICE_OFFERED,
         fault,
         "each served a model_id it lists without reporting it ignored",
     )
@@ -3125,8 +3193,7 @@ def probe_mod_4(deployment: Deployment) -> Verdict:
 
     return _of_every(
         deployment.asking().voices,
-        "this deployment lists no voice, so no voice's models can be read against "
-        "another's",
+        NO_VOICE_OFFERED,
         fault,
         "each refused another voice's model_id 422, naming the id, itself and the "
         "served set",
@@ -3163,8 +3230,7 @@ def probe_mod_5(deployment: Deployment) -> Verdict:
 
     return _of_every(
         deployment.asking().voices,
-        "this deployment lists no voice, so an unmapped model id has nothing to be "
-        "sent to",
+        NO_VOICE_OFFERED,
         fault,
         f"each served {UNMAPPED_MODEL!r} and named model_id as ignored",
     )
@@ -3181,6 +3247,13 @@ def probe_mod_6(deployment: Deployment) -> Verdict:
 
     def fault(asked: Asked) -> str | None:
         for draw in (LISTED_MODEL, UNMAPPED_DRAW):
+            refused = asked.refusal(draw)
+            if refused is not None:
+                return (
+                    f"was addressed and then {refused} — the request named this "
+                    "voice and its model_id ended it, so the id outranked the "
+                    "voice rather than being read against it"
+                )
             spoke = _spoke_in(asked.spoke(draw))
             if spoke != asked.voice.id:
                 return (
@@ -3192,7 +3265,7 @@ def probe_mod_6(deployment: Deployment) -> Verdict:
 
     return _of_every(
         deployment.asking().voices,
-        "this deployment lists no voice, so nothing can be addressed by id",
+        NO_VOICE_OFFERED,
         fault,
         "each spoke for itself whichever model_id the request carried",
     )
@@ -3341,7 +3414,14 @@ def probe_sub_3(deployment: Deployment) -> Verdict:
         for name, answer in asked.answers.items():
             if isinstance(answer, Reply) and answer.status == 200:
                 spoke = _spoke_in(answer)
-                if spoke is not None and spoke not in offered:
+                if spoke is None:
+                    # Whether a 200 must name the voice that spoke at all is
+                    # `SUB-2`'s claim, not this one. Counted here it would sit in
+                    # `spoken` as a voice no listing could offer and never be read
+                    # against `offered`, leaving `held` reporting a count of voices
+                    # one of which was never named ([LAW:no-silent-failure]).
+                    continue
+                if spoke not in offered:
                     return Broken(
                         f"{name} was answered by {spoke!r}, which GET /v1/voices "
                         "does not offer — a caller who heard it cannot ask for it "
@@ -3483,7 +3563,11 @@ def probe_disc_2(deployment: Deployment) -> Verdict:
     one request per voice and no synthesis at all.
     """
     key = deployment.key_or_blocked()
-    voices = deployment.asking().catalogue.voices
+    # [`ProbedVoice`] rather than the declarations, because the id is the whole of
+    # what this claim reads and [`_declarations`] is all-or-nothing across four
+    # fields: gating a read-back on every voice's `capabilities` parsing would
+    # leave this unasked over a deployment it could have caught red-handed.
+    voices = deployment.voices
     for voice in voices:
         path = f"/v1/voices/{urllib.parse.quote(voice.id, safe='')}"
         reply = _ask(deployment.target, path, key)
@@ -3532,12 +3616,25 @@ def probe_disc_5(deployment: Deployment) -> Verdict:
     for the reason [`DOCUMENTED_READS`] carries no route table: it would be this
     checkout's vocabulary asserted against a different build's.
     """
-    voices = deployment.asking().catalogue.voices
+    # The language off [`ProbedVoice.published`] rather than off a [`Declared`],
+    # for the reason `DISC-2` reads the thin stamp: this claim reads one field, and
+    # [`_declarations`] would gate it on every voice's `capabilities`, `models` and
+    # `aliases` parsing too. So a malformed `aliases` elsewhere no longer decides
+    # whether a language can be read, and a language that is itself unusable still
+    # does — that one is the precondition this claim genuinely has.
+    voices = deployment.voices
     for voice in voices:
-        reduced = voice.language.strip().lower().replace("_", "-").split("-")[0]
-        if voice.language != reduced:
+        language = voice.published.get("language")
+        if not isinstance(language, str) or not language:
+            raise Blocked(
+                f"voice {voice.id!r} publishes {language!r:.100} as its language, "
+                "so there is no tag to reduce — DISC-1 is the claim that every "
+                "published field is present and well-typed"
+            )
+        reduced = language.strip().lower().replace("_", "-").split("-")[0]
+        if language != reduced:
             return Broken(
-                f"voice {voice.id!r} publishes language {voice.language!r}, which "
+                f"voice {voice.id!r} publishes language {language!r}, which "
                 f"reduces to {reduced!r} — a caller sending {reduced!r} cannot "
                 "match it, so the voice is unreachable by the language it claims"
             )

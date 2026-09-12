@@ -1994,10 +1994,9 @@ def _setting(answer: Answer, name: str) -> Any:
 def _publishing(answer: Answer, alias: str, on: str) -> Answer:
     """`answer`, with `alias` published on voice `on` wherever this body lists it.
 
-    The listing and the single read both, because `DISC-2` reads one against the
-    other and a voice that grew an alias in only one of them would break *that*
-    claim rather than the one under test — one lie, told consistently, is the
-    whole discipline of this section.
+    The listing and the single read both, because an alias published in only one
+    of them is a deployment no server could be — two lies where the discipline of
+    this section is exactly one.
 
     `engine_app` has no way to publish an alias: aliases come from the catalogue's
     own table, which these fixtures leave empty, so the listing is the only place
@@ -2065,6 +2064,54 @@ def test_discovery_that_substitutes_an_unknown_id_breaks_disc_2() -> None:
 
     assert verdict.word == "broken"
     assert "discovery substituted" in verdict.why
+
+
+def test_one_voices_malformed_capabilities_still_leaves_the_id_claims_askable() -> None:
+    """Each claim gated on what it reads rather than on the widest gate available.
+
+    `DISC-2` reads a voice's id and `DISC-5` its language; neither reads
+    `capabilities`, and reading both off the whole-catalogue declarations left
+    them unasked over a deployment they could have judged on the spot. `DISC-1`,
+    whose claim the malformed field really is, still reports it broken — which is
+    the point: one bad field should cost exactly one verdict.
+    """
+
+    def unparseable(answer: Answer) -> Answer:
+        if answer.path != "/v1/voices":
+            return answer
+        listing = json.loads(answer.body)
+        listing["voices"][1]["capabilities"] = "speed"
+        return _rewritten(answer, listing)
+
+    with serving(tampering(unparseable)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["DISC-1"].word == "broken"
+    assert verdicts["DISC-2"].word == "held", verdicts["DISC-2"]
+    assert verdicts["DISC-5"].word == "held", verdicts["DISC-5"]
+
+
+def test_a_language_that_is_not_a_tag_at_all_leaves_disc_5_unasked() -> None:
+    """The precondition `DISC-5` genuinely has, kept while the borrowed one goes.
+
+    A `language` that is not a usable string is nothing to reduce, so this claim
+    has no subject — and the blocker names `DISC-1`, which owns whether a
+    published field is well-typed, rather than reporting the voice broken twice.
+    """
+
+    def untyped(answer: Answer) -> Answer:
+        if answer.path != "/v1/voices":
+            return answer
+        listing = json.loads(answer.body)
+        listing["voices"][1]["language"] = 7
+        return _rewritten(answer, listing)
+
+    with serving(tampering(untyped)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["DISC-1"].word == "broken"
+    assert verdicts["DISC-5"].word == "unasked", verdicts["DISC-5"]
+    assert "DISC-1 is the claim" in verdicts["DISC-5"].blocker
 
 
 def test_a_language_that_is_not_a_bare_family_breaks_disc_5() -> None:
@@ -2619,6 +2666,129 @@ def test_a_region_tagged_variant_reported_ignored_breaks_cap_10() -> None:
 
     assert verdict.word == "broken"
     assert "the tag was compared before it was reduced to its family" in verdict.why
+
+
+# ------------------------- the five claims that require a draw to be served
+
+
+#: Each of these promises a draw is *served*, and until `e16.5`'s review they read
+#: it through [`prober.Asked.spoke`] alone, which cannot tell a draw the prober
+#: could not compose from one the deployment refused. Both left the claim
+#: `unasked` — so a voice declaring a capability and then refusing the very
+#: endpoint it promises, the defect these claims exist to catch, was reported as
+#: something the prober could not look at. [`prober.Asked.refusal`] is the reading
+#: that separates them, and each case below refuses exactly the draw its claim
+#: requires and asks for `broken`: the deployment answered, and its answer is the
+#: promise not kept.
+
+
+def _refusing(answer: Answer) -> Answer:
+    """`answer`, turned into a refusal of a request this deployment promised."""
+    return replace(answer, status=503, body=b'{"detail": "this voice is not speaking"}')
+
+
+def test_a_declared_rate_refused_outright_breaks_cap_1() -> None:
+    """A voice that declares `speed` and then will not be asked at one.
+
+    The audio arm cannot see this: there is no length to read against another, so
+    reading it through `spoke` alone reported a deployment contradicting its own
+    listing as one that could not be asked.
+    """
+
+    def striking(answer: Answer) -> Answer:
+        if _spoke(answer) and _setting(answer, "speed") == prober.FASTER:
+            return _refusing(answer)
+        return answer
+
+    with serving(tampering(striking)) as base_url:
+        verdict = _verdicts(base_url)["CAP-1"]
+
+    assert verdict.word == "broken"
+    assert f"declares 'speed' and then answered {prober.FASTER_DRAW} with 503" in verdict.why
+
+
+def test_a_rate_refused_by_a_voice_that_never_declared_it_breaks_cap_2() -> None:
+    """`CAP-2`'s arm of the same defect, which its own voices select.
+
+    A voice omitting `speed` owes the caller the audio and the word that the rate
+    was dropped. Refusing the request is neither, and it is a stricter failure
+    than the one this claim was written for: the caller gets nothing at all.
+    """
+
+    def striking(answer: Answer) -> Answer:
+        if _spoke(answer) and _setting(answer, "speed") == prober.FASTER:
+            return _refusing(answer)
+        return answer
+
+    with serving(tampering(striking, _plain_spoken())) as base_url:
+        verdict = _verdicts(base_url)["CAP-2"]
+
+    assert verdict.word == "broken"
+    assert f"omits 'speed' and then answered {prober.FASTER_DRAW} with 503" in verdict.why
+
+
+def test_a_declared_timestamp_endpoint_that_refuses_breaks_cap_3() -> None:
+    """The case the review named, and the one nothing else here catches.
+
+    `CAP-4` is the claim about a voice that refuses timings, and its subject is
+    the voices *omitting* the capability — so a voice declaring `timestamps` and
+    refusing both endpoints falls between the two arms unless this one reports it.
+    """
+
+    def silent(answer: Answer) -> Answer:
+        if answer.path.endswith("with-timestamps"):
+            return _refusing(answer)
+        return answer
+
+    with serving(tampering(silent)) as base_url:
+        verdict = _verdicts(base_url)["CAP-3"]
+
+    assert verdict.word == "broken"
+    assert "declares 'timestamps' and then answered POST /with-timestamps with 503" in verdict.why
+    assert "which is CAP-4's answer" in verdict.why
+
+
+def test_a_voices_own_model_refused_breaks_mod_3() -> None:
+    """An id a voice publishes as its own and will not answer to.
+
+    A caller reading the listing to choose a model is handed one that cannot be
+    used, which is the same lie as reporting it ignored and a louder one: the
+    request does not survive at all.
+    """
+
+    def disowning(answer: Answer) -> Answer:
+        sent = answer.sent.get("model_id")
+        if _spoke(answer) and sent not in (None, prober.UNMAPPED_MODEL):
+            return _refusing(answer)
+        return answer
+
+    with serving(tampering(disowning)) as base_url:
+        verdict = _verdicts(base_url)["MOD-3"]
+
+    assert verdict.word == "broken"
+    assert f"among its own models and then answered {prober.LISTED_MODEL} with 503" in verdict.why
+
+
+def test_a_model_id_that_ends_the_request_breaks_mod_6() -> None:
+    """The ranking inverted rather than merely unobservable.
+
+    `MOD-6` is the claim that `voice_id` decides who speaks and `model_id` is only
+    read against it. A deployment that refuses over an id naming no engine let
+    that id decide the whole outcome, which is the ranking the wrong way round
+    rather than a draw the prober failed to make.
+    """
+
+    def vetoing(answer: Answer) -> Answer:
+        if _spoke(answer) and answer.sent.get("model_id") == prober.UNMAPPED_MODEL:
+            return _refusing(answer)
+        return answer
+
+    with serving(tampering(vetoing)) as base_url:
+        verdict = _verdicts(base_url)["MOD-6"]
+
+    assert verdict.word == "broken"
+    assert f"was addressed and then answered {prober.UNMAPPED_DRAW} with 503" in verdict.why
+    assert "outranked the voice" in verdict.why
 
 
 # ------------------------------------------- the six substitution claims

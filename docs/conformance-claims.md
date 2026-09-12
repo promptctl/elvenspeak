@@ -65,6 +65,23 @@ So `unasked` means a precondition genuinely failed — the voice listing did not
 parse, so no per-voice claim could be attempted — and not that a claim turned out
 not to apply.
 
+Nor is a deployment refusing a request a precondition failing. Two different things
+can stop a claim reading the audio it needed, and the line between them is where the
+deployment's own answer begins. A draw — one request a probe composes and sends —
+that could never be composed, or that never got an answer at all, leaves the claim
+genuinely unasked: the listing gave no voice to address, the request never
+completed, and the prober is reporting on itself. A draw that was composed, sent
+and answered with a non-200 is the deployment speaking, and for a claim that
+promised the request would be served, the refusal *is* the promise not being kept
+— which is why `CAP-1`, `CAP-2`, `CAP-3`, `MOD-3` and `MOD-6` read one as `broken`.
+Read it the other way and a voice that publishes `timestamps` in its own
+`capabilities` list and then refuses both timestamp endpoints is reported as
+something the prober could not look at, rather than as the capability lie it is —
+and nothing else catches that one, because `CAP-4`'s subject is the voices that
+*omit* the capability. The division to carry away is that `unasked` is about what
+the prober could not do and `broken` about what the deployment did, and a refusal
+is always something the deployment did.
+
 ## Exit codes
 
 | Code | Condition |
