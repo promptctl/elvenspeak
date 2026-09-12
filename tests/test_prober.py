@@ -23,16 +23,19 @@ import json
 import re
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import pytest
 from conftest import DECLARED_VOICES
 from fastapi import FastAPI, Request, Response
-from fleet import engine_app, serving
+from fleet import cluster, engine_app, router_app, serving
 
 from elvenspeak import prober
 from elvenspeak.api import MAX_TEXT_LENGTH
+from elvenspeak.engine import Capability
 from elvenspeak.formats import DEFAULT_OUTPUT_FORMAT, SUPPORTED_OUTPUT_FORMATS
 from elvenspeak.prober import Broken, Claim, Finding, Held, Target, Unasked
 
@@ -46,7 +49,7 @@ CLAIMS_DOC = Path(__file__).parent.parent / "docs" / "conformance-claims.md"
 #: because the document's own "Probed by" column is what decides the set, so the
 #: day `piper-conformance-e16.5` lands its claims, this tuple grows by editing the
 #: document and the prober — never this test.
-LANDED_ISSUES = ("e16.3", "e16.4")
+LANDED_ISSUES = ("e16.3", "e16.4", "e16.5")
 
 #: A row of any claim table in the document: the id in backticks, then the cells.
 _CLAIM_ROW = re.compile(r"^\|\s*`([A-Z]+-\d+)`\s*\|(.*)\|\s*$", re.M)
@@ -1846,3 +1849,978 @@ def test_an_unmodelled_field_dropped_without_a_word_breaks_ref_7() -> None:
 
     assert verdicts["REF-7"].word == "broken"
     assert "dropped" in verdicts["REF-7"].why
+
+
+# ------------------------- a real deployment telling one lie about one voice
+
+
+#: The per-voice claims read a deployment's *behaviour*, not a payload it can be
+#: handed, so the twenty-four `piper-conformance-e16.5` landed are asked of a real
+#: `engine_app` with one observable rewritten on its way out rather than of a
+#: hand-built stand-in. [`lying_deployment`] above is the right shape for the
+#: format and refusal claims, whose whole subject is a body; expressing "this
+#: voice declares `speed` and then ignores it" there would have meant
+#: reimplementing capability honesty, substitution, alias resolution, `model_id`
+#: arbitration and language reduction in the fixture — at which point the fixture,
+#: not the server, is what the tests assert against ([LAW:behavior-not-structure]).
+#:
+#: So the control is the real server, which the live run and
+#: [`test_an_open_deployment_breaks_nothing`] both establish holds every one of
+#: these, and each case below buys exactly one lie.
+
+
+@dataclass(frozen=True)
+class Answer:
+    """One answer on its way out, and everything a lie might need to change it.
+
+    Carries the *request* beside the response because that is what selects the
+    draw: eleven of the requests a voice is asked go to one path and differ only
+    in the body, so a lie keyed on the path alone could not tell the neutral draw
+    from the one carrying a rate ([LAW:types-are-the-program] — the discriminator
+    the tamper needs is in the type rather than re-derived per case).
+    """
+
+    path: str
+    sent: dict[str, Any]
+    status: int
+    headers: dict[str, str]
+    body: bytes
+
+
+#: One deployment's lie: the answer it was about to give, and the one it gives.
+Tamper = Callable[[Answer], Answer]
+
+
+def tampering(tamper: Tamper, app: FastAPI | None = None) -> FastAPI:
+    """A real deployment whose every answer passes through `tamper` on the way out.
+
+    [LAW:dataflow-not-control-flow] Every deployment that lies about a voice is
+    this one function carrying a different value, rather than a fixture apiece:
+    what separates "reports the rate ignored" from "moves the speaker" is two
+    lines over an [`Answer`], and a second server around each would bury that.
+
+    `content-length` is dropped rather than carried, because a lie that changes
+    the body changes it — a stale length is a truncated response, which every
+    claim below would report as a defect that is really this helper's.
+    """
+    served = engine_app("piper", DECLARED_VOICES) if app is None else app
+
+    @served.middleware("http")
+    async def spoil(request: Request, call_next: Any) -> Response:
+        sent = await request.body()
+        answered = await call_next(request)
+        given = tamper(
+            Answer(
+                path=request.url.path,
+                sent=json.loads(sent) if sent else {},
+                status=answered.status_code,
+                headers={
+                    name: value
+                    for name, value in answered.headers.items()
+                    if name.lower() != "content-length"
+                },
+                body=b"".join([chunk async for chunk in answered.body_iterator]),
+            )
+        )
+        return Response(
+            content=given.body, status_code=given.status, headers=given.headers
+        )
+
+    return served
+
+
+def _rewritten(answer: Answer, body: Any) -> Answer:
+    """`answer`, carrying `body` rendered as JSON instead of what it held."""
+    return replace(answer, body=json.dumps(body).encode())
+
+
+def _also_ignored(answer: Answer, name: str) -> Answer:
+    """`answer`, additionally reporting `name` as a parameter it dropped."""
+    named = answer.headers.get("x-elvenspeak-ignored")
+    return replace(
+        answer,
+        headers={
+            **answer.headers,
+            "x-elvenspeak-ignored": name if named is None else f"{named}, {name}",
+        },
+    )
+
+
+def _not_ignored(answer: Answer, name: str) -> Answer:
+    """`answer`, no longer reporting `name` among the parameters it dropped."""
+    kept = [
+        part.strip()
+        for part in answer.headers.get("x-elvenspeak-ignored", "").split(",")
+        if part.strip() and part.strip() != name
+    ]
+    headers = {
+        key: value
+        for key, value in answer.headers.items()
+        if key.lower() != "x-elvenspeak-ignored"
+    }
+    return replace(
+        answer,
+        headers=headers if not kept else {**headers, "x-elvenspeak-ignored": ", ".join(kept)},
+    )
+
+
+def _spoke(answer: Answer) -> bool:
+    """Whether this answer is a synthesis that really carried audio."""
+    return answer.status == 200 and answer.path.startswith("/v1/text-to-speech/")
+
+
+def _sent_to(answer: Answer) -> str:
+    """The voice id this request addressed, as the caller spelled it.
+
+    Five of the lies below are keyed on *which voice was asked*, and two of those
+    ids are [`prober.UNPRINTABLE_VOICE`] and an alias — ids that reach the path
+    percent-encoded. Decoded in one place rather than at each of the five, so the
+    question "does this arrive encoded or not" has one answer instead of five that
+    can disagree ([LAW:parse-dont-validate] — the id is parsed out of the path
+    once and every tamper below reads the parsed value, never the path).
+
+    [`unquote`] rather than a measurement of what this uvicorn happens to do: it
+    is the identity on an already-decoded path, so this is right either way and
+    stays right if that changes.
+    """
+    return unquote(answer.path).removeprefix("/v1/text-to-speech/").split("/")[0]
+
+
+def _setting(answer: Answer, name: str) -> Any:
+    """What this request asked for in `voice_settings.<name>`, if anything."""
+    return answer.sent.get("voice_settings", {}).get(name)
+
+
+def _publishing(answer: Answer, alias: str, on: str) -> Answer:
+    """`answer`, with `alias` published on voice `on` wherever this body lists it.
+
+    The listing and the single read both, because `DISC-2` reads one against the
+    other and a voice that grew an alias in only one of them would break *that*
+    claim rather than the one under test — one lie, told consistently, is the
+    whole discipline of this section.
+
+    `engine_app` has no way to publish an alias: aliases come from the catalogue's
+    own table, which these fixtures leave empty, so the listing is the only place
+    `SUB-5` can be given a subject at all.
+    """
+    if not answer.path.startswith("/v1/voices"):
+        return answer
+    body = json.loads(answer.body)
+    listed = body["voices"] if isinstance(body, dict) and "voices" in body else [body]
+    for entry in listed:
+        if isinstance(entry, dict) and entry.get("voice_id") == on:
+            entry["aliases"] = [*entry.get("aliases", []), alias]
+    return _rewritten(answer, body)
+
+
+def _plain_spoken() -> FastAPI:
+    """The same deployment, its voices declaring no capability at all.
+
+    `CAP-2` and `CAP-4` are the arms a voice's *own* declaration selects, and
+    [`DECLARED_VOICES`] declare everything — so against the default server both
+    are `unasked` and no lie told over them has a subject to lie about. This is
+    the one fact those two claims read, set the other way
+    ([LAW:one-type-per-behavior] — one deployment carrying a different value, not
+    a second kind of fixture).
+    """
+    return engine_app("piper", DECLARED_VOICES, capabilities=frozenset())
+
+
+def test_the_tampering_seam_changes_nothing_when_it_tells_no_lie() -> None:
+    """The control for every case below, so one lie is what differs.
+
+    Without this, a middleware that mangled every answer would turn all of them
+    red for the wrong reason and read as proof the prober works. It also pins the
+    one thing the helper is easy to get wrong: a body rewritten under a stale
+    `content-length` is a truncated response, and a truncated response breaks
+    claims that have nothing to do with the lie being told.
+    """
+    with serving(tampering(lambda answer: answer)) as base_url:
+        words = _words(base_url)
+
+    assert "broken" not in words.values(), words
+
+
+#: The two voices [`engine_app`] offers below, named off the fixture rather than
+#: spelled again: a lie that addressed a voice this deployment does not have would
+#: be testing substitution instead of whatever it meant to test.
+FIRST, SECOND = DECLARED_VOICES[0].id, DECLARED_VOICES[1].id
+
+
+def test_discovery_that_substitutes_an_unknown_id_breaks_disc_2() -> None:
+    """A read that substitutes is the failure `DISC-2` exists to catch.
+
+    The same unknown id earns audio from a synthesis endpoint and must earn a 404
+    here, because a client reading the catalogue to populate a picker would
+    otherwise offer a voice nothing has.
+    """
+
+    def substituting(answer: Answer) -> Answer:
+        if answer.path == f"/v1/voices/{prober.FOREIGN_VOICE}":
+            return _rewritten(replace(answer, status=200), {"voice_id": FIRST})
+        return answer
+
+    with serving(tampering(substituting)) as base_url:
+        verdict = _verdicts(base_url)["DISC-2"]
+
+    assert verdict.word == "broken"
+    assert "discovery substituted" in verdict.why
+
+
+def test_a_language_that_is_not_a_bare_family_breaks_disc_5() -> None:
+    """`ES` is the spelling that really shipped, and no caller's `es` can match it.
+
+    The voice stays listed, stays addressable and still speaks — it is only
+    unreachable *by the language it claims*, which is why nothing but this claim
+    notices.
+    """
+
+    def shouting(answer: Answer) -> Answer:
+        if answer.path == "/v1/voices":
+            listing = json.loads(answer.body)
+            listing["voices"][0]["language"] = "EN"
+            return _rewritten(answer, listing)
+        return answer
+
+    with serving(tampering(shouting)) as base_url:
+        verdict = _verdicts(base_url)["DISC-5"]
+
+    assert verdict.word == "broken"
+    assert "reduces to 'en'" in verdict.why
+
+
+def test_a_models_listing_offering_router_breaks_mod_2() -> None:
+    """`router` names a deployment that synthesizes nothing.
+
+    The regression `piper-routing-7e2.17` fixed and the one this claim watches
+    for: a router advertising its own name offers callers a `model_id` no voice
+    anywhere answers to.
+    """
+
+    def naming_itself(answer: Answer) -> Answer:
+        if answer.path == "/v1/models":
+            listed = json.loads(answer.body)
+            return _rewritten(
+                answer,
+                [*listed, {"model_id": "router", "languages": [], "capabilities": []}],
+            )
+        return answer
+
+    with serving(tampering(naming_itself)) as base_url:
+        verdict = _verdicts(base_url)["MOD-2"]
+
+    assert verdict.word == "broken"
+    assert "'router'" in verdict.why
+
+
+def test_a_models_listing_inventing_an_id_no_voice_answers_breaks_mod_2() -> None:
+    """The union half, which the `router` check above would never reach.
+
+    Everything else about the invented entry is made to agree — its languages and
+    its capabilities — so `MOD-7` and `CAP-5` stay held and this claim is the only
+    one with anything to say.
+    """
+
+    def inventing(answer: Answer) -> Answer:
+        if answer.path == "/v1/models":
+            listed = json.loads(answer.body)
+            return _rewritten(
+                answer,
+                [
+                    *listed,
+                    {
+                        "model_id": "eleven_invented_v9",
+                        "languages": [],
+                        "capabilities": ["speed", "timestamps"],
+                    },
+                ],
+            )
+        return answer
+
+    with serving(tampering(inventing)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["MOD-2"].word == "broken"
+    assert "invents" in verdicts["MOD-2"].why
+    assert verdicts["MOD-7"].word == "held"
+    assert verdicts["CAP-5"].word == "held"
+
+
+def test_a_voices_own_model_reported_ignored_breaks_mod_3() -> None:
+    """The header lying in the one direction rule 2 cannot afford.
+
+    The id chose the engine that spoke, so reporting it ignored tells a caller
+    their `model_id` reached nothing when it reached exactly what they named.
+    """
+
+    def disowning(answer: Answer) -> Answer:
+        sent = answer.sent.get("model_id")
+        if _spoke(answer) and sent not in (None, prober.UNMAPPED_MODEL):
+            return _also_ignored(answer, "model_id")
+        return answer
+
+    with serving(tampering(disowning)) as base_url:
+        verdict = _verdicts(base_url)["MOD-3"]
+
+    assert verdict.word == "broken"
+    assert "reported model_id ignored" in verdict.why
+
+
+def test_a_router_answers_every_claim_a_direct_engine_does_and_one_more() -> None:
+    """The property `piper-conformance-e16` calls the one most worth testing.
+
+    One prober run, two deployments, the same verdicts — that identity is the
+    whole reason the per-voice claims are read per voice, because behind a router
+    the voices in one process come from different engines.
+
+    `MOD-4` is the one claim that moves, and it moves the right way: a direct
+    engine leaves it unasked, because every `model_id` such a deployment publishes
+    is answered by every voice it offers and no observable id names an engine that
+    is not speaking. A router fronting two engines is the deployment where that
+    stops being true, so the claim becomes askable here and nowhere else — which
+    is what keeps its `unasked` on a direct engine readable as a fact about the
+    deployment rather than about a probe nothing can ever ask.
+    """
+    piper = tuple(
+        replace(voice, id=f"piper-{voice.id}", models=frozenset({"piper"}))
+        for voice in DECLARED_VOICES
+    )
+    kokoro = tuple(
+        replace(
+            voice, id=f"kokoro-{voice.id}", models=frozenset({"kokoro"}), language="es"
+        )
+        for voice in DECLARED_VOICES
+    )
+
+    with cluster(
+        ("piper", piper, frozenset(Capability)),
+        ("kokoro", kokoro, frozenset(Capability)),
+    ) as consul_url:
+        with serving(router_app(consul_url)) as base_url:
+            verdicts = _verdicts(base_url)
+
+    words = {name: verdict.word for name, verdict in verdicts.items()}
+    assert "broken" not in words.values(), words
+    assert words["MOD-4"] == "held", verdicts["MOD-4"]
+    assert "422" in verdicts["MOD-4"].evidence
+
+
+def test_an_engines_id_served_instead_of_refused_breaks_mod_4() -> None:
+    """A caller asks for one engine, hears another, and is told nothing.
+
+    The id here names no engine this build knows, so the deployment serves it and
+    reports it ignored — correct for an id that names nothing, and wrong for one
+    its own listing says another voice answers to. That is the disagreement
+    `MOD-4` reads.
+    """
+
+    def claiming_an_engine_it_lacks(answer: Answer) -> Answer:
+        if answer.path == "/v1/voices":
+            listing = json.loads(answer.body)
+            listing["voices"][1]["models"] = ["no-such-engine"]
+            return _rewritten(answer, listing)
+        return answer
+
+    with serving(tampering(claiming_an_engine_it_lacks)) as base_url:
+        verdict = _verdicts(base_url)["MOD-4"]
+
+    assert verdict.word == "broken"
+    assert "'no-such-engine'" in verdict.why
+
+
+def test_an_unmapped_model_served_without_a_word_breaks_mod_5() -> None:
+    """Every stock ElevenLabs client sends a model this service never mapped.
+
+    Serving it is right; serving it silently is not — the caller is told the id
+    they named was honoured when it steered nothing at all.
+    """
+
+    def silently(answer: Answer) -> Answer:
+        if _spoke(answer) and answer.sent.get("model_id") == prober.UNMAPPED_MODEL:
+            return _not_ignored(answer, "model_id")
+        return answer
+
+    with serving(tampering(silently)) as base_url:
+        verdict = _verdicts(base_url)["MOD-5"]
+
+    assert verdict.word == "broken"
+    assert "steered nothing" in verdict.why
+
+
+def test_a_model_id_that_moves_the_speaker_breaks_mod_6() -> None:
+    """`voice_id` decides who speaks; `model_id` is only read against that.
+
+    A server letting the model choose the speaker answers a caller who named a
+    voice in a different one, which no header here reports as a substitution
+    because the deployment does not think it made one.
+    """
+
+    def steering(answer: Answer) -> Answer:
+        if _spoke(answer) and "model_id" in answer.sent:
+            spoke = answer.headers.get("x-elvenspeak-voice")
+            return replace(
+                answer,
+                headers={
+                    **answer.headers,
+                    "x-elvenspeak-voice": SECOND if spoke == FIRST else FIRST,
+                },
+            )
+        return answer
+
+    with serving(tampering(steering)) as base_url:
+        verdict = _verdicts(base_url)["MOD-6"]
+
+    assert verdict.word == "broken"
+    assert "model_id moved the speaker" in verdict.why
+
+
+def test_a_model_advertising_a_language_its_voices_cannot_say_breaks_mod_7() -> None:
+    """A caller choosing a model by language reaches a voice that cannot say it."""
+
+    def overselling(answer: Answer) -> Answer:
+        if answer.path == "/v1/models":
+            listed = json.loads(answer.body)
+            listed[0]["languages"] = [{"language_id": "zz", "name": "zz"}]
+            return _rewritten(answer, listed)
+        return answer
+
+    with serving(tampering(overselling)) as base_url:
+        verdict = _verdicts(base_url)["MOD-7"]
+
+    assert verdict.word == "broken"
+    assert "advertises ['zz']" in verdict.why
+
+
+# ----------------------------------------- the ten per-voice capability claims
+
+
+def test_a_deployment_whose_voices_declare_nothing_swaps_both_capability_arms() -> None:
+    """The control for `CAP-2` and `CAP-4`, and the property no lie can show.
+
+    Four claims are two questions asked of two kinds of voice, and which pair has
+    a subject is decided by the voices rather than by the prober. A mutation sweep
+    cannot see that: every lie below is told to whichever arm this deployment
+    already selected, so nothing else in this file would notice a prober that had
+    quietly stopped asking the other two. Asked here as one run because the four
+    verdicts have to move *together* — `CAP-1` held and `CAP-2` held at once would
+    mean both arms found a subject in one voice, which is the contradiction the
+    split exists to make impossible.
+
+    `AUTH-2` is named rather than left to the sweep because this deployment is
+    what found the defect it now guards: the 501 `CAP-4` *requires* of a voice
+    that cannot report timings was read by `AUTH-2` as a keyless caller turned
+    away, so one file's two claims demanded opposite answers to one request and a
+    deployment honouring nothing beyond plain speech — a shape `_PUBLISHED_FIELDS`
+    calls legitimate — was reported broken for conforming.
+    """
+    with serving(tampering(lambda answer: answer, _plain_spoken())) as base_url:
+        words = _words(base_url)
+
+    assert words["CAP-1"] == "unasked"
+    assert words["CAP-2"] == "held"
+    assert words["CAP-3"] == "unasked"
+    assert words["CAP-4"] == "held"
+    assert words["AUTH-2"] == "held"
+    assert "broken" not in words.values(), words
+
+
+def test_an_undocumented_501_still_breaks_auth_2() -> None:
+    """The discriminator in `AUTH-2`'s exemption, without which it is a hole.
+
+    `CAP-4` requires a 501 from a voice that cannot report timings, so `AUTH-2`
+    cannot read every 501 as a keyless caller turned away — but exempting the
+    *status* would let a deployment guard its expensive endpoints behind an
+    undocumented 501 and pass the claim whole. The published sentence is what
+    separates the two, so this is that status carried without it.
+    """
+
+    def guarding(answer: Answer) -> Answer:
+        if answer.path.endswith("/stream/with-timestamps"):
+            return replace(
+                _rewritten(answer, {"detail": "Not Implemented"}), status=501
+            )
+        return answer
+
+    with serving(tampering(guarding)) as base_url:
+        verdict = _verdicts(base_url)["AUTH-2"]
+
+    assert verdict.word == "broken"
+    assert "answered 501 to a keyless request" in verdict.why
+
+
+def test_a_rate_that_reaches_no_engine_breaks_cap_1() -> None:
+    """The defect the whole per-voice pass is priced for.
+
+    A deployment can publish `speed`, report it honoured, and hand back the same
+    audio every time; every header says the rate arrived and nothing in the
+    response contradicts it. Only the byte count gives it away, so the lie told
+    here changes nothing *but* the byte count — the rate is accepted, unreported
+    as ignored, and simply does not shorten the utterance.
+    """
+
+    def unhurried(answer: Answer) -> Answer:
+        if _spoke(answer) and _setting(answer, "speed") == prober.FASTER:
+            return replace(answer, body=answer.body * 2)
+        return answer
+
+    with serving(tampering(unhurried)) as base_url:
+        verdict = _verdicts(base_url)["CAP-1"]
+
+    assert verdict.word == "broken"
+    assert "the rate reached no engine" in verdict.why
+
+
+def test_a_declared_rate_reported_ignored_breaks_cap_1() -> None:
+    """`CAP-1`'s other half, which only a routed deployment reaches in the field.
+
+    A backend with the capability withheld reports `voice_settings.speed` ignored
+    while the listing that reached the caller still declares it, so the two
+    disagree in the one direction that matters: a caller read the listing to
+    decide whether to send a rate and was told the opposite of what happened. The
+    audio is left alone here, so the byte-count arm above stays quiet and this is
+    the only thing the verdict can be about.
+    """
+
+    def withholding(answer: Answer) -> Answer:
+        if _spoke(answer) and _setting(answer, "speed") == prober.FASTER:
+            return _also_ignored(answer, "voice_settings.speed")
+        return answer
+
+    with serving(tampering(withholding)) as base_url:
+        verdict = _verdicts(base_url)["CAP-1"]
+
+    assert verdict.word == "broken"
+    assert "reported voice_settings.speed ignored" in verdict.why
+
+
+def test_a_rate_dropped_without_a_word_breaks_cap_2() -> None:
+    """README:24's rule 2 exactly inverted, and the quiet way it fails.
+
+    A voice that never declared `speed` is allowed to ignore one — what it may not
+    do is accept the request, discard the rate, and answer 200 with nothing said,
+    because the caller then believes their whole request was honoured.
+    """
+
+    def wordless(answer: Answer) -> Answer:
+        if _spoke(answer) and _setting(answer, "speed") == prober.FASTER:
+            return _not_ignored(answer, "voice_settings.speed")
+        return answer
+
+    with serving(tampering(wordless, _plain_spoken())) as base_url:
+        verdict = _verdicts(base_url)["CAP-2"]
+
+    assert verdict.word == "broken"
+    assert "the rate was dropped without a word" in verdict.why
+
+
+def test_an_empty_alignment_from_the_streaming_endpoint_breaks_cap_3() -> None:
+    """Only the streaming half is emptied, which is what makes this worth a test.
+
+    A deployment answering `/with-timestamps` with real timings and the streaming
+    endpoint with an alignment-shaped hole satisfies every check that reads a
+    status and half of one that reads the body. `CAP-3` is a claim about *both*
+    endpoints, and lying on only the second is the way to find out whether it
+    really asks both — the endpoint a caller reaches for under load is the one a
+    prober is most likely to have skipped.
+    """
+
+    def hollow(answer: Answer) -> Answer:
+        if not answer.path.endswith("/stream/with-timestamps"):
+            return answer
+        lines = answer.body.splitlines()
+        first = json.loads(lines[0])
+        first["alignment"]["characters"] = []
+        return replace(
+            answer, body=b"\n".join([json.dumps(first).encode(), *lines[1:]])
+        )
+
+    with serving(tampering(hollow)) as base_url:
+        verdict = _verdicts(base_url)["CAP-3"]
+
+    assert verdict.word == "broken"
+    assert "/stream/with-timestamps" in verdict.why
+    assert "an empty `characters` array" in verdict.why
+
+
+def test_a_timestamp_refusal_that_is_not_the_published_sentence_breaks_cap_4() -> None:
+    """A bare 501 is the wrong refusal even though it is the right status.
+
+    The status alone cannot tell a caller a route this build does not serve from a
+    voice that cannot report timings, and only the second is a reason to try
+    another voice. So the lie keeps the 501 and changes nothing but the sentence.
+    """
+
+    def mumbling(answer: Answer) -> Answer:
+        if answer.status == 501:
+            return _rewritten(answer, {"detail": "Not Implemented"})
+        return answer
+
+    with serving(tampering(mumbling, _plain_spoken())) as base_url:
+        verdict = _verdicts(base_url)["CAP-4"]
+
+    assert verdict.word == "broken"
+    assert "rather than the published" in verdict.why
+
+
+def test_a_models_listing_overstating_the_union_breaks_cap_5() -> None:
+    """Rule 2 kept per voice and broken per deployment.
+
+    A caller reads `GET /v1/models` to decide whether to send a rate at all, so a
+    union that overstates what the voices declare sends them to a voice that
+    reports the parameter ignored — every per-voice claim holds and the caller was
+    still misled.
+    """
+
+    def overselling(answer: Answer) -> Answer:
+        if answer.path == "/v1/models":
+            listed = json.loads(answer.body)
+            for entry in listed:
+                entry["capabilities"] = [*entry["capabilities"], "cloning"]
+            return _rewritten(answer, listed)
+        return answer
+
+    with serving(tampering(overselling)) as base_url:
+        verdict = _verdicts(base_url)["CAP-5"]
+
+    assert verdict.word == "broken"
+    assert "advertises capabilities" in verdict.why
+
+
+def test_a_modelled_setting_dropped_without_a_word_breaks_cap_6() -> None:
+    """The half of rule 2 that `REF-7` cannot reach.
+
+    `REF-7` sends a field nobody modelled, so a deployment reporting only what its
+    parser could not place keeps that claim and breaks this one. The setting
+    dropped here is one this service *models* and no engine honours, which is
+    exactly the gap between the two.
+    """
+
+    def wordless(answer: Answer) -> Answer:
+        if _spoke(answer) and _setting(answer, prober.UNHONOURABLE_SETTING) is not None:
+            return _not_ignored(answer, f"voice_settings.{prober.UNHONOURABLE_SETTING}")
+        return answer
+
+    with serving(tampering(wordless)) as base_url:
+        verdict = _verdicts(base_url)["CAP-6"]
+
+    assert verdict.word == "broken"
+    assert "was dropped without a word" in verdict.why
+
+
+def test_an_empty_ignored_header_where_nothing_was_dropped_breaks_cap_7() -> None:
+    """Absent and empty are different answers, and the difference is the claim.
+
+    A caller reading the header's *presence* as "something was dropped" is reading
+    it exactly as README:22 documents it, so an empty header sends them hunting
+    for a parameter nobody dropped. The lie names nothing — it only makes the
+    header exist on the one request in the whole run that had nothing to report.
+    """
+
+    def hinting(answer: Answer) -> Answer:
+        if (
+            _spoke(answer)
+            and set(answer.sent) == {"text"}
+            and not answer.path.endswith("with-timestamps")
+        ):
+            return replace(
+                answer, headers={**answer.headers, "x-elvenspeak-ignored": ""}
+            )
+        return answer
+
+    with serving(tampering(hinting)) as base_url:
+        verdict = _verdicts(base_url)["CAP-7"]
+
+    assert verdict.word == "broken"
+    assert "the header is present where nothing was dropped" in verdict.why
+
+
+def test_an_unspeakable_language_dropped_without_a_word_breaks_cap_8() -> None:
+    """The arm that catches a server silently ignoring `language_code`.
+
+    Keyed on [`prober.UNSPOKEN_LANGUAGES`] rather than on a tag spelled here,
+    because which family no voice speaks is the prober's fact and a second
+    spelling of it would go green against a prober that picked a different one.
+    """
+
+    def wordless(answer: Answer) -> Answer:
+        unspoken = answer.sent.get("language_code") in prober.UNSPOKEN_LANGUAGES
+        if _spoke(answer) and unspoken:
+            return _not_ignored(answer, "language_code")
+        return answer
+
+    with serving(tampering(wordless)) as base_url:
+        verdict = _verdicts(base_url)["CAP-8"]
+
+    assert verdict.word == "broken"
+    assert "the preference was dropped and the caller was not told" in verdict.why
+
+
+def test_an_honoured_language_reported_ignored_breaks_cap_8() -> None:
+    """The other arm, and the reason one alone is half a verdict.
+
+    A header naming every `language_code` satisfies the arm above exactly as well
+    as a correct one does, so `CAP-8` asks both per voice: the tag this voice
+    really speaks must come back *not* reported as dropped. Without this arm a
+    deployment naming every language it is ever sent would read as conformant.
+    """
+    spoken = DECLARED_VOICES[0].language
+
+    def grumbling(answer: Answer) -> Answer:
+        if _spoke(answer) and answer.sent.get("language_code") == spoken:
+            return _also_ignored(answer, "language_code")
+        return answer
+
+    with serving(tampering(grumbling)) as base_url:
+        verdict = _verdicts(base_url)["CAP-8"]
+
+    assert verdict.word == "broken"
+    assert "a preference this voice met was reported as dropped" in verdict.why
+
+
+def test_an_empty_language_reported_ignored_breaks_cap_9() -> None:
+    """The bug this claim was written from, told back to the prober.
+
+    `""` is what a form or a JS client sends for "unset"; taken literally it is a
+    language no voice speaks, so every such request came back reporting
+    `language_code` dropped and a caller who expressed no preference was told
+    their preference was ignored.
+    """
+
+    def literal(answer: Answer) -> Answer:
+        if _spoke(answer) and answer.sent.get("language_code") == "":
+            return _also_ignored(answer, "language_code")
+        return answer
+
+    with serving(tampering(literal)) as base_url:
+        verdict = _verdicts(base_url)["CAP-9"]
+
+    assert verdict.word == "broken"
+    assert prober.EMPTY_LANGUAGE in verdict.why
+    assert "there was nothing to report as dropped" in verdict.why
+
+
+def test_a_region_tagged_variant_reported_ignored_breaks_cap_10() -> None:
+    """A server comparing raw strings, which is invisible to a canonical spelling.
+
+    The bare family is honoured and the region-tagged upper-cased spelling of the
+    same language is reported dropped — the exact signature of a comparison made
+    before the tag was reduced, and a failure no check sending only `en` can see.
+    """
+
+    def unreduced(answer: Answer) -> Answer:
+        if _spoke(answer) and str(answer.sent.get("language_code", "")).endswith(
+            "_419"
+        ):
+            return _also_ignored(answer, "language_code")
+        return answer
+
+    with serving(tampering(unreduced)) as base_url:
+        verdict = _verdicts(base_url)["CAP-10"]
+
+    assert verdict.word == "broken"
+    assert "the tag was compared before it was reduced to its family" in verdict.why
+
+
+# ------------------------------------------- the six substitution claims
+
+
+def test_a_substitution_that_does_not_say_what_was_asked_for_breaks_sub_1() -> None:
+    """A substitution a caller cannot detect is the failure `SUB-1` exists for.
+
+    The audio is real and the voice that spoke is named; only the record of what
+    was *asked for* is missing, which is precisely the state where a caller
+    believes they were answered by the voice they addressed. `SUB-2` sees this
+    lie too — every lie about that header does, since the two claims read the same
+    pair — so it is asserted here rather than left to look like an accident.
+    """
+
+    def unrecorded(answer: Answer) -> Answer:
+        if _sent_to(answer) == prober.FOREIGN_VOICE:
+            return replace(
+                answer,
+                headers={
+                    name: value
+                    for name, value in answer.headers.items()
+                    if name.lower() != "x-elvenspeak-voice-requested"
+                },
+            )
+        return answer
+
+    with serving(tampering(unrecorded)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["SUB-1"].word == "broken"
+    assert "was not what spoke" in verdicts["SUB-1"].why
+    assert verdicts["SUB-2"].word == "broken"
+
+
+def test_a_voice_requested_header_on_a_direct_hit_breaks_sub_2() -> None:
+    """`SUB-2`'s own arm, told where `SUB-1` has nothing to read.
+
+    The header is added to answers that substituted nothing, so `SUB-1` — which
+    reads only the request addressed at a voice nothing offers — stays held and
+    this is the only claim with anything to say. A `voice-requested` on every
+    response tells a caller nothing, which is the same defect as one that never
+    appears: the header stops meaning a substitution happened.
+    """
+
+    def crying_wolf(answer: Answer) -> Answer:
+        if _spoke(answer) and _sent_to(answer) == FIRST:
+            return replace(
+                answer,
+                headers={**answer.headers, "x-elvenspeak-voice-requested": FIRST},
+            )
+        return answer
+
+    with serving(tampering(crying_wolf)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["SUB-2"].word == "broken"
+    assert "the header no longer means a substitution happened" in verdicts["SUB-2"].why
+    assert verdicts["SUB-1"].word == "held"
+
+
+def test_a_substitute_the_listing_does_not_offer_breaks_sub_3() -> None:
+    """A voice a caller can hear and never address again.
+
+    The fifth of the five claims a router misreporting its fleet passes: the
+    substitution is reported honestly in every other respect, and the voice it
+    names simply is not in `GET /v1/voices`, which makes what the caller heard
+    unreproducible.
+    """
+
+    def ghostly(answer: Answer) -> Answer:
+        if _spoke(answer):
+            return replace(
+                answer,
+                headers={**answer.headers, "x-elvenspeak-voice": "ghost-voice"},
+            )
+        return answer
+
+    with serving(tampering(ghostly)) as base_url:
+        verdict = _verdicts(base_url)["SUB-3"]
+
+    assert verdict.word == "broken"
+    assert "GET /v1/voices does not offer" in verdict.why
+
+
+def test_a_404_naming_no_voice_breaks_sub_4() -> None:
+    """Refusing is allowed; refusing anonymously is not.
+
+    A deployment with substitution switched off owes a 404, and `engine_app`
+    hardcodes `Substitution.FIRST_OFFERED`, so the refusal has to be bought with a
+    lie rather than with a setting. The body names nothing, which leaves a caller
+    unable to tell this from a path the build does not serve.
+    """
+
+    def anonymous(answer: Answer) -> Answer:
+        if _sent_to(answer) == prober.FOREIGN_VOICE:
+            return replace(_rewritten(answer, {"detail": "Not Found"}), status=404)
+        return answer
+
+    with serving(tampering(anonymous)) as base_url:
+        verdict = _verdicts(base_url)["SUB-4"]
+
+    assert verdict.word == "broken"
+    assert "which names no voice" in verdict.why
+
+
+def test_a_404_naming_the_voice_it_refused_holds_sub_4_and_unasks_sub_1() -> None:
+    """The arm selection `SUB-1` and `SUB-4` share, which neither alone can show.
+
+    One request, two documented promises, and which of them has a subject is the
+    deployment's choice rather than the prober's. A prober that had quietly
+    stopped asking `SUB-4` would be indistinguishable from this one in every other
+    test here — the lie is the same 404 as above with a body that names what it
+    refused, and the pair must move in opposite directions together.
+    """
+
+    def named(answer: Answer) -> Answer:
+        if _sent_to(answer) == prober.FOREIGN_VOICE:
+            return replace(
+                _rewritten(
+                    answer, {"detail": f"unknown voice {prober.FOREIGN_VOICE!r}"}
+                ),
+                status=404,
+            )
+        return answer
+
+    with serving(tampering(named)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["SUB-4"].word == "held"
+    assert verdicts["SUB-1"].word == "unasked"
+    assert "SUB-4 is the arm it selects" in verdicts["SUB-1"].blocker
+
+
+def test_a_deployment_publishing_no_alias_leaves_sub_5_unasked() -> None:
+    """Zero aliases all resolving correctly is a check that cannot fail.
+
+    `docs/conformance-claims.md` said an empty alias set made this claim hold
+    trivially, which contradicted the same document's rejection of checks that
+    cannot fail and the `HEALTH-2` precedent already in `prober.py`;
+    `piper-conformance-e16.5` settled it in the document's favour of the code, and
+    this is the assertion that keeps the two agreeing.
+    """
+    with serving(tampering(lambda answer: answer)) as base_url:
+        verdict = _verdicts(base_url)["SUB-5"]
+
+    assert verdict.word == "unasked"
+    assert "no voice here publishes an alias" in verdict.blocker
+
+
+def test_an_alias_that_reaches_another_voice_breaks_sub_5() -> None:
+    """An alias table is exactly the kind of map that drifts.
+
+    The alias is published on the second voice, where an unknown id does *not*
+    land — this deployment substitutes to the first offered one — so the listing
+    promises a mapping the deployment does not make. Published on the first voice
+    the same lie would hold, which is what the assertion on `SUB-5`'s held
+    wording below the break is for: the ids are foreign by definition and nothing
+    but this check ever reads them.
+    """
+    with serving(
+        tampering(lambda answer: _publishing(answer, "eleven-legacy-id", SECOND))
+    ) as base_url:
+        verdict = _verdicts(base_url)["SUB-5"]
+
+    assert verdict.word == "broken"
+    assert "the listing promises a mapping this deployment does not make" in verdict.why
+
+
+def test_an_alias_reaching_the_voice_that_published_it_holds_sub_5() -> None:
+    """The same lie moved one voice over, so the break above is about the mapping.
+
+    Without this, `SUB-5` breaking on a published alias would be equally
+    consistent with a probe that reports `broken` for *any* alias it finds.
+    """
+    with serving(
+        tampering(lambda answer: _publishing(answer, "eleven-legacy-id", FIRST))
+    ) as base_url:
+        verdict = _verdicts(base_url)["SUB-5"]
+
+    assert verdict.word == "held"
+    assert "reached the voice that published it" in verdict.evidence
+
+
+def test_an_unprintable_voice_id_answered_500_breaks_sub_6() -> None:
+    """The id reaching the response headers unescaped, which is a 500 on the way out.
+
+    A header value must be latin-1 on the wire, so a server echoing this id
+    unencoded raises inside its own response assembly — after the status is
+    chosen — and fails a request it had already decided to serve. The lie is that
+    500, told to a request the real server answers correctly.
+    """
+
+    def unescaped(answer: Answer) -> Answer:
+        if _sent_to(answer) == prober.UNPRINTABLE_VOICE:
+            return replace(
+                _rewritten(answer, {"detail": "Internal Server Error"}), status=500
+            )
+        return answer
+
+    with serving(tampering(unescaped)) as base_url:
+        verdict = _verdicts(base_url)["SUB-6"]
+
+    assert verdict.word == "broken"
+    assert "reached the response headers unescaped" in verdict.why
