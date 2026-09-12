@@ -1344,8 +1344,8 @@ class Asked:
         promised the draw would be served the difference decides the verdict: a
         draw that could not be **composed** is a precondition failing and `unasked`
         is right, while one composed, sent and **refused** is the deployment
-        answering. [`refusal`] is the reading for the second, and the six claims
-        that require a served draw ask it first.
+        answering. [`refusal`] is the reading for the second, and every claim that
+        requires a served draw asks it first.
         """
         return _served(self.answers[draw], f"{self.voice.id!r} {draw}")
 
@@ -1354,13 +1354,15 @@ class Asked:
 
         The half of [`spoke`]'s blocker that is a verdict rather than a
         precondition. A claim promising that a draw is served — `CAP-1`, `CAP-2`,
-        `CAP-3`, `MOD-3`, `MOD-6` and `SUB-5` — is *false* when the deployment
-        refuses it, and reading that through [`spoke`] alone reported six
-        capability lies as "could not be asked". [`answered`] still raises for a
+        `CAP-3`, `CAP-6`, `CAP-8`, `CAP-9`, `CAP-10`, `MOD-3`, `MOD-6` and
+        `SUB-5` — is *false* when the deployment refuses it, and reading that
+        through [`spoke`] alone reported every one of them as "could not be
+        asked". A draw carrying no such promise keeps [`spoke`]'s reading: a
+        refused `PLAIN` is `FMT-1`'s subject, not `CAP-7`'s or `CAP-9`'s. [`answered`] still raises for a
         draw that never got an answer at all, so the two readings partition what
         can become of a draw at exactly the line where the deployment's own answer
         begins ([LAW:single-enforcer] — what a refusal means to a claim that needed
-        the audio is decided here, not in each of the six faults that read it).
+        the audio is decided here, not in each of the faults that read it).
         """
         answer = self.answered(draw)
         if answer.status == 200:
@@ -2897,6 +2899,16 @@ def probe_cap_6(deployment: Deployment) -> Verdict:
     it has never heard of.
     """
     asked = deployment.asking().once
+    # Rule 2 is a promise about a request that is *served*: the parameter is
+    # dropped and named back in the header, so a refusal over one is the rule
+    # broken rather than a draw this claim could not read.
+    refused = asked.refusal(UNHONOURABLE_DRAW)
+    if refused is not None:
+        return Broken(
+            f"{refused} — README:24's rule 2 is that a parameter this service "
+            "cannot honour is dropped and named back, so a request carrying one "
+            "is served rather than refused over"
+        )
     named = _ignored(asked.spoke(UNHONOURABLE_DRAW))
     wanted = f"voice_settings.{UNHONOURABLE_SETTING}"
     if wanted not in named:
@@ -2948,6 +2960,13 @@ def probe_cap_8(deployment: Deployment) -> Verdict:
     """
 
     def fault(asked: Asked) -> str | None:
+        refused = asked.refusal(UNSPOKEN_DRAW)
+        if refused is not None:
+            return (
+                f"speaks {asked.voice.language!r} and then {refused} — a language "
+                "it does not speak is one to serve and report ignored, never one "
+                "to refuse over"
+            )
         unspoken = asked.spoke(UNSPOKEN_DRAW)
         spoke = _spoke_in(unspoken)
         if spoke != asked.voice.id:
@@ -2963,6 +2982,14 @@ def probe_cap_8(deployment: Deployment) -> Verdict:
                 f"voice here speaks, answering 200 with "
                 f"{_ELVENSPEAK_HEADER}ignored {_ignored(unspoken) or 'absent'} — "
                 "the preference was dropped and the caller was not told"
+            )
+        refused_own = asked.refusal(OWN_FAMILY)
+        if refused_own is not None:
+            return (
+                f"publishes {asked.voice.language!r}, was asked for exactly that, "
+                f"and {refused_own} — a voice that refuses the language it "
+                "publishes has contradicted its own listing, which is the same "
+                "lie as `MOD-3`'s over a model id"
             )
         own = asked.spoke(OWN_FAMILY)
         if "language_code" in _ignored(own):
@@ -2993,9 +3020,20 @@ def probe_cap_10(deployment: Deployment) -> Verdict:
     """
 
     def fault(asked: Asked) -> str | None:
+        mangled = _mangled(asked.voice.language)
+        # Both spellings, because this claim's subject is that they are one
+        # request: refusing either is the deployment reading a tag it should have
+        # reduced as a value it can reject.
+        for draw, spelling in ((OWN_VARIANT, mangled), (OWN_FAMILY, asked.voice.language)):
+            refused = asked.refusal(draw)
+            if refused is not None:
+                return (
+                    f"speaks {asked.voice.language!r} and then {refused} — "
+                    f"{spelling!r} spells the language this voice publishes, so it "
+                    "is one to reduce and serve rather than to refuse over"
+                )
         variant = asked.spoke(OWN_VARIANT)
         bare = asked.spoke(OWN_FAMILY)
-        mangled = _mangled(asked.voice.language)
         if _ignored(variant) != _ignored(bare):
             return (
                 f"speaks {asked.voice.language!r} and answered {mangled!r} with "
@@ -3700,7 +3738,21 @@ def probe_cap_9(deployment: Deployment) -> Verdict:
     ignored.
     """
     asked = deployment.asking().once
-    for draw in (EMPTY_LANGUAGE, BLANK_LANGUAGE, PLAIN):
+    # The two shapes that carry a `language_code` at all. `PLAIN` carries none,
+    # so a refusal of it says nothing about how this service reads an unset tag
+    # and is `FMT-1`'s subject — the claim that judges a refusal of a plain
+    # synthesis request — rather than this one's.
+    expressed = (EMPTY_LANGUAGE, BLANK_LANGUAGE)
+    for draw in expressed:
+        refused = asked.refusal(draw)
+        if refused is not None:
+            return Broken(
+                f"{refused} — a caller who expressed no preference was refused "
+                "over the absence, which is the literal reading this claim was "
+                "written from made louder: the empty tag was taken for a value "
+                "rather than for no preference at all"
+            )
+    for draw in (*expressed, PLAIN):
         named = _ignored(asked.spoke(draw))
         if "language_code" in named:
             return Broken(

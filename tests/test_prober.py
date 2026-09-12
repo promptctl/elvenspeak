@@ -2668,7 +2668,7 @@ def test_a_region_tagged_variant_reported_ignored_breaks_cap_10() -> None:
     assert "the tag was compared before it was reduced to its family" in verdict.why
 
 
-# ------------------------- the six claims that require a draw to be served
+# --------------------------- the claims that require a draw to be served
 
 
 #: Each of these promises a draw is *served*, and until `e16.5`'s review they read
@@ -2812,6 +2812,127 @@ def test_a_published_alias_refused_outright_breaks_sub_5() -> None:
     assert verdict.word == "broken"
     assert f"is published on voice {FIRST!r} and then answered " in verdict.why
     assert f"{prober._alias_draw('eleven-legacy-id')} with 503" in verdict.why
+
+
+def test_a_setting_no_engine_honours_refused_breaks_cap_6() -> None:
+    """README:24's rule 2 is a promise about a request that is *served*.
+
+    A parameter this service cannot honour is dropped and named back in
+    `x-elvenspeak-ignored`, so a deployment refusing over one hands the caller
+    neither the audio nor the word. Read through `spoke` alone that was reported
+    as a draw this claim could not read.
+    """
+
+    def strict(answer: Answer) -> Answer:
+        if _spoke(answer) and _setting(answer, prober.UNHONOURABLE_SETTING) is not None:
+            return _refusing(answer)
+        return answer
+
+    with serving(tampering(strict)) as base_url:
+        verdict = _verdicts(base_url)["CAP-6"]
+
+    assert verdict.word == "broken"
+    assert f"answered {prober.UNHONOURABLE_DRAW} with 503" in verdict.why
+    assert "rule 2" in verdict.why
+
+
+def test_an_unspoken_language_refused_breaks_cap_8() -> None:
+    """The same rule read over a language rather than over a voice setting.
+
+    A language the addressed voice does not speak is a preference to drop and
+    report, so refusing it is rule 2 broken. This claim sweeps every voice and
+    `_of_every` lets a `Blocked` out of one discard the whole sweep, so before
+    this the first refusing voice took every other voice's verdict with it.
+    """
+
+    def monolingual(answer: Answer) -> Answer:
+        if _spoke(answer) and answer.sent.get("language_code") in prober.UNSPOKEN_LANGUAGES:
+            return _refusing(answer)
+        return answer
+
+    with serving(tampering(monolingual)) as base_url:
+        verdict = _verdicts(base_url)["CAP-8"]
+
+    assert verdict.word == "broken"
+    assert f"answered {prober.UNSPOKEN_DRAW} with 503" in verdict.why
+    assert "never one to refuse over" in verdict.why
+
+
+def test_an_empty_language_refused_breaks_cap_9() -> None:
+    """The literal reading this claim was written from, made louder.
+
+    `""` is what a form or a JS client sends for "unset". A deployment reporting
+    it dropped has taken it for a value, which is this claim's own bug; one that
+    refuses over it has done the same thing and denied the caller audio as well.
+    `PLAIN` is deliberately not read this way — it carries no `language_code` at
+    all, so refusing it says nothing about how an unset tag is read and is
+    `FMT-1`'s subject instead.
+    """
+
+    def rejecting(answer: Answer) -> Answer:
+        if _spoke(answer) and answer.sent.get("language_code") == "":
+            return _refusing(answer)
+        return answer
+
+    with serving(tampering(rejecting)) as base_url:
+        verdict = _verdicts(base_url)["CAP-9"]
+
+    assert verdict.word == "broken"
+    assert f"answered {prober.EMPTY_LANGUAGE} with 503" in verdict.why
+    assert "for no preference at all" in verdict.why
+
+
+def test_a_voices_own_language_refused_breaks_cap_8() -> None:
+    """A voice that will not answer to the language its own listing names.
+
+    `CAP-8`'s second arm asks each voice for exactly that language. Refusing it is
+    the lie `MOD-3` catches over a published model id and `SUB-5` over a published
+    alias — the listing offers something the voice does not honour — and this arm
+    was not one the adversarial review named.
+    """
+
+    def disowning(answer: Answer) -> Answer:
+        lang = answer.sent.get("language_code")
+        own = (
+            isinstance(lang, str)
+            and lang.strip() != ""
+            and lang == lang.lower()
+            and "_" not in lang
+            and lang not in prober.UNSPOKEN_LANGUAGES
+        )
+        if _spoke(answer) and own:
+            return _refusing(answer)
+        return answer
+
+    with serving(tampering(disowning)) as base_url:
+        verdict = _verdicts(base_url)["CAP-8"]
+
+    assert verdict.word == "broken"
+    assert "was asked for exactly that" in verdict.why
+    assert f"answered {prober.OWN_FAMILY} with 503" in verdict.why
+
+
+def test_a_region_tagged_spelling_refused_breaks_cap_10() -> None:
+    """A spelling this deployment should have reduced, rejected instead.
+
+    `CAP-10`'s subject is that the mangled tag and the bare family are one
+    request. A deployment refusing the region-tagged spelling has read it as a
+    value it may reject rather than as a tag to reduce — this claim broken more
+    loudly than the reported-ignored case it was written for.
+    """
+
+    def literal(answer: Answer) -> Answer:
+        lang = answer.sent.get("language_code")
+        if _spoke(answer) and isinstance(lang, str) and lang.endswith("_419"):
+            return _refusing(answer)
+        return answer
+
+    with serving(tampering(literal)) as base_url:
+        verdict = _verdicts(base_url)["CAP-10"]
+
+    assert verdict.word == "broken"
+    assert f"answered {prober.OWN_VARIANT} with 503" in verdict.why
+    assert "rather than to refuse over" in verdict.why
 
 
 # ------------------------------------------- the six substitution claims
