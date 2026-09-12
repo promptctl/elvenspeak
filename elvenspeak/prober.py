@@ -2730,10 +2730,16 @@ class Timed:
 
     [LAW:parse-dont-validate] Built only by [`_timed`], so holding one is proof
     that this object carried an alignment whose three arrays are non-empty and
-    the same length, a fidelity, and audio that really decoded. That is why the
-    five claims about these endpoints contain no shape guards at all: the
-    question of whether the body had what they read is answered once, at the
-    crossing, and cannot be asked again inland.
+    the same length, whose every time is finite, a fidelity, and audio that
+    really decoded. That is why the five claims about these endpoints contain no
+    shape guards at all: the question of whether the body had what they read is
+    answered once, at the crossing, and cannot be asked again inland.
+
+    Finite is part of the stamp rather than a detail of [`_number`] because it is
+    the part these claims lean on hardest and the only part that fails silently:
+    a `NaN` is shaped like a time and passes every other reading here, and then
+    answers `False` to every `<` and every `>` inland, so each claim that trusts
+    this stamp reports a scrambled timeline held.
     """
 
     #: `alignment` and `normalized_alignment` exactly as they arrived. `TIME-5`'s
@@ -2782,13 +2788,38 @@ class Timed:
         return self.ends[-1] - self.starts[0]
 
 
+#: The widest magnitude a time may carry, and so the widest [`_one_timed`] hands
+#: inland: past it a JSON integer no longer converts to the `float` every claim
+#: does its arithmetic in.
+_FINITE_SECONDS = sys.float_info.max
+
+
 def _number(value: Any) -> bool:
-    """Whether `value` is a JSON number rather than something shaped like one.
+    """Whether `value` is a time a claim can compare, not merely one shaped like it.
 
     `bool` is excluded because Python makes it an `int`, so a timeline carrying
-    `true` would otherwise parse as a time of 1 second.
+    `true` would otherwise parse as a time of 1 second. The range comparison
+    excludes the rest, and it is the half [`Timed`]'s stamp depends on:
+    `json.loads` reads the non-standard `NaN`, `Infinity` and `-Infinity` that
+    `json.dumps` itself writes for those floats, and every comparison against a
+    `NaN` is False — so one admitted here would answer "no" to `TIME-4`'s
+    reversal test, to its length test and to `TIME-6`'s gap test alike, and a
+    timeline of garbage would be reported held by all three
+    ([LAW:single-enforcer] — the probes read comparisons, so the question of
+    whether a value can answer one is settled here or nowhere).
+
+    Written as a range rather than `math.isfinite` because `json` parses an
+    integer of any width at all, and both that call and the `float` below
+    overflow on one too large to be a `float` — killing the probe mid-run
+    instead of reporting the deployment broken. Agrees with the serving side,
+    which already refuses all of these — see
+    `test_a_timestamp_that_is_not_a_usable_number_fails_the_request`.
     """
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and -_FINITE_SECONDS <= value <= _FINITE_SECONDS
+    )
 
 
 def _timed(body: bytes) -> tuple[Timed, ...] | str:

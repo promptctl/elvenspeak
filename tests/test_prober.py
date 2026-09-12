@@ -3477,3 +3477,45 @@ def test_a_malformed_timing_array_breaks_cap_3() -> None:
 
     assert verdict.word == "broken"
     assert "`character_end_times_seconds` is not an array of numbers" in verdict.why
+
+
+@pytest.mark.parametrize(
+    "unusable",
+    [float("nan"), float("inf"), float("-inf"), 10**400],
+    ids=["nan", "infinity", "-infinity", "wider-than-a-float"],
+)
+def test_a_time_no_comparison_can_answer_breaks_time_4(unusable: float) -> None:
+    """Each of these is shaped like a time and answers no question a claim asks.
+
+    `json` reads all four off the wire: `NaN`, `Infinity` and `-Infinity` are
+    non-standard tokens `json.dumps` itself writes for those floats, and Python's
+    `int` has no width at all. Admitted, they fail in three different ways and
+    none of them is the failure this claim exists to report.
+
+    A `NaN` answers `False` to `<` and to `>` alike, so `TIME-4`'s reversal check
+    and its length check both go quiet and a scrambled timeline is reported
+    `held` — the silent one, and the reason the parser is where this belongs. An
+    infinity is caught, but by the length check, complaining that the audio
+    disagrees rather than that the time is unreadable; that is why the assertion
+    below is on the message and not on the word alone. An integer wider than a
+    `float` overflows the conversion inside the parser itself and kills the probe
+    mid-run, so the deployment is never judged at all.
+
+    Rejecting all four at `_number` is what lets [`Timed`]'s stamp mean what its
+    docstring says, and lets the claims downstream go on comparing without ever
+    asking.
+    """
+
+    def unusable_time(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            one["alignment"]["character_end_times_seconds"][1] = unusable
+        return _relined(answer, objects)
+
+    with serving(tampering(unusable_time)) as base_url:
+        verdict = _verdicts(base_url)["TIME-4"]
+
+    assert verdict.word == "broken"
+    assert "`character_end_times_seconds` is not an array of numbers" in verdict.why
