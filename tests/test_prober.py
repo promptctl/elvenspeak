@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,8 @@ from fastapi import FastAPI, Request, Response
 from fleet import engine_app, serving
 
 from elvenspeak import prober
+from elvenspeak.api import MAX_TEXT_LENGTH
+from elvenspeak.formats import DEFAULT_OUTPUT_FORMAT, SUPPORTED_OUTPUT_FORMATS
 from elvenspeak.prober import Broken, Claim, Finding, Held, Target, Unasked
 
 #: The document that owns the claim ids and their evidence classes. Read from
@@ -39,11 +42,11 @@ from elvenspeak.prober import Broken, Claim, Finding, Held, Target, Unasked
 #: the answer could not ([LAW:one-source-of-truth]).
 CLAIMS_DOC = Path(__file__).parent.parent / "docs" / "conformance-claims.md"
 
-#: The issue whose claims `elvenspeak.prober` is expected to ask today. Named
+#: The issues whose claims `elvenspeak.prober` is expected to ask today. Named
 #: because the document's own "Probed by" column is what decides the set, so the
-#: day `piper-conformance-e16.4` lands its claims, this list grows by editing the
+#: day `piper-conformance-e16.5` lands its claims, this tuple grows by editing the
 #: document and the prober — never this test.
-THIS_ISSUE = "e16.3"
+LANDED_ISSUES = ("e16.3", "e16.4")
 
 #: A row of any claim table in the document: the id in backticks, then the cells.
 _CLAIM_ROW = re.compile(r"^\|\s*`([A-Z]+-\d+)`\s*\|(.*)\|\s*$", re.M)
@@ -97,18 +100,18 @@ def test_every_claim_probed_here_is_one_the_document_publishes() -> None:
         )
 
 
-def test_every_claim_the_document_assigns_this_issue_is_probed() -> None:
+def test_every_claim_the_document_assigns_a_landed_issue_is_probed() -> None:
     """The prober asks everything it was made responsible for, and says so."""
     owed = {
         claim_id
         for claim_id, (_, probed_by) in documented().items()
-        if THIS_ISSUE in probed_by
+        if any(issue in probed_by for issue in LANDED_ISSUES)
     }
     asked = {claim.id for claim in prober.CLAIMS}
 
     assert owed - asked == set(), (
         f"{CLAIMS_DOC.name} says {sorted(owed - asked)} are probed by "
-        f"{THIS_ISSUE} and nothing here asks them"
+        f"{list(LANDED_ISSUES)} and nothing here asks them"
     )
     assert asked - owed == set(), (
         f"{sorted(asked - owed)} are probed here, and {CLAIMS_DOC.name} assigns "
@@ -398,10 +401,174 @@ def test_a_key_no_header_can_carry_is_a_usage_error_and_not_a_verdict(
 HEALTHY = {"voices": ["v1"]}
 
 
+#: How long the stand-in's utterance is. Arbitrary and constant: what the format
+#: claims read is that every rate states the *same* duration, so the number
+#: matters only in being one number.
+UTTERANCE_SECONDS = 0.1
+
+
+def _family(wire_name: str) -> tuple[str, int]:
+    """`wire_name` split into its codec and rate.
+
+    Written here rather than taken from `prober._published`, for the reason
+    [`WELL_FORMED`] is written out: a stand-in that read the format name the same
+    way the prober does could not catch the prober reading it wrongly.
+    """
+    codec, rate = wire_name.split("_")[:2]
+    return codec, int(rate)
+
+
+def _wav(rate: int, samples: int) -> bytes:
+    """A RIFF/WAVE file stating `rate`, carrying `samples` of silence.
+
+    Built by hand so the rate in the header is a value a test sets, which is the
+    whole of what `FMT-5` reads. A `JUNK` chunk sits before `fmt ` on purpose: a
+    prober reading the rate at the canonical byte 24 gets the padding instead,
+    and a deployment writing a perfectly legal file is reported broken.
+    """
+    audio = b"\0\0" * samples
+    fmt = (
+        b"\x01\x00\x01\x00"
+        + rate.to_bytes(4, "little")
+        + (rate * 2).to_bytes(4, "little")
+        + b"\x02\x00\x10\x00"
+    )
+    chunks = (
+        b"JUNK" + (4).to_bytes(4, "little") + bytes(4)
+        + b"fmt " + len(fmt).to_bytes(4, "little") + fmt
+        + b"data" + len(audio).to_bytes(4, "little") + audio
+    )
+    return b"RIFF" + (len(chunks) + 4).to_bytes(4, "little") + b"WAVE" + chunks
+
+
+def _audio(wire_name: str) -> tuple[bytes, str]:
+    """A conformant answer for `wire_name`: its real signature, at its real rate."""
+    codec, rate = _family(wire_name)
+    samples = round(rate * UTTERANCE_SECONDS)
+    bodies: dict[str, tuple[bytes, str]] = {
+        # Every `mp3_*` and `opus_*` answer is the same bytes, which is what a
+        # deployment whose default really is `mp3_44100_128` looks like to
+        # `FMT-7` — and the rate inside them is not readable without a decoder,
+        # which is why no claim asks for it.
+        "mp3": (b"\xff\xfb" + bytes(64), "audio/mpeg"),
+        "opus": (b"OggS" + bytes(64), "audio/ogg"),
+        "wav": (_wav(rate, samples), "audio/wav"),
+        "pcm": (b"\0\0" * samples, "audio/pcm"),
+        "ulaw": (bytes(samples), "audio/basic"),
+        "alaw": (b"\x55" * samples, "audio/x-alaw-basic"),
+    }
+    return bodies[codec]
+
+
+def _refusal(detail: Any) -> Response:
+    """A 422 carrying `detail`, and deliberately no `x-elvenspeak-*` header."""
+    return Response(
+        content=json.dumps({"detail": detail}).encode(),
+        status_code=422,
+        media_type="application/json",
+    )
+
+
+def _refused(output_format: str | None, body: dict[str, Any]) -> Response | None:
+    """The 422 this request has earned, or `None` if it has earned none.
+
+    **Both refusal shapes, on purpose.** The unknown format is refused as an
+    object under `detail.message`, and everything pydantic owns as an array of
+    error records under `detail[].input` — which is what this service really
+    sends, and the pair `piper-conformance-e16.4` decided the prober must accept
+    without requiring either. A stand-in refusing in one shape could not tell a
+    prober that accepts both from one that happens to demand the shape it sends.
+    """
+    text = body.get("text")
+    if output_format is not None and output_format not in SUPPORTED_OUTPUT_FORMATS:
+        return _refusal(
+            {
+                "message": f"unsupported output_format: {output_format!r}",
+                "supported": list(SUPPORTED_OUTPUT_FORMATS),
+            }
+        )
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT_LENGTH:
+        return _refusal(
+            [{"type": "value_error", "loc": ["body", "text"], "input": text}]
+        )
+    if not isinstance(body.get("language_code", ""), str):
+        return _refusal(
+            [
+                {
+                    "type": "string_type",
+                    "loc": ["body", "language_code"],
+                    "input": body["language_code"],
+                }
+            ]
+        )
+    return None
+
+
+#: The body fields this stand-in models. Everything else is kept and named back,
+#: which is `REF-7`.
+_MODELLED = frozenset({"text", "language_code"})
+
+
+def conformant(output_format: str | None, body: dict[str, Any]) -> Response:
+    """Every format and refusal claim answered honestly.
+
+    The control the cases below spoil one at a time, and the reason they are
+    readable: without a stand-in that holds all fifteen, a fixture broken in some
+    unrelated way would turn them red for the wrong reason and read as proof the
+    prober works.
+    """
+    refused = _refused(output_format, body)
+    if refused is not None:
+        return refused
+    audio, content_type = _audio(output_format or DEFAULT_OUTPUT_FORMAT)
+    headers = {"x-elvenspeak-voice": str(WELL_FORMED["voice_id"])}
+    unmodelled = sorted(set(body) - _MODELLED)
+    if unmodelled:
+        headers["x-elvenspeak-ignored"] = ", ".join(unmodelled)
+    return Response(content=audio, media_type=content_type, headers=headers)
+
+
+#: One deployment's answer to a synthesis: the `output_format` asked for — `None`
+#: where the request named none — and the body it carried.
+Speaks = Callable[[str | None, dict[str, Any]], Response]
+
+
+def spoiling(
+    spoil: Callable[[str | None, bytes, str], tuple[bytes, str]],
+) -> Speaks:
+    """[`conformant`], with `spoil` free to rewrite the audio it would have sent.
+
+    [LAW:dataflow-not-control-flow] Every deployment that lies about a format is
+    this one function carrying a different value, rather than a fixture apiece:
+    what separates "answers WAV to every request" from "states the wrong rate in
+    the header" is two lines of arithmetic, and a second `FastAPI` app around
+    each would bury that.
+
+    Refusals pass through untouched, so a case spoiling the audio cannot
+    accidentally be testing the refusal claims as well.
+    """
+
+    def speaks(output_format: str | None, body: dict[str, Any]) -> Response:
+        answered = conformant(output_format, body)
+        if answered.status_code != 200:
+            return answered
+        audio, content_type = spoil(
+            output_format, answered.body, answered.headers["content-type"]
+        )
+        return Response(
+            content=audio,
+            media_type=content_type,
+            headers={"x-elvenspeak-voice": str(WELL_FORMED["voice_id"])},
+        )
+
+    return speaks
+
+
 def lying_deployment(
     voices: list[dict[str, Any]],
     health_body: Any = HEALTHY,
     health_status: int = 200,
+    speaks: Speaks = conformant,
 ) -> FastAPI:
     """A server answering whatever it is told to, however untrue.
 
@@ -414,6 +581,11 @@ def lying_deployment(
     `HEALTH-1`'s claim is that body's shape: a payload with no `voices` key, or
     one whose entries are objects, is a state the claim is *about* and one an id
     list cannot express.
+
+    `speaks` is the same seam for the synthesis endpoint, and its default is
+    [`conformant`] rather than a constant blob: the fifteen format and refusal
+    claims each need a deployment that keeps every *other* promise, so the
+    truthful answer is the default and each case below buys exactly one lie.
     """
     app = FastAPI()
 
@@ -435,8 +607,10 @@ def lying_deployment(
         return {"stability": 0.5}
 
     @app.post("/v1/text-to-speech/{voice_id}")
-    def speak(voice_id: str) -> Response:
-        return Response(content=b"\0\0" * 512, media_type="audio/pcm")
+    def speak(
+        voice_id: str, body: dict[str, Any], output_format: str | None = None
+    ) -> Response:
+        return speaks(output_format, body)
 
     return app
 
@@ -1088,3 +1262,587 @@ def test_auth_2_asks_every_endpoint_the_readme_documents() -> None:
     # `/health` is the one documented read outside any guard — README says it
     # never requires a key, and `HEALTH-3` is the claim that asks it.
     assert set(prober.DOCUMENTED_READS) == published["GET"] - {"/health"}
+
+
+# ------------------------------------- the twenty-eight formats, and the 422s
+
+
+def test_the_prober_and_the_server_transcribe_one_published_format_set() -> None:
+    """The one table here held against this build's code, and why that is right.
+
+    `DOCUMENTED_READS` is deliberately *not* held against `elvenspeak.api`: which
+    paths a build routes is that build's own decision, so a remote one may differ
+    without being wrong. The format set is the opposite — it belongs to
+    ElevenLabs, both tuples are transcriptions of the same published list, and a
+    deployment answering a different 28 is non-conformant by definition. Holding
+    two transcriptions equal is what catches a typo in either
+    ([LAW:one-source-of-truth]).
+
+    The count is asserted beside them because equality alone cannot catch the two
+    losing a row together, and README publishes the number as "All 28".
+    """
+    assert set(prober.PUBLISHED_FORMATS) == set(SUPPORTED_OUTPUT_FORMATS)
+    assert len(prober.PUBLISHED_FORMATS) == 28, prober.PUBLISHED_FORMATS
+    assert prober.DEFAULT_FORMAT == DEFAULT_OUTPUT_FORMAT
+    assert prober.UNKNOWN_FORMAT not in SUPPORTED_OUTPUT_FORMATS
+    assert prober.MAX_TEXT_CHARACTERS == MAX_TEXT_LENGTH
+
+
+def test_every_refusal_the_prober_carries_is_a_claim_it_asks() -> None:
+    """A row of `REFUSALS` nothing names is a refusal nobody is told about.
+
+    `REF-5` iterates the table, so an orphan row would still have its headers
+    read and would still never have its own 422 judged — a promise carried in the
+    prober and reported by nothing ([LAW:no-silent-failure]).
+    """
+    asked = {claim.id for claim in prober.CLAIMS}
+
+    assert set(prober.REFUSALS) <= asked, sorted(set(prober.REFUSALS) - asked)
+
+
+#: Every claim `piper-conformance-e16.4` owns, so a case below asserting one of
+#: them is broken cannot be passing because the claim silently stopped being
+#: asked. Read off the document rather than written out.
+E16_4_CLAIMS = sorted(
+    claim_id for claim_id, (_, by) in documented().items() if "e16.4" in by
+)
+
+
+def test_a_conformant_stand_in_holds_every_format_and_refusal_claim() -> None:
+    """The control for every case below, so one spoiled answer is what differs.
+
+    Fifteen claims, none of them `unasked`: a stand-in that merely failed to be
+    caught would read the same as one that told the truth, and the list is taken
+    from the document so a claim dropped from `CLAIMS` fails here rather than
+    quietly stopping being the control.
+    """
+    with serving(lying_deployment([WELL_FORMED])) as base_url:
+        words = _words(base_url)
+
+    assert len(E16_4_CLAIMS) == 15, E16_4_CLAIMS
+    assert {claim_id: words[claim_id] for claim_id in E16_4_CLAIMS} == {
+        claim_id: "held" for claim_id in E16_4_CLAIMS
+    }
+
+
+def test_a_format_the_deployment_will_not_serve_breaks_fmt_1() -> None:
+    """"All 28 are accepted" is the claim, so one refused is the claim failing."""
+
+    def refusing(output_format: str | None, body: dict[str, Any]) -> Response:
+        if output_format == "opus_48000_96":
+            return Response(content=b"no opus here", status_code=415)
+        return conformant(output_format, body)
+
+    with serving(lying_deployment([WELL_FORMED], speaks=refusing)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["FMT-1"].word == "broken"
+    assert "opus_48000_96" in verdicts["FMT-1"].why
+    # And the claims about the *shape* of that audio say they could not look,
+    # rather than reporting on the bytes of a refusal.
+    assert verdicts["FMT-2"].word == "unasked"
+    assert verdicts["FMT-3"].word == "unasked"
+
+
+def test_the_wrong_content_type_breaks_fmt_2() -> None:
+    """A client routing on the type plays the answer into the wrong decoder."""
+    mislabelling = spoiling(lambda _, audio, __: (audio, "application/octet-stream"))
+
+    with serving(lying_deployment([WELL_FORMED], speaks=mislabelling)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["FMT-2"].word == "broken"
+    assert "application/octet-stream" in verdicts["FMT-2"].why
+    # The bytes were never touched, so the claim about them still holds — which
+    # is what makes this case about the label and not about the audio.
+    assert verdicts["FMT-3"].word == "held"
+
+
+def test_a_deployment_substituting_bytes_under_the_right_label_breaks_fmt_3() -> None:
+    """THE CASE THIS TICKET IS FOR.
+
+    A deployment that accepts all 28, labels every answer with the content type
+    the caller asked for, and can really produce exactly one of them. Every check
+    that reads a status code passes it; every check that reads a header passes
+    it. Only the bytes give it away, which is why `FMT-3` reads the bytes.
+
+    `FMT-1` and `FMT-2` are asserted `held` here on purpose: they are the checks
+    the ticket says a deployment like this must not be allowed to pass *on*, and
+    a case where they went red too would not have shown that.
+    """
+    one_format = spoiling(lambda _, __, content_type: (_audio("wav_22050")[0], content_type))
+
+    with serving(lying_deployment([WELL_FORMED], speaks=one_format)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["FMT-1"].word == "held"
+    assert verdicts["FMT-2"].word == "held"
+    assert verdicts["FMT-3"].word == "broken"
+    assert "RIFF" in verdicts["FMT-3"].why
+
+
+def test_one_length_answered_at_every_pcm_rate_breaks_fmt_4() -> None:
+    """The substitution `_bare` cannot see, caught where the arithmetic can.
+
+    A deployment resampling nothing and returning its engine's own bytes under
+    every `pcm_*` name answers raw samples every time, so the signature check is
+    satisfied — and the seven rates then state seven different durations for one
+    utterance, which is the contradiction this claim exists to find.
+    """
+    one_rate = spoiling(
+        lambda name, audio, content_type: (
+            (_audio("pcm_22050")[0], content_type)
+            if (name or "").startswith("pcm")
+            else (audio, content_type)
+        )
+    )
+
+    with serving(lying_deployment([WELL_FORMED], speaks=one_rate)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["FMT-3"].word == "held", "the bytes still look like raw samples"
+    assert verdicts["FMT-4"].word == "broken"
+    assert "pcm_8000" in verdicts["FMT-4"].why
+
+
+def test_a_wav_header_stating_another_rate_breaks_fmt_5() -> None:
+    """A RIFF header telling the truth about audio that is not what was asked for."""
+    one_rate = spoiling(
+        lambda name, audio, content_type: (
+            (_wav(11025, 1102), content_type)
+            if (name or "").startswith("wav")
+            else (audio, content_type)
+        )
+    )
+
+    with serving(lying_deployment([WELL_FORMED], speaks=one_rate)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["FMT-3"].word == "held", "it is still a RIFF/WAVE file"
+    assert verdicts["FMT-5"].word == "broken"
+    assert "11025" in verdicts["FMT-5"].why
+
+
+def test_an_id3_tag_breaks_fmt_6() -> None:
+    """README:62's byte-for-byte promise, and the way it is ordinarily broken.
+
+    `ffmpeg` writes an ID3v2 header by default — this is one forgotten flag away
+    from being what a real build does, not an exotic lie.
+    """
+    tagged = spoiling(
+        lambda name, audio, content_type: (
+            (b"ID3\x04\x00\x00\x00\x00\x00\x0a" + audio, content_type)
+            if (name or DEFAULT_OUTPUT_FORMAT).startswith("mp3")
+            else (audio, content_type)
+        )
+    )
+
+    with serving(lying_deployment([WELL_FORMED], speaks=tagged)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["FMT-6"].word == "broken"
+    assert "ID3" in verdicts["FMT-6"].why
+
+
+def test_a_default_that_is_not_the_documented_one_breaks_fmt_7() -> None:
+    """An MP3 is not the claim — `mp3_44100_128` is.
+
+    A deployment defaulting to `mp3_22050_32` answers an MP3, under
+    `audio/mpeg`, starting at a frame sync with no tag. Every other format claim
+    holds against it, and a client that saved no `output_format` gets audio at a
+    quarter of the documented rate.
+    """
+    other_default = spoiling(
+        lambda name, audio, content_type: (
+            (b"\xff\xfb" + bytes(16), content_type) if name is None else (audio, content_type)
+        )
+    )
+
+    with serving(lying_deployment([WELL_FORMED], speaks=other_default)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["FMT-7"].word == "broken"
+    assert DEFAULT_OUTPUT_FORMAT in verdicts["FMT-7"].why
+
+
+def sampling() -> Speaks:
+    """A deployment whose backend draws a new utterance for every request.
+
+    What chatterbox really is, and what `piper-pipeline-uor` established has to
+    be asked before one length is read against another: each answer is a little
+    longer than the last, so two identical requests never come back identical.
+    """
+    drawn = iter(range(1000))
+
+    def speaks(output_format: str | None, body: dict[str, Any]) -> Response:
+        answered = conformant(output_format, body)
+        if answered.status_code != 200:
+            return answered
+        return Response(
+            content=answered.body + b"\0\0" * next(drawn),
+            media_type=answered.headers["content-type"],
+            headers={"x-elvenspeak-voice": str(WELL_FORMED["voice_id"])},
+        )
+
+    return speaks
+
+
+def test_a_voice_that_does_not_repeat_leaves_both_comparisons_unasked() -> None:
+    """[LAW:no-silent-failure] Never `held`, and never `broken` either.
+
+    `FMT-4` and `FMT-7` both read one of this voice's lengths against another,
+    and against a sampling backend that difference is the sampler's. Reporting
+    `broken` would blame a deployment for a property `README.md:615` says piper
+    already has; reporting `held` would rest a verdict on a comparison that
+    happened not to notice. The third word is for exactly this.
+    """
+    with serving(lying_deployment([WELL_FORMED], speaks=sampling())) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["FMT-4"].word == "unasked"
+    assert verdicts["FMT-7"].word == "unasked"
+    assert "two different utterances" in verdicts["FMT-4"].blocker
+    # Everything that reads one answer on its own is still asked and still holds.
+    assert verdicts["FMT-1"].word == "held"
+    assert verdicts["FMT-3"].word == "held"
+    assert verdicts["FMT-5"].word == "held"
+
+
+def offering(supported: list[str]) -> Speaks:
+    """[`conformant`], refusing an unknown format with `supported` beside it."""
+
+    def speaks(output_format: str | None, body: dict[str, Any]) -> Response:
+        if output_format is not None and output_format not in SUPPORTED_OUTPUT_FORMATS:
+            return _refusal(
+                {
+                    "message": f"unsupported output_format: {output_format!r}",
+                    "supported": supported,
+                }
+            )
+        return conformant(output_format, body)
+
+    return speaks
+
+
+@pytest.mark.parametrize(
+    ("supported", "named"),
+    [
+        # Short: a caller is sent looking for another format when the one they
+        # asked for is really served.
+        (list(SUPPORTED_OUTPUT_FORMATS)[:10], "omits"),
+        # Long: a caller is sent to a 422 by the deployment's own advice.
+        (list(SUPPORTED_OUTPUT_FORMATS) + ["flac_44100"], "invents"),
+    ],
+)
+def test_a_supported_set_that_is_not_the_28_breaks_fmt_8(
+    supported: list[str], named: str
+) -> None:
+    """Equality in both directions, because the two failures mislead differently."""
+    with serving(lying_deployment([WELL_FORMED], speaks=offering(supported))) as url:
+        verdicts = _verdicts(url)
+
+    assert verdicts["FMT-8"].word == "broken"
+    assert named in verdicts["FMT-8"].why
+    # The refusal is still a refusal naming the value, so the claim about *that*
+    # holds — which is what keeps the two claims telling a reader different things.
+    assert verdicts["REF-1"].word == "held"
+
+
+def test_a_refusal_carrying_no_supported_set_at_all_breaks_fmt_8() -> None:
+    """The pydantic shape arriving where this service's own object belongs.
+
+    Not a shape complaint: `REF-1` accepts it and says so. `FMT-8` is `broken`
+    because there is no set to read, which is the thing a caller was promised.
+    """
+    def pydantic_shaped(output_format: str | None, body: dict[str, Any]) -> Response:
+        if output_format is not None and output_format not in SUPPORTED_OUTPUT_FORMATS:
+            return _refusal(
+                [{"type": "enum", "loc": ["query", "output_format"], "input": output_format,
+                  "msg": "supported values are published in the API reference"}]
+            )
+        return conformant(output_format, body)
+
+    with serving(lying_deployment([WELL_FORMED], speaks=pydantic_shaped)) as url:
+        verdicts = _verdicts(url)
+
+    assert verdicts["FMT-8"].word == "broken"
+    assert "no `supported` array" in verdicts["FMT-8"].why
+    assert verdicts["REF-1"].word == "held", "the value and the word are both there"
+
+
+def test_a_supported_array_of_objects_breaks_fmt_8_rather_than_ending_the_run() -> None:
+    """A refusal this prober cannot read costs one verdict, never the report.
+
+    `set()` over an array of objects raises `TypeError`, and `_finding` catches
+    only `Blocked` — so before this was parsed at `_supported_arrays`, one
+    malformed deployment took all 21 verdicts down with it.
+    """
+    def objects_not_names(output_format: str | None, body: dict[str, Any]) -> Response:
+        if output_format is not None and output_format not in SUPPORTED_OUTPUT_FORMATS:
+            return _refusal(
+                {
+                    "message": f"unsupported output_format: {output_format!r}",
+                    "supported": [{"name": name} for name in SUPPORTED_OUTPUT_FORMATS],
+                }
+            )
+        return conformant(output_format, body)
+
+    with serving(lying_deployment([WELL_FORMED], speaks=objects_not_names)) as url:
+        verdicts = _verdicts(url)
+
+    assert verdicts["FMT-8"].word == "broken"
+    assert "no `supported` array" in verdicts["FMT-8"].why
+    assert len(verdicts) == len(prober.CLAIMS), "every other claim still got asked"
+
+
+def test_a_refusal_nested_past_reading_breaks_fmt_8_rather_than_ending_the_run() -> None:
+    """Valid JSON the walk cannot descend.
+
+    `json.loads` parses a hundred thousand levels without complaint, so the depth
+    that matters is the prober's own recursion limit, not the parser's.
+
+    Written as raw bytes rather than a nested object, because `json.dumps` has the
+    same limit: serializing one of these server-side raises inside the fixture, and
+    the prober would then be reporting an honest `unasked` about a 500 it really
+    did receive — a green test proving nothing about the walk.
+    """
+    depth = sys.getrecursionlimit() * 3
+    nested = b'{"detail": ' + b"[" * depth + b'"bottom"' + b"]" * depth + b"}"
+
+    def nested_past_reading(output_format: str | None, body: dict[str, Any]) -> Response:
+        if output_format is not None and output_format not in SUPPORTED_OUTPUT_FORMATS:
+            return Response(
+                content=nested, status_code=422, media_type="application/json"
+            )
+        return conformant(output_format, body)
+
+    with serving(lying_deployment([WELL_FORMED], speaks=nested_past_reading)) as url:
+        verdicts = _verdicts(url)
+
+    assert verdicts["FMT-8"].word == "broken"
+    assert "nested too deeply" in verdicts["FMT-8"].why
+    assert len(verdicts) == len(prober.CLAIMS), "every other claim still got asked"
+
+
+def test_a_refusal_spelling_the_field_inside_a_longer_word_does_not_hold() -> None:
+    """`context` is not the deployment naming `text`.
+
+    The rule `REF-2` states is that the body names what was wrong. A raw byte
+    substring made that rule satisfiable by any refusal mentioning a context
+    window — a check that cannot fail, which is the defect this table replaced.
+    """
+    def refusing_without_naming(
+        output_format: str | None, body: dict[str, Any]
+    ) -> Response:
+        if isinstance(body.get("text"), str) and not body["text"].strip():
+            return _refusal("request exceeds the maximum context window")
+        return conformant(output_format, body)
+
+    with serving(lying_deployment([WELL_FORMED], speaks=refusing_without_naming)) as url:
+        verdicts = _verdicts(url)
+
+    assert verdicts["REF-2"].word == "broken"
+    assert "naming none of" in verdicts["REF-2"].why
+    assert verdicts["REF-4"].word == "held", "the rows that do name `text` are untouched"
+    # This fixture spoils one refusal and nothing else, so the format rows are the
+    # evidence it is otherwise conformant. Without them the test passes against a
+    # stand-in serving no audio at all, which is what it did until review caught it.
+    assert verdicts["FMT-2"].word == "held"
+    assert verdicts["FMT-3"].word == "held"
+
+
+def never_refusing(output_format: str | None, body: dict[str, Any]) -> Response:
+    """A deployment that synthesizes whatever it is sent.
+
+    The server this project used to be: it accepted the parameter, ignored what
+    it could not honour, and answered 200 with something plausible.
+    """
+    wanted = output_format if output_format in SUPPORTED_OUTPUT_FORMATS else DEFAULT_OUTPUT_FORMAT
+    audio, content_type = _audio(wanted)
+    return Response(
+        content=audio,
+        media_type=content_type,
+        headers={"x-elvenspeak-voice": str(WELL_FORMED["voice_id"])},
+    )
+
+
+@pytest.mark.parametrize("claim_id", sorted(prober.REFUSALS))
+def test_a_request_that_is_served_instead_of_refused_breaks_its_claim(
+    claim_id: str,
+) -> None:
+    """Each of the five asked of a deployment that refuses nothing.
+
+    One case per row rather than a single deployment checked once, so a row whose
+    request this prober never actually sends cannot ride the others to green —
+    the gap that survived three rounds on `AUTH-2`'s per-voice reads.
+    """
+    with serving(lying_deployment([WELL_FORMED], speaks=never_refusing)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts[claim_id].word == "broken", prober.REFUSALS[claim_id].described
+    assert "200" in verdicts[claim_id].why
+
+
+def test_a_deployment_that_refuses_nothing_leaves_ref_5_unasked() -> None:
+    """A 200 is not a refusal, so its headers are not `REF-5`'s subject.
+
+    A synthesis is *supposed* to carry `x-elvenspeak-voice`; reading one here and
+    reporting `broken` would file five conformance failures under the one claim
+    that has nothing to do with them, and name the wrong fix.
+    """
+    with serving(lying_deployment([WELL_FORMED], speaks=never_refusing)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["REF-5"].word == "unasked"
+    assert "REF-" in verdicts["REF-5"].blocker
+
+
+def mumbling(output_format: str | None, body: dict[str, Any]) -> Response:
+    """[`conformant`], with every refusal reduced to a word nobody can act on."""
+    answered = conformant(output_format, body)
+    if answered.status_code != 422:
+        return answered
+    return _refusal("nope")
+
+
+@pytest.mark.parametrize("claim_id", sorted(prober.REFUSALS))
+def test_a_refusal_naming_nothing_it_refused_breaks_its_claim(claim_id: str) -> None:
+    """The 422 is not the whole claim: a caller has to be able to read it.
+
+    This is the case the ticket's recommendation could not have caught on its own
+    terms. "The value you sent appears somewhere in the body" is satisfied by
+    every body ever written when the value is `""` or `"   "`, so `REF-2` and
+    `REF-3` would have reported `held` against a deployment that refused with a
+    shrug. What the prober requires instead is that the body *name* what was
+    wrong — the value where it is distinctive, the field where it is not.
+    """
+    with serving(lying_deployment([WELL_FORMED], speaks=mumbling)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts[claim_id].word == "broken", prober.REFUSALS[claim_id].described
+    assert "naming none of" in verdicts[claim_id].why
+
+
+def _named(output_format: str | None, body: dict[str, Any]) -> tuple[str, Any]:
+    """Which field this request is wrong in, and the value it carried."""
+    if output_format is not None and output_format not in SUPPORTED_OUTPUT_FORMATS:
+        return "output_format", output_format
+    if not isinstance(body.get("language_code", ""), str):
+        return "language_code", body["language_code"]
+    return "text", body.get("text")
+
+
+def one_shape(record: Callable[[str, Any], Any]) -> Speaks:
+    """A deployment refusing everything in whichever shape `record` builds.
+
+    [LAW:one-type-per-behavior] Two deployments, one function: what separates
+    this service's object refusal from pydantic's array is the value a `detail`
+    carries, and the decision `piper-conformance-e16.4` recorded is that the
+    prober reads neither. A fixture apiece would have stated that as two
+    coincidences instead of one property.
+    """
+
+    def speaks(output_format: str | None, body: dict[str, Any]) -> Response:
+        if conformant(output_format, body).status_code != 422:
+            return conformant(output_format, body)
+        return _refusal(record(*_named(output_format, body)))
+
+    return speaks
+
+
+def test_the_prober_reads_neither_422_shape_and_accepts_both() -> None:
+    """The decision this ticket was left to make, asserted rather than described.
+
+    This service refuses in two shapes — its own object under `detail.message`
+    and pydantic's array of error records under `detail[].input` — and
+    `README.md:32` promises only "a 422 quoting the value you sent", which both
+    keep. A prober demanding either would report `broken` against a deployment
+    keeping its documented promise, and the only way to satisfy it would be to
+    rewrite pydantic's refusal into a body no other FastAPI-shaped server sends.
+
+    So the same five claims are asked of two deployments that agree on every fact
+    and share no byte of structure, and all ten verdicts are `held`.
+    """
+    shapes = {
+        "object": lambda field, value: {
+            "message": f"{field} cannot be {value!r:.40}",
+            "supported": list(SUPPORTED_OUTPUT_FORMATS),
+        },
+        "array": lambda field, value: [
+            {
+                "type": "value_error",
+                "loc": ["body", field],
+                "input": value,
+                "supported": list(SUPPORTED_OUTPUT_FORMATS),
+            }
+        ],
+    }
+
+    verdicts = {}
+    for shape, record in shapes.items():
+        with serving(lying_deployment([WELL_FORMED], speaks=one_shape(record))) as url:
+            verdicts[shape] = _words(url)
+
+    for shape, words in verdicts.items():
+        asked = {claim_id: words[claim_id] for claim_id in sorted(prober.REFUSALS)}
+        assert asked == {claim_id: "held" for claim_id in asked}, (shape, asked)
+
+
+def test_a_refusal_carrying_a_voice_header_breaks_ref_5() -> None:
+    """Nothing spoke, so there is no voice to report having spoken it.
+
+    README:115's "every synthesis response carries `x-elvenspeak-voice`" is
+    bounded by the responses that *are* syntheses, and a 422 naming a voice tells
+    a caller a decision the server never made.
+    """
+
+    def leaking(output_format: str | None, body: dict[str, Any]) -> Response:
+        answered = conformant(output_format, body)
+        answered.headers["x-elvenspeak-voice"] = str(WELL_FORMED["voice_id"])
+        return answered
+
+    with serving(lying_deployment([WELL_FORMED], speaks=leaking)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["REF-5"].word == "broken"
+    assert "x-elvenspeak-voice" in verdicts["REF-5"].why
+
+
+def test_refusing_a_body_field_this_build_has_never_heard_of_breaks_ref_7() -> None:
+    """`extra="forbid"` is the stricter choice and the wrong one here.
+
+    ElevenLabs adds body fields over time, so a deployment refusing one it does
+    not model breaks clients that are correct against the newer API — which is
+    the compatibility this whole service is.
+    """
+
+    def strict(output_format: str | None, body: dict[str, Any]) -> Response:
+        unmodelled = sorted(set(body) - _MODELLED)
+        if unmodelled:
+            return _refusal([{"type": "extra_forbidden", "loc": ["body", unmodelled[0]]}])
+        return conformant(output_format, body)
+
+    with serving(lying_deployment([WELL_FORMED], speaks=strict)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["REF-7"].word == "broken"
+    assert prober.INVENTED_FIELD in verdicts["REF-7"].why
+
+
+def test_an_unmodelled_field_dropped_without_a_word_breaks_ref_7() -> None:
+    """The quieter half, and the one a status-code check waves straight through.
+
+    A deployment that keeps the request, answers 200, and says nothing has told
+    the caller their whole request was honoured when part of it was ignored —
+    which is rule 2 exactly inverted.
+    """
+
+    def silent(output_format: str | None, body: dict[str, Any]) -> Response:
+        kept = {key: body[key] for key in body.keys() & _MODELLED}
+        return conformant(output_format, kept)
+
+    with serving(lying_deployment([WELL_FORMED], speaks=silent)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    assert verdicts["REF-7"].word == "broken"
+    assert "dropped" in verdicts["REF-7"].why
