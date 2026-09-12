@@ -4025,6 +4025,13 @@ def _timings(asked: Asked, endpoint: str) -> tuple[Timed, ...] | str:
     The preamble the four `TIME` claims that read objects share, so none of them
     can reach the objects without the refusal already judged.
 
+    Either fault comes back whole, which is what lets those four `return` it
+    unexamined. A refusal already names its draw; a parse fault out of [`_timed`]
+    knows only the body it read, so the endpoint is put back here — once, rather
+    than by the two claims that ask both endpoints and would otherwise report "a
+    body that is not JSON" without saying which of the two sent it
+    ([LAW:one-source-of-truth]).
+
     `CAP-3` reads these bodies too and deliberately stands outside this: a
     refusal is `CAP-4`'s answer rather than its own and its message says so,
     which needs the refusal told apart from a malformed body — a distinction the
@@ -4037,7 +4044,10 @@ def _timings(asked: Asked, endpoint: str) -> tuple[Timed, ...] | str:
     refused = _refused_own_endpoint(asked, endpoint)
     if refused is not None:
         return refused
-    return _timed(asked.spoke(_timestamp_draw(endpoint)).body)
+    objects = _timed(asked.spoke(_timestamp_draw(endpoint)).body)
+    if isinstance(objects, str):
+        return f"{endpoint} {objects}"
+    return objects
 
 
 def probe_time_2(deployment: Deployment) -> Verdict:

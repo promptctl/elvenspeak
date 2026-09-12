@@ -3325,6 +3325,32 @@ def test_an_end_time_that_goes_backwards_breaks_time_4() -> None:
     assert "go backwards" in verdict.why
 
 
+def test_a_time_4_parse_fault_names_the_endpoint_that_sent_it() -> None:
+    """`TIME-4` asks both endpoints, so a fault that names neither is half a report.
+
+    A refusal carries its own draw, but the parser only ever saw a body — so
+    without the endpoint put back, a maintainer reading "answered an `alignment`
+    whose ... is not an array of numbers" cannot tell which of the two produced
+    it. Only the non-streaming endpoint is spoiled here, so naming the other one
+    would fail this just as silence does.
+    """
+
+    def unreadable(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            one["alignment"]["character_end_times_seconds"] = ["soon"]
+        return _relined(answer, objects)
+
+    with serving(tampering(unreadable)) as base_url:
+        verdict = _verdicts(base_url)["TIME-4"]
+
+    assert verdict.word == "broken"
+    assert prober.WITH_TIMESTAMPS in verdict.why
+    assert prober.STREAMED_TIMESTAMPS not in verdict.why
+
+
 def test_a_later_streamed_object_whose_times_reverse_breaks_time_4() -> None:
     """`TIME-4` is asked of every object, not only the one its timeline begins at.
 
