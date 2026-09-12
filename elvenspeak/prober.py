@@ -3169,8 +3169,7 @@ def probe_mod_4(deployment: Deployment) -> Verdict:
 
     def fault(asked: Asked) -> str | None:
         answer = asked.answered(ELSEWHERE_MODEL)
-        sent = asked.draws[ELSEWHERE_MODEL]
-        named = sent.body["model_id"] if isinstance(sent, Draw) else ""
+        named = _model_sent(asked, ELSEWHERE_MODEL)
         if answer.status != 422:
             return (
                 f"answered {answer.status} to model_id {named!r}, which another "
