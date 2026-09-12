@@ -2731,10 +2731,17 @@ class Timed:
 
     [LAW:parse-dont-validate] Built only by [`_timed`], so holding one is proof
     that this object carried an alignment whose three arrays are non-empty and
-    the same length, whose every time is finite, a fidelity, and audio that
-    really decoded. That is why the five claims about these endpoints contain no
-    shape guards at all: the question of whether the body had what they read is
-    answered once, at the crossing, and cannot be asked again inland.
+    the same length, whose every time is finite, and audio that really decoded.
+    That is why the five claims about these endpoints contain no shape guards at
+    all: the question of whether the body had what they read is answered once, at
+    the crossing, and cannot be asked again inland.
+
+    [`fidelity`] is deliberately *not* in that list. It is carried exactly as it
+    arrived, unnarrowed and unvalidated — `None` when the body published none —
+    because `TIME-3`'s whole reading is whether the value is one of the two
+    README:187 publishes, and a parse that admitted only those two could never
+    report a third ([LAW:no-silent-failure]). Naming it among the proven
+    invariants would promise a guard that does not exist.
 
     Finite is part of the stamp rather than a detail of [`_number`] because it is
     the part these claims lean on hardest and the only part that fails silently:
@@ -2752,7 +2759,11 @@ class Timed:
     #: against the two words README:187 publishes, so a parse that admitted only
     #: those two could never report a third ([LAW:no-silent-failure]).
     fidelity: Any
-    characters: tuple[str, ...]
+    #: The two timelines only. `characters` is *checked* at the crossing — the
+    #: arrays must be non-empty and lie against it one for one — and then not
+    #: carried, because no claim reads it back. Validating a thing and keeping a
+    #: thing are separate decisions, and keeping one nothing reads is weight on
+    #: every parsed object ([LAW:polishing-by-subtraction]).
     starts: tuple[float, ...]
     ends: tuple[float, ...]
     #: This object's own audio, decoded. What makes `TIME-4` arithmetic within one
@@ -2831,6 +2842,14 @@ def _timed(body: bytes) -> tuple[Timed, ...] | str:
     one. Parsed here once rather than by a reader per claim, so six claims cannot
     hold six accounts of what a malformed alignment is
     ([LAW:one-source-of-truth]).
+
+    A returned tuple is never empty, and callers read it that way:
+    `probe_time_4` takes `objects[0]` to see where the timeline begins. The
+    empty-body arm below is what makes that true. No deployment reaches it —
+    [`Asked.spoke`] refuses a 200 carrying no body before any claim gets here,
+    which `test_an_empty_timestamp_body_never_reaches_the_timestamp_parser`
+    pins — so it is the guarantee rather than a path, and deleting it as
+    unreachable would hand `objects[0]` an empty tuple.
     """
     lines = body.splitlines()
     if not lines:
@@ -2890,7 +2909,6 @@ def _one_timed(line: bytes) -> Timed | str:
         alignment=alignment,
         normalized=parsed.get("normalized_alignment"),
         fidelity=parsed.get("alignment_fidelity"),
-        characters=tuple(str(character) for character in characters),
         starts=starts,
         ends=ends,
         audio=audio,

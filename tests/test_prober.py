@@ -3514,6 +3514,112 @@ def test_an_audio_base64_that_is_not_base64_breaks_cap_3() -> None:
     assert "`audio_base64` that is not base64" in verdict.why
 
 
+def test_a_timeline_that_does_not_lay_against_its_text_breaks_cap_3() -> None:
+    """The length branch, pinned — every element still a perfectly good number.
+
+    This is the branch the type check cannot reach: dropping one end time leaves
+    an array of real, ordered, finite floats that simply cannot be laid against
+    the characters it is supposed to time, so the caller has a timeline for every
+    character but one and no way to know which. `test_a_malformed_timing_array_
+    breaks_cap_3` corrupts values and so only ever exercises `_number`.
+
+    Conceded as unpinned in a previous round and pinned here rather than conceded
+    again: the same reviewer quoting my own concession back is the correct
+    outcome for a gap left open twice.
+    """
+
+    def short_a_time(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            one["alignment"]["character_end_times_seconds"].pop()
+        return _relined(answer, objects)
+
+    with serving(tampering(short_a_time)) as base_url:
+        verdict = _verdicts(base_url)["CAP-3"]
+
+    assert verdict.word == "broken"
+    assert "cannot be laid against the text it is supposed to time" in verdict.why
+
+
+def test_a_streamed_body_carrying_one_object_leaves_time_6_unasked() -> None:
+    """`TIME-6`'s `Blocked` arm, which is the one arm a green run never shows.
+
+    A single object is a deployment declining to split a two-sentence text, and
+    nothing documented obliges it to — so there is no pair to lay end to end and
+    no promise broken. `held` there would be the check that cannot fail this
+    epic exists to delete, and `broken` would report a promise nobody made.
+
+    Worth its own test because the failure mode is invisible: swap the `raise
+    Blocked` for `return None` and every run stays green while `TIME-6` quietly
+    reports `held` over a response it never compared.
+    """
+
+    def only_the_first(answer: Answer) -> Answer:
+        if not _streamed(answer):
+            return answer
+        objects = _timestamped(answer)
+        return _relined(answer, objects[:1])
+
+    with serving(tampering(only_the_first)) as base_url:
+        verdict = _verdicts(base_url)["TIME-6"]
+
+    assert verdict.word == "unasked"
+    assert "no consecutive pair to lay end to end" in verdict.blocker
+
+
+def test_a_missing_audio_base64_breaks_cap_3() -> None:
+    """The field's other failure: absent entirely rather than unreadable.
+
+    `_one_timed` refuses a missing or non-string `audio_base64` on a different
+    branch from the one that refuses unparseable base64, and `TIME-4` needs the
+    bytes either way — a timeline weighed against audio that never arrived is
+    weighed against nothing.
+    """
+
+    def no_audio(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            del one["audio_base64"]
+        return _relined(answer, objects)
+
+    with serving(tampering(no_audio)) as base_url:
+        verdict = _verdicts(base_url)["CAP-3"]
+
+    assert verdict.word == "broken"
+    assert "no `audio_base64` string" in verdict.why
+
+
+def test_an_empty_timestamp_body_never_reaches_the_timestamp_parser() -> None:
+    """Review asked for a test of `_timed`'s empty-body branch. This is why not.
+
+    A 200 carrying nothing is refused a layer earlier, by `Asked.spoke`'s own
+    precondition, so the branch below it cannot be reached from any claim — the
+    verdict is `unasked` with "answered 200 carrying no audio at all", never the
+    parser's "carrying no alignment at all". A test asserting the parser's
+    message here would fail, and one asserting `broken` would be asserting
+    something this deployment cannot produce.
+
+    Pinned in the shape it actually has, because the branch is not dead: it is
+    what stops [`_timed`] ever handing back an empty tuple, and `probe_time_4`
+    now reads `objects[0]` on the strength of that.
+    """
+
+    def nothing_at_all(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        return replace(answer, body=b"")
+
+    with serving(tampering(nothing_at_all)) as base_url:
+        verdict = _verdicts(base_url)["CAP-3"]
+
+    assert verdict.word == "unasked"
+    assert "answered 200 carrying no audio at all" in verdict.blocker
+
+
 def test_two_objects_on_one_line_breaks_time_3() -> None:
     """`TIME-3`'s "one object per line" is enforced by the parser, and that shows.
 
@@ -3588,17 +3694,26 @@ def test_a_time_no_comparison_can_answer_breaks_time_4(unusable: float) -> None:
 
     `json` reads all four off the wire: `NaN`, `Infinity` and `-Infinity` are
     non-standard tokens `json.dumps` itself writes for those floats, and Python's
-    `int` has no width at all. Admitted, they fail in three different ways and
-    none of them is the failure this claim exists to report.
+    `int` has no width at all.
 
-    A `NaN` answers `False` to `<` and to `>` alike, so `TIME-4`'s reversal check
-    and its length check both go quiet and a scrambled timeline is reported
-    `held` — the silent one, and the reason the parser is where this belongs. An
-    infinity is caught, but by the length check, complaining that the audio
-    disagrees rather than that the time is unreadable; that is why the assertion
-    below is on the message and not on the word alone. An integer wider than a
-    `float` overflows the conversion inside the parser itself and kills the probe
-    mid-run, so the deployment is never judged at all.
+    All four are refused the same way and in the same place — `_number`'s range
+    comparison, inside `_one_timed`, before any claim does arithmetic — which is
+    why one assertion covers the four and why the message names the array rather
+    than the reading that would have tripped over the value.
+
+    What differs is only what each would do *were `_number` to admit it*, and
+    that is the whole argument for refusing them at the crossing rather than
+    inland. Measured by dropping the range clause and rerunning this test:
+
+    - `NaN` — verdict `held`. It answers `False` to `<` and to `>` alike, so the
+      reversal check and the length check both go quiet over a scrambled
+      timeline. The silent one, and the reason this belongs in the parser.
+    - `Infinity` and `-Infinity` — verdict `broken`, but from the reversal check
+      ("the first infs followed by 0.013605s"), which reports a timeline that
+      reverses rather than a time that cannot be read. Right word, wrong account.
+    - an integer wider than a `float` — no verdict at all: `OverflowError` out of
+      `float(second)` in `_one_timed`, which ends the run instead of judging the
+      deployment.
 
     Rejecting all four at `_number` is what lets [`Timed`]'s stamp mean what its
     docstring says, and lets the claims downstream go on comparing without ever
