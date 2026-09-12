@@ -314,6 +314,16 @@ def _ask(
         ) from unfinished
 
 
+def _in_format(path: str, wire_name: str | None) -> str:
+    """`path` asking for `wire_name`, or `path` naming no format at all.
+
+    [LAW:one-source-of-truth] How a format is named on the wire, written once:
+    [`_posted`] and [`_keyless_asks`] both address syntheses, and a query key that
+    drifted between them would send `AUTH-2` at a URL no other claim uses.
+    """
+    return path if wire_name is None else f"{path}?output_format={wire_name}"
+
+
 def _posted(
     target: Target,
     voice_id: str,
@@ -323,22 +333,20 @@ def _posted(
 ) -> Reply:
     """`body` posted to `voice_id`'s synthesis endpoint in `wire_name`.
 
-    [LAW:single-enforcer] The one place this file addresses a synthesis, so the
-    format a request names and the body it carries are values crossing one
-    boundary rather than a function per combination
-    ([LAW:dataflow-not-control-flow]). Twenty-eight format draws, five refusals
-    and an unmodelled-field request differ in what is passed here and in nothing
-    else.
+    [LAW:dataflow-not-control-flow] The format a request names and the body it
+    carries are values crossing one boundary rather than a function per
+    combination: twenty-eight format draws, five refusals and an unmodelled-field
+    request differ in what is passed here and in nothing else. `AUTH-2` addresses
+    its own syntheses and shares only [`_in_format`].
 
     `wire_name` of `None` names no format at all, which is not the absence of an
     argument but one of the requests this file has to be able to make: `FMT-7`'s
     whole subject is what a deployment answers when nobody chose.
     """
     quoted = urllib.parse.quote(voice_id, safe="")
-    named = "" if wire_name is None else f"?output_format={wire_name}"
     return _ask(
         target,
-        f"/v1/text-to-speech/{quoted}{named}",
+        _in_format(f"/v1/text-to-speech/{quoted}", wire_name),
         key,
         method="POST",
         body=body,
@@ -671,7 +679,7 @@ class PublishedFormat:
     came through [`_WIRE_NAME`] and nothing below asks again whether a name is
     well-formed. `FMT-2` reads `codec`; `FMT-4` and `FMT-5` read `sample_rate`.
 
-    There is deliberately no bitrate field, though five of the names carry one.
+    There is deliberately no bitrate field, though twelve of the names carry one.
     Nothing short of a decoder can read a bitrate off an answer, so a field
     holding it would be a map with no reader — the same reason `/v1/models` stays
     unread in [`discover`] ([FRAMING:representation]).
@@ -1105,7 +1113,7 @@ def _keyless_asks(voice_id: str) -> tuple[_KeylessAsk, ...]:
         ("GET", path, None) for path in _addressed(DOCUMENTED_READS, voice_id)
     )
     syntheses: tuple[_KeylessAsk, ...] = tuple(
-        ("POST", f"{path}?output_format={PCM_FORMAT}", {"text": PROBE_TEXT})
+        ("POST", _in_format(path, PCM_FORMAT), {"text": PROBE_TEXT})
         for path in _addressed(DOCUMENTED_SYNTHESES, voice_id)
     )
     return reads + syntheses
@@ -1515,8 +1523,8 @@ def probe_fmt_7(deployment: Deployment) -> Verdict:
     )
 
 
-def _supported_arrays(value: Any) -> list[list[Any]]:
-    """Every `supported` array anywhere in `value`, at any depth.
+def _supported_arrays(value: Any) -> list[list[str]]:
+    """Every `supported` array of format names anywhere in `value`, at any depth.
 
     Searched structurally rather than read at a path, which is what accepting both
     422 shapes without demanding either has to mean in code: this service's own
@@ -1524,17 +1532,29 @@ def _supported_arrays(value: Any) -> list[list[Any]]:
     whatever a deployment put in its error records, and `FMT-8` is entitled to the
     array without being entitled to the shape around it.
 
+    [LAW:parse-dont-validate] An array is one of these only if every element is a
+    name, so what comes back is `list[str]` and [`probe_fmt_8`] may put it in a
+    set without asking again. An array holding objects is not a `supported` array
+    with a flaw in it — it is a body that carries none, which is a verdict that
+    claim already writes.
+
     The three arms are JSON's own variants handled exhaustively, which is the one
     thing [LAW:dataflow-not-control-flow] asks a branch to be.
     """
     if isinstance(value, dict):
-        here = [value["supported"]] if isinstance(value.get("supported"), list) else []
+        offered = value.get("supported")
+        here = [offered] if _is_name_array(offered) else []
         return here + [
             found for nested in value.values() for found in _supported_arrays(nested)
         ]
     if isinstance(value, list):
         return [found for nested in value for found in _supported_arrays(nested)]
     return []
+
+
+def _is_name_array(value: Any) -> bool:
+    """`value` is an array of strings, the only thing `supported` may name."""
+    return isinstance(value, list) and all(isinstance(name, str) for name in value)
 
 
 def probe_fmt_8(deployment: Deployment) -> Verdict:
@@ -1551,13 +1571,18 @@ def probe_fmt_8(deployment: Deployment) -> Verdict:
     """
     answer = _refused(deployment, REFUSALS["REF-1"])
     try:
-        detail: Any = json.loads(answer.body)
+        arrays = _supported_arrays(json.loads(answer.body))
     except ValueError:
         return Broken(
             f"the 422 refusing {UNKNOWN_FORMAT} answered a body that is not JSON: "
             f"{answer.body[:200]!r}"
         )
-    arrays = _supported_arrays(detail)
+    except RecursionError:
+        return Broken(
+            f"the 422 refusing {UNKNOWN_FORMAT} answered a body nested too deeply "
+            f"to read: {answer.body[:200]!r} — this prober will not walk it, and a "
+            "caller's JSON parser has the same limit"
+        )
     if not arrays:
         return Broken(
             f"the 422 refusing {UNKNOWN_FORMAT} carries no `supported` array: "
@@ -1681,13 +1706,28 @@ def _asked(deployment: Deployment, wire_name: str, body: Mapping[str, Any]) -> R
     )
 
 
+def _names(body: bytes, name: str) -> bool:
+    """`body` names `name` as a word, rather than spelling it inside a longer one.
+
+    A raw byte substring is not the rule [`Refusal`] states: `text` is contained in
+    `context` and `supported` in `unsupported`, so a refusal reading `request
+    exceeds the maximum context window` — or `unsupported format`, carrying no list
+    — satisfies `REF-2` and `REF-1` without naming the thing it refused. That is
+    the check-that-cannot-fail this table was written to replace, so matching on a
+    word boundary is what "name" meant all along.
+
+    JSON puts quotes, commas and braces around both field names and values, and
+    none of those are word characters, so every legitimate naming still matches.
+    """
+    return re.search(rb"\b" + re.escape(name.encode()) + rb"\b", body) is not None
+
+
 def _refused(deployment: Deployment, refusal: Refusal) -> Reply:
     """`refusal`'s request really refused, or [`Blocked`] if it was answered.
 
     The reading `FMT-8` needs, which is about what a refusal *carries* and so has
-    no subject until there is one. [`probe_refusal`] judges the same request
-    instead — one request, two readings, for the reason [`_parsed_voices`] has
-    two.
+    no subject until there is one. [`probe_refusal`] asks its own copy: a refusal
+    is one cheap idempotent POST, unlike the draw [`Spoken`] is cached to buy once.
     """
     answer = _asked(deployment, refusal.query, refusal.body)
     if answer.status != 422:
@@ -1716,7 +1756,7 @@ def probe_refusal(refusal: Refusal, deployment: Deployment) -> Verdict:
             f"documented 422: {answer.body[:200]!r} — this deployment accepted a "
             "request the contract says it refuses"
         )
-    missing = [name for name in refusal.named if name.encode() not in answer.body]
+    missing = [name for name in refusal.named if not _names(answer.body, name)]
     if missing:
         return Broken(
             f"{refusal.described} was refused 422 by a body naming none of "

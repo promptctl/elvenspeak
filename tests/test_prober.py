@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -488,7 +489,7 @@ def _refused(output_format: str | None, body: dict[str, Any]) -> Response | None
         )
     if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT_LENGTH:
         return _refusal(
-            [{"type": "string_too_short", "loc": ["body", "text"], "input": text}]
+            [{"type": "value_error", "loc": ["body", "text"], "input": text}]
         )
     if not isinstance(body.get("language_code", ""), str):
         return _refusal(
@@ -1567,6 +1568,82 @@ def test_a_refusal_carrying_no_supported_set_at_all_breaks_fmt_8() -> None:
     assert verdicts["FMT-8"].word == "broken"
     assert "no `supported` array" in verdicts["FMT-8"].why
     assert verdicts["REF-1"].word == "held", "the value and the word are both there"
+
+
+def test_a_supported_array_of_objects_breaks_fmt_8_rather_than_ending_the_run() -> None:
+    """A refusal this prober cannot read costs one verdict, never the report.
+
+    `set()` over an array of objects raises `TypeError`, and `_finding` catches
+    only `Blocked` — so before this was parsed at `_supported_arrays`, one
+    malformed deployment took all 21 verdicts down with it.
+    """
+    def objects_not_names(output_format: str | None, body: dict[str, Any]) -> Response:
+        if output_format is not None and output_format not in SUPPORTED_OUTPUT_FORMATS:
+            return _refusal(
+                {
+                    "message": f"unsupported output_format: {output_format!r}",
+                    "supported": [{"name": name} for name in SUPPORTED_OUTPUT_FORMATS],
+                }
+            )
+        return conformant(output_format, body)
+
+    with serving(lying_deployment([WELL_FORMED], speaks=objects_not_names)) as url:
+        verdicts = _verdicts(url)
+
+    assert verdicts["FMT-8"].word == "broken"
+    assert "no `supported` array" in verdicts["FMT-8"].why
+    assert len(verdicts) == len(prober.CLAIMS), "every other claim still got asked"
+
+
+def test_a_refusal_nested_past_reading_breaks_fmt_8_rather_than_ending_the_run() -> None:
+    """Valid JSON the walk cannot descend.
+
+    `json.loads` parses a hundred thousand levels without complaint, so the depth
+    that matters is the prober's own recursion limit, not the parser's.
+
+    Written as raw bytes rather than a nested object, because `json.dumps` has the
+    same limit: serializing one of these server-side raises inside the fixture, and
+    the prober would then be reporting an honest `unasked` about a 500 it really
+    did receive — a green test proving nothing about the walk.
+    """
+    depth = sys.getrecursionlimit() * 3
+    nested = b'{"detail": ' + b"[" * depth + b'"bottom"' + b"]" * depth + b"}"
+
+    def nested_past_reading(output_format: str | None, body: dict[str, Any]) -> Response:
+        if output_format is not None and output_format not in SUPPORTED_OUTPUT_FORMATS:
+            return Response(
+                content=nested, status_code=422, media_type="application/json"
+            )
+        return conformant(output_format, body)
+
+    with serving(lying_deployment([WELL_FORMED], speaks=nested_past_reading)) as url:
+        verdicts = _verdicts(url)
+
+    assert verdicts["FMT-8"].word == "broken"
+    assert "nested too deeply" in verdicts["FMT-8"].why
+    assert len(verdicts) == len(prober.CLAIMS), "every other claim still got asked"
+
+
+def test_a_refusal_spelling_the_field_inside_a_longer_word_does_not_hold() -> None:
+    """`context` is not the deployment naming `text`.
+
+    The rule `REF-2` states is that the body names what was wrong. A raw byte
+    substring made that rule satisfiable by any refusal mentioning a context
+    window — a check that cannot fail, which is the defect this table replaced.
+    """
+    def refusing_without_naming(
+        output_format: str | None, body: dict[str, Any]
+    ) -> Response | None:
+        if isinstance(body.get("text"), str) and not body["text"].strip():
+            return _refusal("request exceeds the maximum context window")
+        return _refused(output_format, body)
+
+    with serving(lying_deployment([WELL_FORMED], speaks=refusing_without_naming)) as url:
+        verdicts = _verdicts(url)
+
+    assert verdicts["REF-2"].word == "broken"
+    assert "naming none of" in verdicts["REF-2"].why
+    assert verdicts["REF-4"].word == "held", "the rows that do name `text` are untouched"
 
 
 def never_refusing(output_format: str | None, body: dict[str, Any]) -> Response:
