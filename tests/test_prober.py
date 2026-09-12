@@ -3421,3 +3421,59 @@ def test_a_declared_timestamp_endpoint_that_refuses_breaks_every_time_claim() ->
             "epic's documented defect"
         )
         assert "contradicted its own declaration" in verdicts[claim_id].why
+
+
+def test_a_start_time_that_goes_backwards_breaks_time_4() -> None:
+    """`character_end_times_seconds` is left untouched, which is the whole point.
+
+    A deployment that reverses two adjacent *start* times keeps its end times
+    non-decreasing and keeps the span between its first start and its last end
+    matching its audio exactly — so every other reading in `TIME-4` is satisfied,
+    and a caller drawing each character when its start time arrives watches the
+    clock run backwards. Reading `ends` alone reported this `held`.
+    """
+
+    def reversed_starts(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            times = one["alignment"]["character_start_times_seconds"]
+            times[1], times[2] = times[2], times[1]
+        return _relined(answer, objects)
+
+    with serving(tampering(reversed_starts)) as base_url:
+        verdict = _verdicts(base_url)["TIME-4"]
+
+    assert verdict.word == "broken"
+    assert "in `character_start_times_seconds` that go backwards" in verdict.why
+
+
+def test_a_malformed_timing_array_breaks_cap_3() -> None:
+    """The boundary `CAP-3` gained by reading through `_timed`, pinned deliberately.
+
+    `characters` is left real and non-empty — the reading `CAP-3` used to make —
+    and only the times beside it are spoiled. A body like this once held, because
+    the old reader stopped at `characters`. It breaks now, and that is this
+    claim's own argument carried the rest of the way: times that cannot be read
+    are an alignment-shaped hole by exactly the reasoning that rejects an empty
+    `characters` array, and `held` over them is a check that cannot fail.
+
+    Pinned here rather than left implicit so that narrowing the shared parser
+    back to its old tolerance fails a test, instead of quietly returning `CAP-3`
+    to reporting `held` over garbage.
+    """
+
+    def untimed(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            one["alignment"]["character_end_times_seconds"] = ["soon", "later"]
+        return _relined(answer, objects)
+
+    with serving(tampering(untimed)) as base_url:
+        verdict = _verdicts(base_url)["CAP-3"]
+
+    assert verdict.word == "broken"
+    assert "`character_end_times_seconds` is not an array of numbers" in verdict.why

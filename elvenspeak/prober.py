@@ -2756,6 +2756,20 @@ class Timed:
     audio: bytes
 
     @property
+    def timelines(self) -> tuple[tuple[str, tuple[float, ...]], ...]:
+        """Both per-character timelines, each beside the field it arrived in.
+
+        Named pairs rather than two attributes read separately, because every
+        claim about how a timeline runs is true of both and a probe reaching for
+        one of them by name is a probe that checks half the answer
+        ([LAW:dataflow-not-control-flow] — which array is being read is a value
+        here, so `TIME-4` orders both by iterating rather than by carrying a
+        second copy of the loop). `starts` was the half nothing checked: a
+        deployment that scrambles it keeps `ends` ascending and [`span`] honest.
+        """
+        return tuple(zip(_TIME_ARRAYS, (self.starts, self.ends)))
+
+    @property
     def span(self) -> float:
         """How long this object's own timeline says its own audio runs.
 
@@ -2963,6 +2977,16 @@ def probe_cap_3(deployment: Deployment) -> Verdict:
     `characters` array is what separates timings from an alignment-shaped hole:
     the endpoint can answer 200 with every array empty and satisfy every check
     that reads a status.
+
+    Read through [`_timed`], which asks more of the body than this claim once
+    did: a malformed timing array or an `audio_base64` that is not base64 now
+    breaks `CAP-3`, where a body carrying real `characters` beside them used to
+    hold. That widening is this claim's own argument carried the rest of the way
+    — garbage times are an alignment-shaped hole by exactly the reasoning that
+    rejects empty ones, and a `held` over them is the check that cannot fail this
+    epic exists to delete. It is a contract rather than a side effect of sharing
+    the parser: `tests/test_prober.py` pins it, so narrowing [`_timed`] back
+    fails there rather than quietly restoring the tolerance.
     """
 
     def fault(asked: Asked) -> str | None:
@@ -4070,12 +4094,20 @@ def probe_time_4(deployment: Deployment) -> Verdict:
     where a cumulative offset can slip: `TIME-6` checks that consecutive objects
     meet, and this checks that each one really covers the audio it carries.
 
-    Non-decreasing rather than strictly ascending, deliberately. "Ascend" is what
-    the document says and a *descending* end time is unambiguously a broken
-    timeline, but a zero-width character — a word whose measured span rounds to
-    nothing — is a fact about an engine rather than a promise this service
-    breaks, and demanding strict ascent would report a legitimate deployment
-    broken ([LAW:behavior-not-structure]).
+    Both timelines are ordered, not just the one the document names. The row says
+    "character end times ascend", and that is its shorthand rather than its
+    boundary: a deployment that swaps two adjacent *start* times leaves `ends`
+    non-decreasing and [`Timed.span`] honest, so reading `ends` alone reports it
+    `held` while a caller drawing each character when its start time arrives
+    watches the clock run backwards. Both arrays are one timeline and a correct
+    deployment has both ordered, so asking of both is strictly stronger and
+    cannot refuse an honest answer.
+
+    Non-decreasing rather than strictly ascending, deliberately. A *descending*
+    time is unambiguously a broken timeline, but a zero-width character — a word
+    whose measured span rounds to nothing — is a fact about an engine rather than
+    a promise this service breaks, and demanding strict ascent would report a
+    legitimate deployment broken ([LAW:behavior-not-structure]).
     """
     rate = _published(PCM_FORMAT).sample_rate
 
@@ -4085,19 +4117,21 @@ def probe_time_4(deployment: Deployment) -> Verdict:
             if isinstance(objects, str):
                 return objects
             for timed in objects:
-                backwards = tuple(
-                    (before, after)
-                    for before, after in zip(timed.ends, timed.ends[1:])
-                    if after < before
-                )
-                if backwards:
-                    return (
-                        f"answered {endpoint} with "
-                        f"{_counted(len(backwards), 'end time')} that go "
-                        f"backwards, the first {backwards[0][0]:.6f}s followed by "
-                        f"{backwards[0][1]:.6f}s — a caller reading this forwards "
-                        "is handed a timeline that reverses"
+                for field, times in timed.timelines:
+                    backwards = tuple(
+                        (before, after)
+                        for before, after in zip(times, times[1:])
+                        if after < before
                     )
+                    if backwards:
+                        return (
+                            f"answered {endpoint} with "
+                            f"{_counted(len(backwards), 'time')} in `{field}` "
+                            f"that go backwards, the first {backwards[0][0]:.6f}s "
+                            f"followed by {backwards[0][1]:.6f}s — a caller "
+                            "reading this forwards is handed a timeline that "
+                            "reverses"
+                        )
                 seconds = len(timed.audio) / BYTES_PER_SAMPLE / rate
                 if abs(timed.span - seconds) > _LENGTH_SPREAD_SECONDS:
                     return (
@@ -4113,8 +4147,8 @@ def probe_time_4(deployment: Deployment) -> Verdict:
         NO_TIMESTAMP_VOICE,
         fault,
         f"declaring {CAPABILITY_TIMESTAMPS!r} each answered both timestamp "
-        f"endpoints with end times that never reverse and a timeline covering "
-        f"its own audio within {_LENGTH_SPREAD_SECONDS:g}s",
+        f"endpoints with start and end times that never reverse and a timeline "
+        f"covering its own audio within {_LENGTH_SPREAD_SECONDS:g}s",
     )
 
 
