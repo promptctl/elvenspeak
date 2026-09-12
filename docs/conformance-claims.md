@@ -74,9 +74,9 @@ completed, and the prober is reporting on itself. A draw that was composed, sent
 and answered with a non-200 is the deployment speaking, and for a claim that
 promised the request would be served, the refusal *is* the promise not being kept
 — which is why `CAP-1`, `CAP-2`, `CAP-3`, `CAP-6`, `CAP-8`, `CAP-9`, `CAP-10`,
-`MOD-3`, `MOD-6` and `SUB-5` read one as `broken`. A draw that carries no such
-promise keeps the other reading: a refused plain synthesis request is `FMT-1`'s
-subject, and neither `CAP-7`'s nor `CAP-9`'s.
+`MOD-3`, `MOD-6`, `SUB-5` and `TIME-2` through `TIME-6` read one as `broken`. A
+draw that carries no such promise keeps the other reading: a refused plain
+synthesis request is `FMT-1`'s subject, and neither `CAP-7`'s nor `CAP-9`'s.
 Read it the other way and a voice that publishes `timestamps` in its own
 `capabilities` list and then refuses both timestamp endpoints is reported as
 something the prober could not look at, rather than as the capability lie it is —

@@ -1385,8 +1385,9 @@ class Asked:
 
         The half of [`spoke`]'s blocker that is a verdict rather than a
         precondition. A claim promising that a draw is served — `CAP-1`, `CAP-2`,
-        `CAP-3`, `CAP-6`, `CAP-8`, `CAP-9`, `CAP-10`, `MOD-3`, `MOD-6` and
-        `SUB-5` — is *false* when the deployment refuses it, and reading that
+        `CAP-3`, `CAP-6`, `CAP-8`, `CAP-9`, `CAP-10`, `MOD-3`, `MOD-6`, `SUB-5`
+        and `TIME-2` through `TIME-6` — is *false* when the deployment refuses
+        it, and reading that
         through [`spoke`] alone reported every one of them as "could not be
         asked". A draw carrying no such promise keeps [`spoke`]'s reading: a
         refused `PLAIN` is `FMT-1`'s subject, not `CAP-7`'s or `CAP-9`'s. [`answered`] still raises for a
@@ -3022,14 +3023,9 @@ def probe_cap_3(deployment: Deployment) -> Verdict:
 
     def fault(asked: Asked) -> str | None:
         for endpoint in _TIMESTAMP_ENDPOINTS:
-            refused = asked.refusal(_timestamp_draw(endpoint))
+            refused = _refused_own_endpoint(asked, endpoint)
             if refused is not None:
-                return (
-                    f"declares {CAPABILITY_TIMESTAMPS!r} and then {refused} — a "
-                    "voice that refuses the endpoint it promises timings from has "
-                    "contradicted its own declaration, which is CAP-4's answer "
-                    "and not this arm's"
-                )
+                return f"{refused}, which is CAP-4's answer and not this arm's"
             answer = asked.spoke(_timestamp_draw(endpoint))
             objects = _timed(answer.body)
             if isinstance(objects, str):
@@ -4139,6 +4135,16 @@ def probe_time_4(deployment: Deployment) -> Verdict:
     whose measured span rounds to nothing — is a fact about an engine rather than
     a promise this service breaks, and demanding strict ascent would report a
     legitimate deployment broken ([LAW:behavior-not-structure]).
+
+    Where the first object begins is read separately, because every other reading
+    here is a *difference* and so cannot see a constant: [`Timed.span`] subtracts
+    two times, and `TIME-6` subtracts across a pair. A deployment that leaks the
+    `elapsed` accumulator `api.py:979` carries between sentences — failing to
+    reset it between top-level requests — offsets every time in the response by
+    the same amount, leaving every span exact, every gap exact, and the caller's
+    subtitles uniformly late against the audio those very times arrived with.
+    Only the first object is asked: a later streamed object is *supposed* to
+    begin where its predecessor ended, which is what `TIME-6` reads.
     """
     rate = _published(PCM_FORMAT).sample_rate
 
@@ -4147,6 +4153,15 @@ def probe_time_4(deployment: Deployment) -> Verdict:
             objects = _timings(asked, endpoint)
             if isinstance(objects, str):
                 return objects
+            begins = objects[0].starts[0]
+            if abs(begins) > _LENGTH_SPREAD_SECONDS:
+                return (
+                    f"answered {endpoint} with a timeline whose first character "
+                    f"begins at {begins:.3f}s rather than at the start of the "
+                    "audio it arrived with — every span and every gap below can "
+                    "be right while the whole timeline sits off its own samples, "
+                    "so a caller drawing to these times is uniformly late"
+                )
             for timed in objects:
                 for field, times in timed.timelines:
                     backwards = tuple(
@@ -4179,7 +4194,8 @@ def probe_time_4(deployment: Deployment) -> Verdict:
         fault,
         f"declaring {CAPABILITY_TIMESTAMPS!r} each answered both timestamp "
         f"endpoints with start and end times that never reverse and a timeline "
-        f"covering its own audio within {_LENGTH_SPREAD_SECONDS:g}s",
+        f"beginning at its own audio and covering it within "
+        f"{_LENGTH_SPREAD_SECONDS:g}s",
     )
 
 

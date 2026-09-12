@@ -3393,15 +3393,19 @@ def test_a_declared_timestamp_endpoint_that_refuses_breaks_every_time_claim() ->
     here because the mistake is invisible in a green run: `Asked.spoke` raises
     `Blocked` on any non-200 and `_finding` turns that into `unasked`, so a
     deployment refusing the very request a claim tests reports as one the prober
-    could not look at. Every one of these five draws is a promise the voice made
-    by publishing `timestamps`, so a refusal is the deployment answering.
+    could not look at. Every one of these draws is a promise the voice made by
+    publishing `timestamps`, so a refusal is the deployment answering.
 
-    All five are asserted together rather than one per test because the defect
+    All of them are asserted together rather than one per test because the defect
     arrives one claim at a time — five instances of it were missed across three
-    rounds — and a list that must be exhaustive is what a sixth claim added here
-    will fail against.
+    rounds — and a list that must be exhaustive is what the next claim added here
+    will fail against. `CAP-3` is that next claim, and it arrived by the predicted
+    route: it read a refusal correctly but through its own inline copy of the
+    rule, so it sat outside the list this test holds. It now routes through
+    [`_refused_own_endpoint`] like the other five, which is the "six claims" that
+    helper's own docstring always named.
     """
-    refusing = {"TIME-2", "TIME-3", "TIME-4", "TIME-5", "TIME-6"}
+    refusing = {"CAP-3", "TIME-2", "TIME-3", "TIME-4", "TIME-5", "TIME-6"}
 
     def unavailable(answer: Answer) -> Answer:
         if not answer.path.endswith("with-timestamps"):
@@ -3477,6 +3481,101 @@ def test_a_malformed_timing_array_breaks_cap_3() -> None:
 
     assert verdict.word == "broken"
     assert "`character_end_times_seconds` is not an array of numbers" in verdict.why
+
+
+def test_an_audio_base64_that_is_not_base64_breaks_cap_3() -> None:
+    """The other half of the widening `probe_cap_3`'s docstring claims is pinned.
+
+    That docstring names two bodies it now refuses — "a malformed timing array or
+    an `audio_base64` that is not base64" — and says the suite holds it to both.
+    Only the timing array was covered, so half the sentence was a promise about
+    tests that did not exist, and loosening the base64 check would have restored
+    the `held`-over-garbage tolerance without turning anything red.
+
+    `characters` and both timelines are left real and ordered; only the audio the
+    alignment claims to describe is spoiled. `TIME-4` has to read that audio to
+    weigh a timeline against it, so a body that cannot produce any is an
+    alignment-shaped hole by the same argument that rejects an empty
+    `characters`.
+    """
+
+    def unreadable_audio(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            one["audio_base64"] = "not base64 at all!!"
+        return _relined(answer, objects)
+
+    with serving(tampering(unreadable_audio)) as base_url:
+        verdict = _verdicts(base_url)["CAP-3"]
+
+    assert verdict.word == "broken"
+    assert "`audio_base64` that is not base64" in verdict.why
+
+
+def test_two_objects_on_one_line_breaks_time_3() -> None:
+    """`TIME-3`'s "one object per line" is enforced by the parser, and that shows.
+
+    Round-3 review read `probe_time_3.fault`, found no `len(objects)` check, and
+    concluded the promise was unfalsifiable. It is not: [`_timed`] splits the body
+    on lines and parses each one, so two objects sharing a line leave trailing
+    data that `json.loads` refuses, and the claim reports `broken`. The mechanism
+    lives one call away from the fault that depends on it, which is exactly why it
+    earns a test named for the property rather than a comment.
+
+    Note what is *not* asserted here. Merging the two sentences into a single
+    object is not this violation — one object on one line satisfies "per line"
+    literally — and nothing documented obliges the endpoint to split sentences,
+    which is why `TIME-6` reports that response `unasked` rather than `broken`.
+    """
+
+    def crammed(answer: Answer) -> Answer:
+        if not _streamed(answer):
+            return answer
+        objects = _timestamped(answer)
+        return replace(
+            answer, body=b" ".join(json.dumps(one).encode() for one in objects)
+        )
+
+    with serving(tampering(crammed)) as base_url:
+        verdict = _verdicts(base_url)["TIME-3"]
+
+    assert verdict.word == "broken"
+    assert "answered a body that is not JSON" in verdict.why
+
+
+def test_a_timeline_shifted_off_its_own_audio_breaks_time_4() -> None:
+    """Every other reading in `TIME-4` is a difference, so none of them sees this.
+
+    A uniform offset added to every time in the response leaves each character's
+    span exact, leaves [`Timed.span`] exact — it subtracts two shifted values —
+    and leaves `TIME-6`'s gaps exact for the same reason. The caller is handed
+    subtitles that are uniformly late against the very audio the times arrived
+    with, and before this check every claim reported `held`.
+
+    The shift is the shape of a real bug rather than an invented one: `api.py:979`
+    carries an `elapsed` accumulator forward between the sentences of one
+    response, and an engine that fails to reset it between top-level requests
+    produces exactly this.
+    """
+
+    def shifted(answer: Answer) -> Answer:
+        if not _plain_timestamped(answer):
+            return answer
+        objects = _timestamped(answer)
+        for one in objects:
+            for field in _TIME_ARRAYS:
+                one["alignment"][field] = [
+                    second + 37.0 for second in one["alignment"][field]
+                ]
+        return _relined(answer, objects)
+
+    with serving(tampering(shifted)) as base_url:
+        verdict = _verdicts(base_url)["TIME-4"]
+
+    assert verdict.word == "broken"
+    assert "begins at 37.000s rather than at the start of the audio" in verdict.why
 
 
 @pytest.mark.parametrize(
