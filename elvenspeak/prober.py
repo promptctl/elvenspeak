@@ -4018,8 +4018,17 @@ def _refused_own_endpoint(asked: Asked, endpoint: str) -> str | None:
 def _timings(asked: Asked, endpoint: str) -> tuple[Timed, ...] | str:
     """`endpoint`'s objects for this voice, or the fault a claim about them reports.
 
-    The whole preamble every claim that reads a timestamped body needs, so none
-    of them can reach the objects without the refusal already judged.
+    The preamble the four `TIME` claims that read objects share, so none of them
+    can reach the objects without the refusal already judged.
+
+    `CAP-3` reads these bodies too and deliberately stands outside this: a
+    refusal is `CAP-4`'s answer rather than its own and its message says so,
+    which needs the refusal told apart from a malformed body — a distinction the
+    `str` returned here collapses on purpose, because these four callers report
+    both the same way. That costs `CAP-3` nothing that matters: what a refusal
+    *means* is decided in [`_refused_own_endpoint`], which it calls directly
+    ([LAW:single-enforcer] — the rule has one home, and this is a composition of
+    it rather than a second one).
     """
     refused = _refused_own_endpoint(asked, endpoint)
     if refused is not None:
