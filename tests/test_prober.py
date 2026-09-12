@@ -1633,10 +1633,10 @@ def test_a_refusal_spelling_the_field_inside_a_longer_word_does_not_hold() -> No
     """
     def refusing_without_naming(
         output_format: str | None, body: dict[str, Any]
-    ) -> Response | None:
+    ) -> Response:
         if isinstance(body.get("text"), str) and not body["text"].strip():
             return _refusal("request exceeds the maximum context window")
-        return _refused(output_format, body)
+        return conformant(output_format, body)
 
     with serving(lying_deployment([WELL_FORMED], speaks=refusing_without_naming)) as url:
         verdicts = _verdicts(url)
@@ -1644,6 +1644,11 @@ def test_a_refusal_spelling_the_field_inside_a_longer_word_does_not_hold() -> No
     assert verdicts["REF-2"].word == "broken"
     assert "naming none of" in verdicts["REF-2"].why
     assert verdicts["REF-4"].word == "held", "the rows that do name `text` are untouched"
+    # This fixture spoils one refusal and nothing else, so the format rows are the
+    # evidence it is otherwise conformant. Without them the test passes against a
+    # stand-in serving no audio at all, which is what it did until review caught it.
+    assert verdicts["FMT-2"].word == "held"
+    assert verdicts["FMT-3"].word == "held"
 
 
 def never_refusing(output_format: str | None, body: dict[str, Any]) -> Response:

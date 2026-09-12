@@ -67,7 +67,8 @@ keeps true. `piper-conformance-e16.5` owns every model claim and adds it beside
 [`Deployment.listing`], in the same shape.
 
 Discovery also *speaks*, once per published format, and [`Spoken`] says why that
-belongs there rather than in the five claims that read it.
+belongs there rather than in the claims that read it — and counts them, so this
+line does not have to.
 
 # The two shapes a 422 arrives in, decided here
 
@@ -1880,7 +1881,7 @@ SELF_CONSISTENT = "self-consistent"
 #: id invented here is a test failure rather than a line in a report that traces
 #: back to no promise ([LAW:one-source-of-truth]).
 #:
-#: The remaining claims belong to `piper-conformance-e16.4` through `e16.7`, and
+#: The remaining claims belong to `piper-conformance-e16.5` through `e16.7`, and
 #: each arrives as a row here rather than as a change to anything below
 #: ([LAW:composability]).
 CLAIMS: tuple[Claim, ...] = (

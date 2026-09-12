@@ -318,9 +318,13 @@ The rule the prober enforces instead is that **the body must name what was
 wrong** — the offending value where it is distinctive enough to be named back
 (`REF-1`'s `mp3_9999`, plus the word `supported`), and the offending *field* where
 it is not (`text` for `REF-2`, `REF-3` and `REF-4`; `language_code` for `REF-6`).
-It is checked as raw-byte substrings against the whole body, which is what lets
-one rule over a table serve both shapes rather than a shape read five ways: this
-service's object names the field in prose, and pydantic's array names it in `loc`.
+It is matched on a word boundary anywhere in the body, which is what lets one rule
+over a table serve both shapes rather than a shape read five ways: this service's
+object names the field in prose, and pydantic's array names it in `loc`, and a
+word boundary finds it in either. The boundary is not decoration — a raw substring
+is satisfied by `context` for `text` and by `unsupported` for `supported`, so a
+deployment naming nothing would hold `REF-1` through `REF-4`, which is the same
+check-that-cannot-fail this section rejects two paragraphs above.
 `Refusal.named` carries it, and `tests/test_prober.py` asks the same five claims of
 two stand-ins that agree on every fact and share no byte of structure, requiring
 all ten verdicts to be `held`.
