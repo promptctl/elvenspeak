@@ -2630,13 +2630,17 @@ def _of_every(
 ) -> Verdict:
     """`fault` asked of every subject: the first one found, or `held` over all.
 
-    [LAW:one-type-per-behavior] Eleven per-voice claims are this same loop — an
+    [LAW:one-type-per-behavior] Every per-voice claim is this same loop — an
     empty set of subjects is `unasked`, the first fault is `broken`, and a clean
     sweep is `held` over a count — and what separates them is only which fault a
     voice can have. That is a value, so they are instances of one claim shape
-    rather than eleven copies of a loop free to drift in how a claim over an empty
+    rather than copies of a loop free to drift in how a claim over an empty
     catalogue reads ([LAW:single-enforcer] — what "no subject" means is decided
     here).
+
+    Counted in neither direction on purpose: a tally of the callers here would be
+    a second record of something the call sites already hold, kept true by memory
+    alone. It read "eleven" while there were fifteen.
 
     A [`Blocked`] out of `fault` is left to propagate, and that is deliberate: the
     claim is about *every* subject, so a draw that never answered for one of them

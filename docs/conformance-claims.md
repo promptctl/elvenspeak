@@ -423,7 +423,7 @@ The rule is stated over refusals generally rather than over these five rows, so
 | `TIME-1` | `/with-timestamps` returns `audio_base64`, `alignment`, `normalized_alignment` and `alignment_fidelity` | api.py:1299 | falsifiable | e16.2 |
 | `TIME-2` | `/with-timestamps` carries `x-elvenspeak-alignment`, whose value is `word-exact` or `interpolated` | README:187, alignment.py:51 | falsifiable | e16.enf |
 | `TIME-3` | `/stream/with-timestamps` emits one JSON object per line, each with its own `alignment_fidelity`, and carries no `x-elvenspeak-alignment` header | README:188, api.py:998 | falsifiable | e16.enf |
-| `TIME-4` | Character end times ascend and the last one accounts for the whole utterance — every sample is covered | engine.py:370, speaks.py:694 | falsifiable against `pcm_*` | e16.enf — `speaks.py` |
+| `TIME-4` | Character end times ascend and the last one accounts for the whole utterance — every sample is covered | engine.py:370, speaks.py:694 | falsifiable against its own `audio_base64` | e16.enf — `speaks.py` |
 | `TIME-5` | `alignment` and `normalized_alignment` are the same object | api.py:1303 | falsifiable | e16.enf |
 | `TIME-6` | A streamed run's objects lay end to end — each sentence starts where the last one ended | api.py:979 | falsifiable | e16.enf |
 

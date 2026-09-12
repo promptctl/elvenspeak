@@ -3325,6 +3325,33 @@ def test_an_end_time_that_goes_backwards_breaks_time_4() -> None:
     assert "go backwards" in verdict.why
 
 
+def test_a_later_streamed_object_whose_times_reverse_breaks_time_4() -> None:
+    """`TIME-4` is asked of every object, not only the one its timeline begins at.
+
+    The streaming endpoint is the only place that can be shown. Every other
+    `TIME-4` test here tampers the non-streaming one, which the parser always
+    turns into exactly one object — so all of them would pass unchanged against a
+    loop narrowed to `objects[:1]`, and the claim's own reason for reading a
+    stream at all is that a cumulative offset slips in the objects after the
+    first. Only the last object reverses here and the first arrives untouched, so
+    the `begins` reading that opens the claim still passes.
+    """
+
+    def reversed_late(answer: Answer) -> Answer:
+        if not _streamed(answer):
+            return answer
+        objects = _timestamped(answer)
+        times = objects[-1]["alignment"]["character_end_times_seconds"]
+        times[1], times[2] = times[2], times[1]
+        return _relined(answer, objects)
+
+    with serving(tampering(reversed_late)) as base_url:
+        verdict = _verdicts(base_url)["TIME-4"]
+
+    assert verdict.word == "broken"
+    assert "go backwards" in verdict.why
+
+
 def test_a_normalized_alignment_that_is_not_the_alignment_breaks_time_5() -> None:
     """`alignment` stays real, so only a caller reading the other field is broken.
 
@@ -3346,6 +3373,35 @@ def test_a_normalized_alignment_that_is_not_the_alignment_breaks_time_5() -> Non
         return _relined(answer, objects)
 
     with serving(tampering(hollow)) as base_url:
+        verdict = _verdicts(base_url)["TIME-5"]
+
+    assert verdict.word == "broken"
+    assert "`normalized_alignment` that is not its `alignment`" in verdict.why
+
+
+def test_a_later_streamed_object_whose_normalization_is_hollow_breaks_time_5() -> None:
+    """Both of `TIME-5`'s loops, which the endpoint above cannot reach either of.
+
+    The test above spoils the non-streaming endpoint's only object, so a claim
+    that read just `_TIMESTAMP_ENDPOINTS[0]`, or just `objects[0]`, would still
+    report it `broken`. Spoiling the streamed run's last object is what makes
+    both loops falsifiable — and it is the failure this claim exists for: the
+    deployment that got `normalized_alignment` right on the endpoint a prober is
+    most likely to ask, and wrong on the one a caller reaches for under load.
+    """
+
+    def hollow_late(answer: Answer) -> Answer:
+        if not _streamed(answer):
+            return answer
+        objects = _timestamped(answer)
+        objects[-1]["normalized_alignment"] = {
+            "characters": [],
+            "character_start_times_seconds": [],
+            "character_end_times_seconds": [],
+        }
+        return _relined(answer, objects)
+
+    with serving(tampering(hollow_late)) as base_url:
         verdict = _verdicts(base_url)["TIME-5"]
 
     assert verdict.word == "broken"
