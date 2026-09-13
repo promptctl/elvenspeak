@@ -173,11 +173,11 @@ verdict against every row. Where a claim is already asked of a built image by
 
 | Id | Claim | Source | Evidence | Probed by |
 |---|---|---|---|---|
-| `HEALTH-1` | `GET /health` answers 200 with a `voices` array of one or more non-empty strings, or 503 with an empty one — status and body agree | README:51, api.py:793 | self-consistent | e16.3 |
-| `HEALTH-2` | Every id in `/health`'s `voices` appears in `GET /v1/voices` and can be spoken | api.py:819 | falsifiable | e16.3 |
-| `HEALTH-3` | `/health` answers without a key even when one is configured | README:51, api.py:793 | falsifiable (only against a guarded deployment) | e16.3 |
-| `AUTH-1` | With a key configured, a guarded endpoint answers 401 `{"detail":"invalid xi-api-key"}` to a missing or wrong `xi-api-key` | api.py:630 | falsifiable (only when the prober holds a key) | e16.3 |
-| `AUTH-2` | With no key configured, every endpoint answers without one | README:240 | falsifiable | e16.3 |
+| `HEALTH-1` | `GET /health` answers 200 with a `voices` array of one or more non-empty strings, or 503 with an empty one — status and body agree | README:56, api.py:949 | self-consistent | e16.3 |
+| `HEALTH-2` | Every id in `/health`'s `voices` appears in `GET /v1/voices` and can be spoken | api.py:975 | falsifiable | e16.3 |
+| `HEALTH-3` | `/health` answers without a key even when one is configured | README:56, api.py:949 | falsifiable (only against a guarded deployment) | e16.3 |
+| `AUTH-1` | With a key configured, a guarded endpoint answers 401 `{"detail":"invalid xi-api-key"}` to a missing or wrong `xi-api-key` | api.py:786 | falsifiable (only when the prober holds a key) | e16.3 |
+| `AUTH-2` | With no key configured, every endpoint answers without one | README:245 | falsifiable | e16.3 |
 
 Observed: a wrong key and an absent key produce the same 401 and the same body;
 `/health` answered 200 in both cases.
@@ -204,10 +204,10 @@ reported broken.
 
 | Id | Claim | Source | Evidence | Probed by |
 |---|---|---|---|---|
-| `DISC-1` | `GET /v1/voices` returns `{"voices":[…]}`, each entry carrying ElevenLabs' fields plus `aliases`, `capabilities`, `models` and `language` | README:47, api.py:1167 | falsifiable | e16.2, e16.3 |
-| `DISC-2` | `GET /v1/voices/{id}` returns that voice for an installed id and 404s an id that is not — discovery never substitutes | README:117, api.py:1099 | falsifiable | e16.5 |
-| `DISC-3` | `GET /v1/voices/settings/default` returns ElevenLabs' documented defaults: `stability` 0.5, `similarity_boost` 0.75, `style` 0.0, `use_speaker_boost` true, `speed` 1.0 | README:49, api.py:1085 | falsifiable | e16.2 |
-| `DISC-4` | `GET /v1/voices/{id}/settings` returns that same object, and 404s an unknown id | README:50, api.py:1109 | falsifiable | e16.2 |
+| `DISC-1` | `GET /v1/voices` returns `{"voices":[…]}`, each entry carrying ElevenLabs' fields plus `aliases`, `capabilities`, `models` and `language` | README:52, api.py:1323 | falsifiable | e16.2, e16.3 |
+| `DISC-2` | `GET /v1/voices/{id}` returns that voice for an installed id and 404s an id that is not — discovery never substitutes | README:122, api.py:1255 | falsifiable | e16.5 |
+| `DISC-3` | `GET /v1/voices/settings/default` returns ElevenLabs' documented defaults: `stability` 0.5, `similarity_boost` 0.75, `style` 0.0, `use_speaker_boost` true, `speed` 1.0 | README:54, api.py:1241 | falsifiable | e16.2 |
+| `DISC-4` | `GET /v1/voices/{id}/settings` returns that same object, and 404s an unknown id | README:55, api.py:1265 | falsifiable | e16.2 |
 | `DISC-5` | Each voice's `language` is an ISO 639-1 family — the vocabulary `language_code` is compared in | engine.py:202 | falsifiable | e16.5 |
 
 **Every promise `engine.py` makes about the listing itself is missing from this
@@ -215,7 +215,7 @@ table, and the absence is the finding.** An engine's voices are promised best-fi
 (engine.py:406), in an order stable across calls (engine.py:406), under ids stable
 across restarts (engine.py:125), with capabilities fixed while the voice is offered
 (engine.py:162). None of it is observable over HTTP, because the server never asks
-the engine twice: `api.py:498` builds the `Catalog` once at startup and every
+the engine twice: `api.py:641` builds the `Catalog` once at startup and every
 discovery response is a projection of that one snapshot. Two `GET /v1/voices` calls
 are byte-identical for the life of the process whatever the engine does.
 
@@ -233,13 +233,13 @@ All of these are under "Needs an oracle" below.
 
 | Id | Claim | Source | Evidence | Probed by |
 |---|---|---|---|---|
-| `MOD-1` | `GET /v1/models` is a bare array, not an object with a `models` key | README:46, api.py:1038 | falsifiable | e16.2 |
-| `MOD-2` | The listing is the union of every offered voice's `models`, and never contains `router` | README:145, api.py:1019 | self-consistent | e16.5 |
-| `MOD-3` | A `model_id` the resolved voice lists is served, and `model_id` is absent from `x-elvenspeak-ignored` | README:128, api.py:102 | falsifiable | e16.5 |
-| `MOD-4` | A `model_id` that names an engine here but not the one speaking the resolved voice is a 422 quoting the value, naming the voice, and listing `served` | README:132, api.py:728 | falsifiable | e16.5 |
-| `MOD-5` | A `model_id` naming no engine here is served, and comes back in `x-elvenspeak-ignored` | README:139, api.py:713 | falsifiable | e16.5 |
-| `MOD-6` | `voice_id` decides who speaks and `model_id` is read against that — `model_id` never overrides `voice_id` | README:123 | falsifiable | e16.5 |
-| `MOD-7` | Each model entry's `languages` are the languages of the voices that id actually reaches | api.py:1279 | self-consistent | e16.5 |
+| `MOD-1` | `GET /v1/models` is a bare array, not an object with a `models` key | README:51, api.py:1194 | falsifiable | e16.2 |
+| `MOD-2` | The listing is the union of every offered voice's `models`, and never contains `router` | README:150, api.py:1175 | self-consistent | e16.5 |
+| `MOD-3` | A `model_id` the resolved voice lists is served, and `model_id` is absent from `x-elvenspeak-ignored` | README:133, api.py:110 | falsifiable | e16.5 |
+| `MOD-4` | A `model_id` that names an engine here but not the one speaking the resolved voice is a 422 quoting the value, naming the voice, and listing `served` | README:137, api.py:884 | falsifiable | e16.5 |
+| `MOD-5` | A `model_id` naming no engine here is served, and comes back in `x-elvenspeak-ignored` | README:144, api.py:869 | falsifiable | e16.5 |
+| `MOD-6` | `voice_id` decides who speaks and `model_id` is read against that — `model_id` never overrides `voice_id` | README:128 | falsifiable | e16.5 |
+| `MOD-7` | Each model entry's `languages` are the languages of the voices that id actually reaches | api.py:1435 | self-consistent | e16.5 |
 
 Observed: `model_id: "eleven_turbo_v2"` against a deployment not declaring it
 returned 200 with `x-elvenspeak-ignored: model_id`. `MOD-4` and `MOD-5` are one
@@ -263,16 +263,16 @@ guessing engine names. Guessing is what would make the verdict a lie.
 
 | Id | Claim | Source | Evidence | Probed by |
 |---|---|---|---|---|
-| `CAP-1` | A voice declaring `speed` really changes the rate — 2.0 is faster audio | README:100, engine.py:78 | falsifiable | e16.5 — `speaks.py` |
-| `CAP-2` | A voice not declaring `speed` names `voice_settings.speed` in `x-elvenspeak-ignored` | README:107 | falsifiable | e16.5 — `speaks.py` |
-| `CAP-3` | A voice declaring `timestamps` answers both timestamp endpoints 200, with a non-empty alignment | README:106 | falsifiable | e16.5 — `speaks.py` |
-| `CAP-4` | A voice not declaring `timestamps` answers both 501, with `{"detail":"this service cannot report how long each part of an utterance took"}` | README:106, api.py:647 | falsifiable | e16.5 — `speaks.py` |
-| `CAP-5` | `GET /v1/models`' `capabilities` is the union over the offered voices | README:111, api.py:1246 | self-consistent | e16.5 |
-| `CAP-6` | A parameter the server cannot honour is named in `x-elvenspeak-ignored` rather than dropped — including a body field this build has never heard of | README:22, api.py:267 | falsifiable | e16.5 |
-| `CAP-7` | `x-elvenspeak-ignored` is absent, not empty, when everything asked for was honoured | api.py:776 | falsifiable | e16.5 |
-| `CAP-8` | A `language_code` the resolved voice does not speak is named in `x-elvenspeak-ignored`; one it does speak is not | api.py:773 | falsifiable | e16.5 |
-| `CAP-9` | A blank, whitespace-only or absent `language_code` expresses no preference, and is never reported ignored | api.py:206 | falsifiable | e16.5 |
-| `CAP-10` | `en-GB`, `es_MX` and `ES` are the same request — a tag is reduced to its ISO 639-1 family before it is compared | engine.py:89, api.py:220 | falsifiable | e16.5 |
+| `CAP-1` | A voice declaring `speed` really changes the rate — 2.0 is faster audio | README:105, engine.py:78 | falsifiable | e16.5 — `speaks.py` |
+| `CAP-2` | A voice not declaring `speed` names `voice_settings.speed` in `x-elvenspeak-ignored` | README:112 | falsifiable | e16.5 — `speaks.py` |
+| `CAP-3` | A voice declaring `timestamps` answers both timestamp endpoints 200, with a non-empty alignment | README:111 | falsifiable | e16.5 — `speaks.py` |
+| `CAP-4` | A voice not declaring `timestamps` answers both 501, with `{"detail":"this service cannot report how long each part of an utterance took"}` | README:111, api.py:803 | falsifiable | e16.5 — `speaks.py` |
+| `CAP-5` | `GET /v1/models`' `capabilities` is the union over the offered voices | README:116, api.py:1402 | self-consistent | e16.5 |
+| `CAP-6` | A parameter the server cannot honour is named in `x-elvenspeak-ignored` rather than dropped — including a body field this build has never heard of | README:22, api.py:275 | falsifiable | e16.5 |
+| `CAP-7` | `x-elvenspeak-ignored` is absent, not empty, when everything asked for was honoured | api.py:932 | falsifiable | e16.5 |
+| `CAP-8` | A `language_code` the resolved voice does not speak is named in `x-elvenspeak-ignored`; one it does speak is not | api.py:929 | falsifiable | e16.5 |
+| `CAP-9` | A blank, whitespace-only or absent `language_code` expresses no preference, and is never reported ignored | api.py:214 | falsifiable | e16.5 |
+| `CAP-10` | `en-GB`, `es_MX` and `ES` are the same request — a tag is reduced to its ISO 639-1 family before it is compared | engine.py:89, api.py:228 | falsifiable | e16.5 |
 
 Observed: an invented body field (`invented_2027`) came back named in
 `x-elvenspeak-ignored`, so `CAP-6` holds for fields added after this build — which
@@ -302,12 +302,12 @@ voices only. They had been double-counting the first voice.
 
 | Id | Claim | Source | Evidence | Probed by |
 |---|---|---|---|---|
-| `SUB-1` | An unknown `voice_id` on a synthesis endpoint returns audio, with `x-elvenspeak-voice` naming what spoke and `x-elvenspeak-voice-requested` naming what was asked for | README:115, README:64 | falsifiable | e16.5 |
-| `SUB-2` | Every synthesis 200 carries `x-elvenspeak-voice`; `x-elvenspeak-voice-requested` appears only when the two differ | README:115, api.py:762 | falsifiable | e16.5 |
-| `SUB-3` | `x-elvenspeak-voice` names a voice that `GET /v1/voices` offers | api.py:763 | self-consistent | e16.5 |
-| `SUB-4` | With substitution off, an unknown `voice_id` is a 404 rather than audio | README:238 | falsifiable — the other arm of `SUB-1` | e16.5 |
-| `SUB-5` | An alias listed on a voice really reaches that voice | README:95 | falsifiable | e16.5 |
-| `SUB-6` | A voice id whose bytes are not latin-1 substitutes and is escaped into the header rather than answering 500 | api.py:1118 | falsifiable | e16.5 |
+| `SUB-1` | An unknown `voice_id` on a synthesis endpoint returns audio, with `x-elvenspeak-voice` naming what spoke and `x-elvenspeak-voice-requested` naming what was asked for | README:120, README:69 | falsifiable | e16.5 |
+| `SUB-2` | Every synthesis 200 carries `x-elvenspeak-voice`; `x-elvenspeak-voice-requested` appears only when the two differ | README:120, api.py:918 | falsifiable | e16.5 |
+| `SUB-3` | `x-elvenspeak-voice` names a voice that `GET /v1/voices` offers | api.py:919 | self-consistent | e16.5 |
+| `SUB-4` | With substitution off, an unknown `voice_id` is a 404 rather than audio | README:243 | falsifiable — the other arm of `SUB-1` | e16.5 |
+| `SUB-5` | An alias listed on a voice really reaches that voice | README:100 | falsifiable | e16.5 |
+| `SUB-6` | A voice id whose bytes are not latin-1 substitutes and is escaped into the header rather than answering 500 | api.py:1274 | falsifiable | e16.5 |
 
 `SUB-1` and `SUB-4` are two arms of one claim, and the prober reports which arm it
 got rather than requiring one.
@@ -342,14 +342,14 @@ rule is the printable ASCII range, not the latin-1 range.
 
 | Id | Claim | Source | Evidence | Probed by |
 |---|---|---|---|---|
-| `FMT-1` | All 28 published formats are accepted | README:55, formats.py:222 | falsifiable | e16.4 |
-| `FMT-2` | Each response's `Content-Type` is that codec's | api.py:858, formats.py:84 | falsifiable | e16.4 |
-| `FMT-3` | Each response's bytes carry that format's real signature — RIFF for `wav_*`, an Ogg page for `opus_*`, a frame sync for `mp3_*`, no container at all for `pcm_*`, `ulaw_8000` and `alaw_8000` | README:60 | falsifiable | e16.4 |
-| `FMT-4` | A `pcm_*` response's byte count divided by two and by the rate named in the format is the utterance's real duration | README:56, speaks.py:63 | falsifiable | e16.4 |
-| `FMT-5` | A `wav_*` response's RIFF header states the rate the format named | README:56 | falsifiable | e16.4 |
-| `FMT-6` | An `mp3_*` response starts at a frame sync with no ID3 tag | README:62 | falsifiable | e16.4 |
-| `FMT-7` | Omitting `output_format` gives `mp3_44100_128` | README:57, formats.py:147 | falsifiable | e16.4 |
-| `FMT-8` | The 422's `supported` array lists exactly the 28 | api.py:691 | falsifiable | e16.4 |
+| `FMT-1` | All 28 published formats are accepted | README:60, formats.py:222 | falsifiable | e16.4 |
+| `FMT-2` | Each response's `Content-Type` is that codec's | api.py:1014, formats.py:84 | falsifiable | e16.4 |
+| `FMT-3` | Each response's bytes carry that format's real signature — RIFF for `wav_*`, an Ogg page for `opus_*`, a frame sync for `mp3_*`, no container at all for `pcm_*`, `ulaw_8000` and `alaw_8000` | README:65 | falsifiable | e16.4 |
+| `FMT-4` | A `pcm_*` response's byte count divided by two and by the rate named in the format is the utterance's real duration | README:61, speaks.py:63 | falsifiable | e16.4 |
+| `FMT-5` | A `wav_*` response's RIFF header states the rate the format named | README:61 | falsifiable | e16.4 |
+| `FMT-6` | An `mp3_*` response starts at a frame sync with no ID3 tag | README:67 | falsifiable | e16.4 |
+| `FMT-7` | Omitting `output_format` gives `mp3_44100_128` | README:62, formats.py:147 | falsifiable | e16.4 |
+| `FMT-8` | The 422's `supported` array lists exactly the 28 | api.py:847 | falsifiable | e16.4 |
 
 `pcm_*` is the family the prober should ask in whenever it needs a length, and
 `speaks.py:63` says why: raw signed 16-bit samples at a rate the name states make a
@@ -362,13 +362,13 @@ fact about the encoder instead of about the utterance." Verifying that an `mp3_*
 
 | Id | Claim | Source | Evidence | Probed by |
 |---|---|---|---|---|
-| `REF-1` | An unknown `output_format` is a 422 quoting the value, with the supported set beside it | README:32, api.py:687 | falsifiable | e16.4 |
-| `REF-2` | Empty `text` is a 422 | README:33, api.py:161 | falsifiable | e16.4 |
-| `REF-3` | Whitespace-only `text` is a 422 | README:33, api.py:163 | falsifiable | e16.4 |
-| `REF-4` | `text` longer than 5000 characters is a 422 | README:34, api.py:142 | falsifiable | e16.4 |
-| `REF-5` | A refusal carries no `x-elvenspeak-*` headers — the bound on README:115's "every synthesis response" | README:115, observed | falsifiable | e16.4 |
-| `REF-6` | A `language_code` that is not a string is a 422 | api.py:224 | falsifiable | e16.4 |
-| `REF-7` | An unmodelled body field is kept and reported, never a 422 | api.py:148 | falsifiable | e16.4 |
+| `REF-1` | An unknown `output_format` is a 422 quoting the value, with the supported set beside it | README:32, api.py:843 | falsifiable | e16.4 |
+| `REF-2` | Empty `text` is a 422 | README:33, api.py:169 | falsifiable | e16.4 |
+| `REF-3` | Whitespace-only `text` is a 422 | README:33, api.py:171 | falsifiable | e16.4 |
+| `REF-4` | `text` longer than 5000 characters is a 422 | README:34, api.py:150 | falsifiable | e16.4 |
+| `REF-5` | A refusal carries no `x-elvenspeak-*` headers — the bound on README:120's "every synthesis response" | README:120, observed | falsifiable | e16.4 |
+| `REF-6` | A `language_code` that is not a string is a 422 | api.py:232 | falsifiable | e16.4 |
+| `REF-7` | An unmodelled body field is kept and reported, never a 422 | api.py:156 | falsifiable | e16.4 |
 
 **The two refusal bodies have different shapes, and e16.4 decided about it: the
 prober accepts both and reads neither.** `README.md:32` promises "a `422` quoting
@@ -420,12 +420,12 @@ The rule is stated over refusals generally rather than over these five rows, so
 
 | Id | Claim | Source | Evidence | Probed by |
 |---|---|---|---|---|
-| `TIME-1` | `/with-timestamps` returns `audio_base64`, `alignment`, `normalized_alignment` and `alignment_fidelity` | api.py:1299 | falsifiable | e16.2 |
-| `TIME-2` | `/with-timestamps` carries `x-elvenspeak-alignment`, whose value is `word-exact` or `interpolated` | README:187, alignment.py:51 | falsifiable | e16.enf |
-| `TIME-3` | `/stream/with-timestamps` emits one JSON object per line, each with its own `alignment_fidelity`, and carries no `x-elvenspeak-alignment` header | README:188, api.py:998 | falsifiable | e16.enf |
+| `TIME-1` | `/with-timestamps` returns `audio_base64`, `alignment`, `normalized_alignment` and `alignment_fidelity` | api.py:1455 | falsifiable | e16.2 |
+| `TIME-2` | `/with-timestamps` carries `x-elvenspeak-alignment`, whose value is `word-exact` or `interpolated` | README:192, alignment.py:51 | falsifiable | e16.enf |
+| `TIME-3` | `/stream/with-timestamps` emits one JSON object per line, each with its own `alignment_fidelity`, and carries no `x-elvenspeak-alignment` header | README:193, api.py:1154 | falsifiable | e16.enf |
 | `TIME-4` | Character end times ascend and the last one accounts for the whole utterance — every sample is covered | engine.py:370, speaks.py:694 | falsifiable against its own `audio_base64` | e16.enf — `speaks.py` |
-| `TIME-5` | `alignment` and `normalized_alignment` are the same object | api.py:1303 | falsifiable | e16.enf |
-| `TIME-6` | A streamed run's objects lay end to end — each sentence starts where the last one ended | api.py:979 | falsifiable | e16.enf |
+| `TIME-5` | `alignment` and `normalized_alignment` are the same object | api.py:1459 | falsifiable | e16.enf |
+| `TIME-6` | A streamed run's objects lay end to end — each sentence starts where the last one ended | api.py:1135 | falsifiable | e16.enf |
 
 Observed: a voice declaring `timestamps` answered `x-elvenspeak-alignment:
 word-exact`; the same request against a voice without it answered 501 on both
@@ -532,19 +532,19 @@ listing them here is what keeps a later issue from filing one as a gap.
   utterance in the wrong speaker's voice is fluent, the right length, and identical
   under every arithmetic available here. Separating them needs a speaker embedding,
   which is a model.
-- **Word boundaries are measured rather than interpolated** (README:180). The
+- **Word boundaries are measured rather than interpolated** (README:185). The
   prober can check that the timeline accounts for the audio (`TIME-4`) and that
   fidelity is reported (`TIME-2`), but not that a reported boundary is where the
   word really ends. That needs a phonemizer, and it is what `alignment_fidelity`
   exists to tell a caller instead.
-- **MP3 matches the real API byte for byte at the front** (README:62). Needs
+- **MP3 matches the real API byte for byte at the front** (README:67). Needs
   ElevenLabs. `FMT-6` — a frame sync and no ID3 — is the checkable remainder.
 - **A silent engine answers 502 carrying `x-elvenspeak-silence`** (engine.py:332,
-  api.py:604). A prober cannot make an engine go mute, so this is unreachable from
+  api.py:760). A prober cannot make an engine go mute, so this is unreachable from
   outside. `tests/test_silence.py` owns it.
 
 Five more are unreachable for one shared reason — the server asks the engine for its
-voices once, at startup (`api.py:498`), and every discovery response projects that
+voices once, at startup (`api.py:641`), and every discovery response projects that
 snapshot. A prober sees the cache, never the engine.
 
 - **The listing is stable across calls** (engine.py:406) and **a voice's
@@ -575,15 +575,15 @@ see whether `ELVENSPEAK_FALLBACK_VOICE` was set.
 Promises in the two sources that describe the build, the boot or the machine rather
 than the surface. None of these belong in the prober. Two of them already have a
 checker: `smoke.py` runs the image, so a container that refuses its own environment
-fails the smoke in seconds (README:446), and one that reached a 200 must have had
+fails the smoke in seconds (README:451), and one that reached a 200 must have had
 its assets baked.
 
-"No network after the first start" (README:232); the RTF and
+"No network after the first start" (README:237); the RTF and
 throughput figures under "Running it" and "What this deliberately does not do";
-which engine's libraries and baked assets are in an image (README:394); the
-`ELVENSPEAK_*` misspelling refusal and its exit 2 (README:314); Piper's
-non-determinism (README:615); voice licensing (README:637); and that an engine
-raises from `acquire()` or `open()` rather than mid-request (README:557).
+which engine's libraries and baked assets are in an image (README:399); the
+`ELVENSPEAK_*` misspelling refusal and its exit 2 (README:319); Piper's
+non-determinism (README:620); voice licensing (README:642); and that an engine
+raises from `acquire()` or `open()` rather than mid-request (README:562).
 
 ## Overlap with speaks.py
 
