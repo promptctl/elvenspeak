@@ -4396,6 +4396,22 @@ UNROUTED: dict[str, Unrouted] = {
 }
 
 
+def _names_path(body: bytes, path: str) -> bool:
+    """`body` names `path` as a whole path, rather than as the head of a longer one.
+
+    [`_names`]' reason, one character further out. A word boundary is no boundary
+    between paths: `/v1/voices` ends at a `/` in `/v1/voices/settings/default`,
+    so `\\b` matches there and the shorter path is satisfied by the longer one
+    being present. Both are in [`_NAMED_BACK`], which made that entry's check one
+    that could not fail — a deployment naming only the settings path back was
+    read as having named the catalogue too.
+
+    So the boundary is "not more path": a segment character after the match means
+    this is a different, longer path and not the one asked about.
+    """
+    return re.search(re.escape(path.encode()) + rb"(?![\w/-])", body) is not None
+
+
 def probe_unrouted(unrouted: Unrouted, deployment: Deployment) -> Verdict:
     """A request this service does not route is refused naming it, and what is served.
 
@@ -4448,12 +4464,12 @@ def probe_unrouted(unrouted: Unrouted, deployment: Deployment) -> Verdict:
             "caller that assembled a URL from a base and a suffix cannot see "
             "which of the two it got wrong"
         )
-    if unrouted.path.encode() not in answer.body:
+    if not _names_path(answer.body, unrouted.path):
         return Broken(
             f"{unrouted.described} was refused {answer.status} by a body that "
             f"does not quote the path it refused: {answer.body[:200]!r}"
         )
-    unnamed = [path for path in _NAMED_BACK if path.encode() not in answer.body]
+    unnamed = [path for path in _NAMED_BACK if not _names_path(answer.body, path)]
     if unnamed:
         return Broken(
             f"{unrouted.described} was refused {answer.status} by a body naming "
