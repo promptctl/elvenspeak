@@ -49,12 +49,20 @@ import itertools
 import json
 import logging
 from functools import partial
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from typing import TypeVar
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# What the *router* raises when it cannot dispatch a request, which is the one
+# thing this module never raises: every refusal written here is FastAPI's
+# subclass of it, and [`_unserved`] tells the two apart by nothing but that.
+from starlette.exceptions import HTTPException as RouterRefusal
+from starlette.routing import Match, Route
+from starlette.types import Scope
 
 from . import alignment as align_mod
 from . import encoding, models, text, voices
@@ -474,6 +482,141 @@ def _audible_pcm(voice: Voice, text: str, pcm: bytes) -> bytes:
     return b"".join(_audible(voice, text, iter((pcm,))))
 
 
+# ------------------------------------------- what this surface does not serve
+
+
+#: The endpoints ElevenLabs publishes that this deployment refuses on purpose,
+#: each against the reason it refuses that one. The difference between "this
+#: will never work here" and "you sent the wrong method" is the only part of a
+#: refusal a caller can act on, and only the second is worth a retry.
+#:
+#: Matched against the request rather than looked up in this app's route table,
+#: so an entry names an endpoint of *ElevenLabs'* API — which this project does
+#: not own and cannot change — instead of a path this build happens to route. A
+#: cloning endpoint can be added here without first registering a route for
+#: something the server will never answer.
+#:
+#: `tests/test_unserved.py` holds every entry against README's non-goals
+#: section, which is where the same position is stated in prose
+#: ([LAW:one-source-of-truth]).
+NON_GOALS: tuple[tuple[str, str, str], ...] = (
+    (
+        "DELETE",
+        "/v1/voices/{voice_id}",
+        (
+            "managing a hosted account's voices is a documented non-goal, not "
+            "an oversight — there is no account behind this server, and a stub "
+            "that accepted the call would be a lie in the shape of an API"
+        ),
+    ),
+)
+
+#: Why a request is refused when no [`NON_GOALS`] entry claims it. Said in terms
+#: of what *is* served because this one sentence has to answer both refusals the
+#: router produces — a path nothing here answers, and a path answered only under
+#: another method — and those two are already told apart by the status code and
+#: the `Allow` header beside it.
+_NOTHING_MATCHES = "nothing it does serve matches that method and path"
+
+
+def _unreachable(_request: Request) -> Response:
+    """The endpoint of a [`NON_GOALS`] route, which exists to match and no more.
+
+    Those routes are never registered with any app, so nothing can dispatch
+    here; raising rather than returning an empty response means a future edit
+    that did register one fails on its first request instead of answering it
+    with nothing ([LAW:no-silent-failure]).
+    """
+    raise AssertionError("a non-goal is matched against, never served")
+
+
+#: [`NON_GOALS`], compiled by the machinery that matches the routes this app
+#: really serves. A templated non-goal is then matched exactly as its neighbours
+#: are — same converters, same handling of a root path an ingress strips —
+#: rather than by a second path grammar written here ([LAW:one-source-of-truth]).
+_NON_GOAL_ROUTES = tuple(
+    (Route(path, _unreachable, methods=[method]), because)
+    for method, path, because in NON_GOALS
+)
+
+
+def _because(scope: Scope) -> str:
+    """Why this deployment does not serve the request in `scope`.
+
+    Total: a request no entry claims gets [`_NOTHING_MATCHES`] rather than
+    nothing, so the message below is composed one way every time instead of
+    branching on whether a reason was found ([LAW:dataflow-not-control-flow]).
+    """
+    return next(
+        (
+            because
+            for route, because in _NON_GOAL_ROUTES
+            if route.matches(scope)[0] is Match.FULL
+        ),
+        _NOTHING_MATCHES,
+    )
+
+
+def _served(routes: Iterable[Route]) -> list[str]:
+    """Every method and path this app answers, written the way a caller sends them.
+
+    Read off the router itself, so a refusal can neither advertise an endpoint
+    that was removed nor omit one that was added ([LAW:one-source-of-truth]).
+    That is the whole value of saying it at all: the caller reading this list has
+    just been told their own request is not on it.
+
+    Nothing is filtered out. `/docs` and `/openapi.json` are served too, and the
+    caller who guessed a path wrong is exactly the one who benefits from being
+    pointed at the schema — while a rule about which served endpoints deserve a
+    mention would be a second opinion about what this deployment serves. A
+    `Mount` added later has no `methods` and raises here rather than dropping out
+    of a list whose only job is completeness ([LAW:no-silent-failure]).
+
+    Sorted by path, so the four synthesis endpoints read as the group they are.
+    """
+    return [
+        f"{method} {path}"
+        for path, method in sorted(
+            (route.path, method) for route in routes for method in route.methods
+        )
+    ]
+
+
+async def _unserved(request: Request, refusal: RouterRefusal) -> JSONResponse:
+    """The one answer to a request this surface does not route.
+
+    Both fall-throughs, because Starlette raises this class for both and this
+    project raises it for nothing: `Router.not_found` for a path no route
+    matches, `Route.handle` for a path matched under a method it does not
+    accept. A catch-all route would have closed only the first — and would have
+    taken the trailing-slash redirect down with it, since a route matching every
+    path leaves the router nothing left to redirect.
+
+    Every refusal this module writes raises [`fastapi.HTTPException`], a
+    subclass, which [`create_app`] maps back to FastAPI's own handler: the lookup
+    walks the raised class's MRO and takes the most specific handler registered,
+    so a 422 quoting an `output_format` still answers in its own shape and only
+    the router's two verdicts arrive here.
+
+    The status and the `Allow` header are the router's, passed through rather
+    than recomputed: which of the two verdicts this is, and what the path does
+    accept, are facts it has already established ([LAW:one-source-of-truth]).
+    """
+    return JSONResponse(
+        status_code=refusal.status_code,
+        headers=refusal.headers,
+        content={
+            "detail": {
+                "message": (
+                    f"this deployment does not serve {request.method} "
+                    f"{request.url.path}: {_because(request.scope)}"
+                ),
+                "served": _served(request.app.routes),
+            }
+        },
+    )
+
+
 def create_app(settings: Settings, engine: Engine) -> FastAPI:
     """Builds the ElevenLabs surface over a ready engine.
 
@@ -572,6 +715,19 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         title="elvenspeak",
         summary="ElevenLabs-compatible text-to-speech, served from local voices",
         version="1.0.0",
+        # [LAW:single-enforcer] Where a request this surface does not route
+        # becomes an answer, and the only place it does.
+        #
+        # The second entry is what keeps the first to the router's own two
+        # verdicts. FastAPI registers its handler against Starlette's class —
+        # which is also the class the router raises — so claiming that key means
+        # naming the subclass this module raises for FastAPI's handler, or every
+        # 422, 501 and deliberate 404 written below would come back rewritten as
+        # a fall-through.
+        exception_handlers={
+            RouterRefusal: _unserved,
+            HTTPException: http_exception_handler,
+        },
     )
 
     @app.exception_handler(Silence)

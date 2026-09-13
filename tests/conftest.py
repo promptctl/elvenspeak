@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterator
 from itertools import groupby
 from dataclasses import dataclass, replace
@@ -619,3 +620,25 @@ def make_voice(
         ),
         encoding="utf-8",
     )
+
+
+#: A row of README's endpoint table: the method and the path, in backticks.
+_ENDPOINT_ROW = re.compile(r"^\|\s*`(GET|POST) (/\S+)`\s*\|", re.M)
+
+README = Path(__file__).parent.parent / "README.md"
+
+
+def published_endpoints() -> dict[str, set[str]]:
+    """README's endpoint table, as `method -> paths`.
+
+    Here rather than in one test module because two of them read it — the prober
+    holds its own endpoint tuples against this, and `tests/test_unserved.py`
+    holds the list a refusal advertises against it — and a second regex over the
+    same prose is a second reading of the table free to disagree with the first
+    ([LAW:one-source-of-truth]).
+    """
+    text = README.read_text(encoding="utf-8")
+    endpoints: dict[str, set[str]] = {"GET": set(), "POST": set()}
+    for row in _ENDPOINT_ROW.finditer(text):
+        endpoints[row.group(1)].add(row.group(2))
+    return endpoints

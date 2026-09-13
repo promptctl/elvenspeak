@@ -29,9 +29,10 @@ from typing import Any
 from urllib.parse import unquote
 
 import pytest
-from conftest import DECLARED_VOICES
+from conftest import DECLARED_VOICES, published_endpoints
 from fastapi import FastAPI, Request, Response
 from fleet import cluster, engine_app, router_app, serving
+from starlette.exceptions import HTTPException as RouterRefusal
 
 from elvenspeak import prober
 from elvenspeak.api import MAX_TEXT_LENGTH
@@ -49,7 +50,7 @@ CLAIMS_DOC = Path(__file__).parent.parent / "docs" / "conformance-claims.md"
 #: because the document's own "Probed by" column is what decides the set, so the
 #: day `piper-conformance-e16.5` lands its claims, this tuple grows by editing the
 #: document and the prober — never this test.
-LANDED_ISSUES = ("e16.3", "e16.4", "e16.5", "e16.enf")
+LANDED_ISSUES = ("e16.3", "e16.4", "e16.5", "e16.enf", "e16.6")
 
 #: A row of any claim table in the document: the id in backticks, then the cells.
 _CLAIM_ROW = re.compile(r"^\|\s*`([A-Z]+-\d+)`\s*\|(.*)\|\s*$", re.M)
@@ -567,11 +568,47 @@ def spoiling(
     return speaks
 
 
+def unrouted(method: str, path: str, status: int) -> Response:
+    """A request nothing routes, answered the way README:36 says it should be.
+
+    Written out rather than reached for in `elvenspeak.api`, for the reason
+    [`WELL_FORMED`] is: a fixture borrowing this checkout's refusal would agree
+    with the prober whatever either of them came to mean, and `ROUTE-1` and
+    `ROUTE-2` would then be two claims that cannot fail.
+
+    The wording is deliberately not this service's. What the claims require is
+    that the refusal *names* the method, the path and what is served — never that
+    it says so in these words or under these keys.
+    """
+    return Response(
+        content=json.dumps(
+            {
+                "detail": {
+                    "message": f"{method} {path} is not answered by this server",
+                    "served": [
+                        "GET /health",
+                        "GET /v1/voices",
+                        "GET /v1/models",
+                        "GET /v1/voices/settings/default",
+                        "POST /v1/text-to-speech/{voice_id}",
+                    ],
+                }
+            }
+        ).encode(),
+        status_code=status,
+        media_type="application/json",
+    )
+
+
+Unrouted = Callable[[str, str, int], Response]
+
+
 def lying_deployment(
     voices: list[dict[str, Any]],
     health_body: Any = HEALTHY,
     health_status: int = 200,
     speaks: Speaks = conformant,
+    refuses: Unrouted = unrouted,
 ) -> FastAPI:
     """A server answering whatever it is told to, however untrue.
 
@@ -589,8 +626,18 @@ def lying_deployment(
     [`conformant`] rather than a constant blob: the fifteen format and refusal
     claims each need a deployment that keeps every *other* promise, so the
     truthful answer is the default and each case below buys exactly one lie.
+
+    `refuses` is that seam again for the two fall-throughs. It has to exist
+    because this stand-in deliberately routes four paths out of nine, so nearly
+    every request the prober makes of it arrives here — and a stand-in whose
+    fall-through were Starlette's own would report a deployment broken on
+    `ROUTE-1` in every test in this file that asks for a *different* failure.
     """
     app = FastAPI()
+
+    @app.exception_handler(RouterRefusal)
+    async def fell_through(request: Request, refusal: RouterRefusal) -> Response:
+        return refuses(request.method, request.url.path, refusal.status_code)
 
     @app.get("/health")
     def health(response: Response) -> Any:
@@ -1221,19 +1268,6 @@ def test_a_refusal_carrying_another_detail_is_broken() -> None:
     assert verdicts["AUTH-1"].word == "broken"
     assert "nope" in verdicts["AUTH-1"].why
     assert prober.INVALID_KEY_DETAIL in verdicts["AUTH-1"].why
-
-
-#: A row of README's endpoint table: the method and the path, in backticks.
-_ENDPOINT_ROW = re.compile(r"^\|\s*`(GET|POST) (/\S+)`\s*\|", re.M)
-
-
-def published_endpoints() -> dict[str, set[str]]:
-    """README's endpoint table, as `method -> paths`."""
-    text = (Path(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
-    endpoints: dict[str, set[str]] = {"GET": set(), "POST": set()}
-    for row in _ENDPOINT_ROW.finditer(text):
-        endpoints[row.group(1)].add(row.group(2))
-    return endpoints
 
 
 def test_the_readme_still_publishes_a_table_this_test_can_read() -> None:
@@ -3815,3 +3849,169 @@ def test_a_time_no_comparison_can_answer_breaks_time_4(unusable: float) -> None:
 
     assert verdict.word == "broken"
     assert "`character_end_times_seconds` is not an array of numbers" in verdict.why
+
+
+# --------------------------------------------- the routes this service refuses
+
+
+def bare(_method: str, _path: str, status: int) -> Response:
+    """The two fall-throughs as they stood before `piper-conformance-e16.6`.
+
+    Verbatim, because this is the deployment `ROUTE-1` and `ROUTE-2` exist to
+    catch, and it is the one every build of this service was until that ticket
+    landed.
+    """
+    detail = "Not Found" if status == 404 else "Method Not Allowed"
+    return Response(
+        content=json.dumps({"detail": detail}).encode(),
+        status_code=status,
+        media_type="application/json",
+    )
+
+
+def test_a_deployment_that_falls_through_to_starlette_breaks_both_claims() -> None:
+    """The old server, probed by the claims written against it."""
+    with serving(lying_deployment([WELL_FORMED], refuses=bare)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    for claim in ("ROUTE-1", "ROUTE-2"):
+        assert verdicts[claim].word == "broken", claim
+        assert "does not name the method" in verdicts[claim].why
+
+
+def test_a_refusal_naming_nothing_it_serves_is_broken() -> None:
+    """Quoting the request back is half the promise, and the cheaper half.
+
+    A body echoing the method and path tells a caller what it already sent. The
+    list is the part that tells them where to go instead, so a refusal without
+    one leaves them exactly where the bare 404 did.
+    """
+
+    def wordier(method: str, path: str, status: int) -> Response:
+        return Response(
+            content=json.dumps({"detail": f"{method} {path} is not served"}).encode(),
+            status_code=status,
+            media_type="application/json",
+        )
+
+    with serving(lying_deployment([WELL_FORMED], refuses=wordier)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    for claim in ("ROUTE-1", "ROUTE-2"):
+        assert verdicts[claim].word == "broken", claim
+        assert "naming none of" in verdicts[claim].why
+
+
+def test_a_deployment_answering_an_unrouted_path_at_all_is_broken() -> None:
+    """A 200 where a refusal was documented, which is the answer-shaped void.
+
+    A deployment answering every path is not a lenient one: a client that
+    mistyped a URL gets a success back and never learns the endpoint it meant
+    was never reached.
+    """
+
+    def cheerful(_method: str, _path: str, _status: int) -> Response:
+        return Response(content=b"{}", status_code=200, media_type="application/json")
+
+    with serving(lying_deployment([WELL_FORMED], refuses=cheerful)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    for claim in ("ROUTE-1", "ROUTE-2"):
+        assert verdicts[claim].word == "broken", claim
+        assert "answered 200 rather than the documented" in verdicts[claim].why
+
+
+def test_both_route_claims_are_asked_of_a_deployment_that_answers_nothing_else() -> None:
+    """The two claims with no precondition, shown to have none.
+
+    Every other claim here rests on a listing, a voice or a key, so a deployment
+    that lost its catalogue leaves them `unasked`. A refusal needs none of that,
+    and a prober that quietly let these two inherit a precondition would report a
+    silent deployment as conforming on the one question it could still answer.
+    """
+    catalogueless = lying_deployment([], health_body={"voices": []}, health_status=503)
+    with serving(catalogueless) as base_url:
+        verdicts = _verdicts(base_url)
+
+    for claim in ("ROUTE-1", "ROUTE-2"):
+        assert verdicts[claim].word == "held", (claim, verdicts[claim].why)
+
+
+@pytest.mark.parametrize("refusal", [401, 403])
+def test_a_guard_in_front_of_the_router_blocks_both_claims_rather_than_breaking_them(
+    refusal: int,
+) -> None:
+    """A refused key hides the router's verdict; it is not a verdict.
+
+    Both statuses written out rather than read from [`prober.AUTH_REFUSALS`],
+    for the reason [`WELL_FORMED`] is: a test drawing its cases from the constant
+    under test follows it wherever it goes, so narrowing the prober's reading of
+    a guard to one status would leave this passing on the half that still works.
+
+    Needing no catalogue is not the same as reaching the router. A guard
+    answering before any route is consulted — this fixture's middleware, or the
+    authenticating proxy a deployment sits behind in the wild — refuses the
+    prober's key first, and the 404 these claims came to read never happens.
+    Reading that refusal as the router's own would report a sound deployment
+    broken for a key the operator mistyped, which is the one direction a
+    conformance prober must never fail in.
+    """
+    guarded = guarded_deployment(
+        lambda path, sent: path != "/health" and sent != "probe-key", status=refusal
+    )
+    with serving(guarded) as base_url:
+        verdicts = _verdicts(base_url, key="not-the-key")
+
+    for claim in ("ROUTE-1", "ROUTE-2"):
+        assert verdicts[claim].word == "unasked", (claim, verdicts[claim])
+        assert "--key" in verdicts[claim].blocker, claim
+        assert str(refusal) in verdicts[claim].blocker, claim
+
+
+@pytest.mark.parametrize(
+    "served",
+    [
+        pytest.param(["GET /v1/models", "GET /v1/voices/settings/default"], id="tail"),
+        pytest.param(
+            [
+                "GET /v1/models",
+                "GET /v1/voices/settings/default",
+                "GET /api/v1/voices",
+            ],
+            id="head",
+        ),
+    ],
+)
+def test_naming_a_longer_path_back_has_not_named_the_shorter_one(
+    served: list[str],
+) -> None:
+    """`/v1/voices` is spelled inside both `/v1/voices/settings/default` and
+    `/api/v1/voices`.
+
+    Both sides, because a boundary on one is no boundary at all: the first is in
+    `_NAMED_BACK` beside it, so a substring reading let the longer entry satisfy
+    the shorter one, and the second is what a deployment mounted under a prefix
+    advertises. Either way the catalogue's check could not fail — the one entry a
+    caller refused at an unrouted path most needs pointed back at.
+    """
+
+    def advertising(method: str, path: str, status: int) -> Response:
+        return Response(
+            content=json.dumps(
+                {
+                    "detail": {
+                        "message": f"this deployment does not serve {method} {path}",
+                        "served": served,
+                    }
+                }
+            ).encode(),
+            status_code=status,
+            media_type="application/json",
+        )
+
+    with serving(lying_deployment([WELL_FORMED], refuses=advertising)) as base_url:
+        verdicts = _verdicts(base_url)
+
+    for claim in ("ROUTE-1", "ROUTE-2"):
+        assert verdicts[claim].word == "broken", (claim, verdicts[claim])
+        assert "naming none of ['/v1/voices']" in verdicts[claim].why, claim
