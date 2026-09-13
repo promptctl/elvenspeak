@@ -455,14 +455,28 @@ against the live piper deployment (`piper-conformance-e16.ysu`) cannot reach it.
 
 | Id | Claim | Source | Evidence | Probed by |
 |---|---|---|---|---|
-| `ROUTE-1` | An unknown path answers 404 `{"detail":"Not Found"}` | api.py registers no catch-all | falsifiable | e16.6 |
-| `ROUTE-2` | A registered path with the wrong method answers 405 `{"detail":"Method Not Allowed"}` | Starlette's default | falsifiable | e16.6 |
+| `ROUTE-1` | A path nothing routes answers 404 quoting the method and path sent and listing every endpoint this deployment does serve | README:36, api.py:585 | falsifiable | e16.6 |
+| `ROUTE-2` | A known path under a method it does not accept answers 405, quoting the method and path sent and listing what is served | README:36, api.py:585 | falsifiable | e16.6 |
 | `ROUTE-3` | There is no WebSocket surface at any path | absent from the tree | falsifiable | e16.7 |
 
-These three record what the server does today rather than a promise it makes, which
-is the point: they are the epic's two first-contact questions, and both are now
-settled by evidence. `ROUTE-1` and `ROUTE-2` answer the unknown-route question,
-`ROUTE-3` the WebSocket one.
+`ROUTE-1` and `ROUTE-2` recorded what the server happened to do until
+`piper-conformance-e16.6` made them promises: README rule 3 states the refusal
+shape, and the prober now asks a deployment for it rather than reading it off this
+tree. `ROUTE-3` is still a record of what the tree does not contain, and the
+WebSocket question it answers belongs to `piper-conformance-e16.7`. The two probes
+are shaped by who they run against: `ROUTE-1` asks after a path ElevenLabs never
+published, so a deployment that implements a real endpoint cannot break the claim
+by conforming, and `ROUTE-2` asks over `GET`, because a prober pointed at a
+deployment its operator does not own has no business sending the `DELETE` the
+endpoint table would otherwise suggest. They are also the only two claims in this
+file needing no catalogue, no voice and no synthesis, so a deployment that can
+answer nothing else can still be asked both. What they do need is to reach the
+router: a guard standing in front of one — this deployment's `Depends`, or the
+authenticating proxy a foreign deployment sits behind — answers a refused key
+before any route is consulted, and both claims report `unasked` against `--key`
+rather than reading that refusal as the router's verdict. Calling a sound router
+broken because an operator mistyped a key is the one direction a conformance
+prober must not fail in.
 
 ## What the first probe settled
 
@@ -473,21 +487,28 @@ than by opinion" are answerable without the SDK, and were, by driving the real
 **There is no WebSocket surface, anywhere.** `websocket` and `stream-input` do not
 occur in any `.py`, `.md`, `.toml` or `.yaml` in the tree. A connect attempt against
 `/v1/text-to-speech/{voice}/stream-input` is closed rather than upgraded, and the
-same path over POST is a plain 404. So `piper-conformance-e16.7` is deciding whether
+same path over POST is a 404. So `piper-conformance-e16.7` is deciding whether
 to *add* a surface, not whether an existing one conforms — and the README's "What
 this deliberately does not do" is where the answer belongs if the decision is no.
 
-**An unknown route falls through to FastAPI's bare `{"detail":"Not Found"}`,** and a
-wrong method to Starlette's bare `{"detail":"Method Not Allowed"}`. The second is
-not in the epic's description and matters more than it looks: `DELETE
+**An unknown route fell through to FastAPI's bare `{"detail":"Not Found"}`,** and a
+wrong method to Starlette's bare `{"detail":"Method Not Allowed"}`. The second was
+not in the epic's description and mattered more than it looked: `DELETE
 /v1/voices/{id}` is a *documented non-goal* — the README's last line says a stub
-pretending to accept it "would be a lie in the shape of an API" — and it currently
-answers 405 with a body naming nothing. A caller reaching for a voice-management
-endpoint learns only that the verb is wrong, which reads like a client bug rather
-than like a server that does not do this. So `piper-conformance-e16.6` has two
-fall-throughs to answer, not one, and the 405 is the one that misleads.
+pretending to accept it "would be a lie in the shape of an API" — and it answered
+405 with a body naming nothing. A caller reaching for a voice-management endpoint
+learned only that the verb was wrong, which reads like a client bug rather than
+like a server that does not do this. So `piper-conformance-e16.6` had two
+fall-throughs to answer, not one, and the 405 was the one that misled.
 
-Observed, verbatim:
+Both are answered now, and neither status moved. A 404 and a 405 still mean what
+they meant; what changed is that each body names the method and the path it was
+sent and lists what this deployment does serve, and that the `DELETE` says it is a
+non-goal rather than an oversight. `ROUTE-1` and `ROUTE-2` above carry that
+promise. What follows is what a caller got before, kept rather than replaced,
+because an observation that is deleted cannot be checked against later.
+
+Observed before `piper-conformance-e16.6`, verbatim:
 
     GET    /                                      -> 404  {"detail":"Not Found"}
     GET    /v1/user/subscription                  -> 404  {"detail":"Not Found"}

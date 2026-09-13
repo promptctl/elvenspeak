@@ -4327,6 +4327,145 @@ def probe_time_6(deployment: Deployment) -> Verdict:
     )
 
 
+# ------------------------------------------------- routes this service refuses
+
+
+#: A path nothing routes, invented rather than borrowed from ElevenLabs' own
+#: surface. `/v1/user/subscription` was the obvious candidate and is the wrong
+#: one: a claim that a real endpoint goes unrouted breaks the day a deployment
+#: implements it, which is a deployment getting better and the prober calling it
+#: worse.
+UNROUTED_PATH = "/v1/no-such-endpoint"
+
+#: A documented synthesis path asked under a method it does not accept.
+#:
+#: `GET` because it is the safe verb. This prober runs against deployments its
+#: operator does not own, and reading `DELETE` off the endpoint table would mean
+#: sending one at a stranger's server to find out whether it refuses them.
+#:
+#: The voice id is a placeholder rather than a catalogued one: a method is
+#: decided by the router, before any handler resolves a voice, so a real id would
+#: buy nothing and would leave this claim waiting on a listing it has no stake in
+#: — `ROUTE-1` and `ROUTE-2` are the only claims here with no precondition at all.
+WRONG_METHOD_PATH = "/v1/text-to-speech/any-voice"
+
+#: The documented paths a refusal has to name back as endpoints it does serve.
+#: Only the untemplated ones, because those have a single spelling: how a foreign
+#: build writes the `{voice_id}` segment is its own business, and demanding this
+#: one's spelling would report a conforming deployment as broken over a brace
+#: ([LAW:behavior-not-structure] — the promise is that the list is real, not that
+#: it is formatted like ours).
+_NAMED_BACK = tuple(
+    path
+    for path in (*DOCUMENTED_READS, *DOCUMENTED_SYNTHESES)
+    if "{" not in path
+)
+
+
+@dataclass(frozen=True)
+class Unrouted:
+    """One request this service refuses before any handler sees it, and its status.
+
+    Two rows, because there are two fall-throughs and closing one closes neither:
+    a path no route matches, and a path matched under a method it does not
+    accept. They differ in the request and in the status it earns, which are
+    values — so they are two instances of one claim shape rather than two kinds
+    of claim ([LAW:one-type-per-behavior]).
+    """
+
+    described: str
+    method: str
+    path: str
+    status: int
+
+
+#: The two refusals the router owes, keyed by the claim that reports each.
+UNROUTED: dict[str, Unrouted] = {
+    "ROUTE-1": Unrouted(
+        described=f"GET {UNROUTED_PATH}, a path nothing routes",
+        method="GET",
+        path=UNROUTED_PATH,
+        status=404,
+    ),
+    "ROUTE-2": Unrouted(
+        described=f"GET {WRONG_METHOD_PATH}, a path README publishes over POST",
+        method="GET",
+        path=WRONG_METHOD_PATH,
+        status=405,
+    ),
+}
+
+
+def probe_unrouted(unrouted: Unrouted, deployment: Deployment) -> Verdict:
+    """A request this service does not route is refused naming it, and what is served.
+
+    Read out of the raw body rather than at a key, for the reason [`Refusal`]
+    gives: the promise is that the refusal *names* what was sent and what is on
+    offer instead, and a check keyed to `detail.message` would report a
+    deployment broken for having answered the same facts in a different shape.
+
+    The key is passed when the operator gave one and withheld when they did not,
+    and neither row has a precondition of its own — no catalogue, no voice, no
+    synthesis — because refusing a request needs none of them.
+
+    What it does need is to reach the router at all, which is not a given: a
+    guard in front of one answers a refused key before any route is consulted,
+    and this deployment's own `Depends` guard is only the arrangement where the
+    router wins. A deployment behind an authenticating proxy refuses first, and
+    reading that refusal as the router's verdict would report a sound router
+    broken for a key the operator mistyped. So an [`AUTH_REFUSALS`] status is
+    [`Blocked`] here exactly as it is when the catalogue cannot be read: the
+    claim goes unasked pointing at `--key`, because what this deployment does
+    with an unrouted request was never seen ([LAW:no-silent-failure] — the
+    blocker has to send an operator to their own invocation, not to the
+    server).
+
+    The named-back check is what separates this from a refusal that merely got
+    wordier. A body saying only "not found, sorry" carries the method and no
+    route a caller could reach for, and [`_NAMED_BACK`] is the smallest set whose
+    absence proves the list is not there.
+    """
+    answer = _ask(
+        deployment.target, unrouted.path, deployment.target.key, method=unrouted.method
+    )
+    if answer.status in AUTH_REFUSALS:
+        raise Blocked(
+            f"{unrouted.described} answered {answer.status}, a guard refusing "
+            "the xi-api-key the prober was given rather than the router's own "
+            "verdict, so what this deployment does with a request it cannot "
+            "route could not be seen — check --key before reading this as a "
+            "fault of the deployment"
+        )
+    if answer.status != unrouted.status:
+        return Broken(
+            f"{unrouted.described} answered {answer.status} rather than the "
+            f"documented {unrouted.status}: {answer.body[:200]!r}"
+        )
+    if not _names(answer.body, unrouted.method):
+        return Broken(
+            f"{unrouted.described} was refused {answer.status} by a body that "
+            f"does not name the method it refused: {answer.body[:200]!r} — a "
+            "caller that assembled a URL from a base and a suffix cannot see "
+            "which of the two it got wrong"
+        )
+    if unrouted.path.encode() not in answer.body:
+        return Broken(
+            f"{unrouted.described} was refused {answer.status} by a body that "
+            f"does not quote the path it refused: {answer.body[:200]!r}"
+        )
+    unnamed = [path for path in _NAMED_BACK if path.encode() not in answer.body]
+    if unnamed:
+        return Broken(
+            f"{unrouted.described} was refused {answer.status} by a body naming "
+            f"none of {unnamed} as endpoints it does serve: "
+            f"{answer.body[:200]!r} — the refusal leaves a caller nowhere to go"
+        )
+    return Held(
+        f"{unrouted.described} was refused {answer.status}, quoting the request "
+        f"and naming {list(_NAMED_BACK)} as served"
+    )
+
+
 # ------------------------------------------------------------------ the claims
 
 
@@ -4410,6 +4549,8 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("TIME-4", FALSIFIABLE, probe_time_4),
     Claim("TIME-5", FALSIFIABLE, probe_time_5),
     Claim("TIME-6", FALSIFIABLE, probe_time_6),
+    Claim("ROUTE-1", FALSIFIABLE, partial(probe_unrouted, UNROUTED["ROUTE-1"])),
+    Claim("ROUTE-2", FALSIFIABLE, partial(probe_unrouted, UNROUTED["ROUTE-2"])),
 )
 
 

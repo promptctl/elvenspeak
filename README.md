@@ -33,7 +33,12 @@ checked by a test:
    a `422` quoting the value you sent, not a quiet substitution. So is `text`
    that is empty, whitespace-only, or longer than **5000 characters** — the cap
    exists because `ELVENSPEAK_API_KEY` is unset by default, and without a bound
-   one caller can hold a CPU core for as long as it likes.
+   one caller can hold a CPU core for as long as it likes. A path nothing routes
+   is a `404` and a known path under a method it does not accept a `405`, each
+   quoting the method and path you sent and listing every endpoint this
+   deployment really serves — read off its own router, so the list cannot go
+   stale. `DELETE /v1/voices/{voice_id}` is refused by name as a documented
+   non-goal rather than as a method you got wrong.
 
 ### Endpoints
 
@@ -740,6 +745,7 @@ exports come from is MIT.
 a paid account with something that needs a machine, not a budget. Measured on
 four cores, it synthesizes about 30 seconds of speech per second of compute.
 
-**No voice cloning, no voice library, no `DELETE /v1/voices/{id}`.** Those
-endpoints manage a hosted account's voices. There is no account here, and a
-stub that pretended to accept them would be a lie in the shape of an API.
+**No voice cloning, no voice library, no `DELETE /v1/voices/{voice_id}`.**
+Those endpoints manage a hosted account's voices. There is no account here,
+and a stub that pretended to accept them would be a lie in the shape of an
+API.
