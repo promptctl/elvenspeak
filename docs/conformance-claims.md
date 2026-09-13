@@ -238,7 +238,7 @@ All of these are under "Needs an oracle" below.
 | `MOD-3` | A `model_id` the resolved voice lists is served, and `model_id` is absent from `x-elvenspeak-ignored` | README:133, api.py:110 | falsifiable | e16.5 |
 | `MOD-4` | A `model_id` that names an engine here but not the one speaking the resolved voice is a 422 quoting the value, naming the voice, and listing `served` | README:137, api.py:884 | falsifiable | e16.5 |
 | `MOD-5` | A `model_id` naming no engine here is served, and comes back in `x-elvenspeak-ignored` | README:144, api.py:869 | falsifiable | e16.5 |
-| `MOD-6` | `voice_id` decides who speaks and `model_id` is read against that — `model_id` never overrides `voice_id` | README:128 | falsifiable | e16.5 |
+| `MOD-6` | `voice_id` decides who speaks and `model_id` is read against that — `model_id` never overrides `voice_id` | README:130 | falsifiable | e16.5 |
 | `MOD-7` | Each model entry's `languages` are the languages of the voices that id actually reaches | api.py:1435 | self-consistent | e16.5 |
 
 Observed: `model_id: "eleven_turbo_v2"` against a deployment not declaring it
@@ -305,7 +305,7 @@ voices only. They had been double-counting the first voice.
 | `SUB-1` | An unknown `voice_id` on a synthesis endpoint returns audio, with `x-elvenspeak-voice` naming what spoke and `x-elvenspeak-voice-requested` naming what was asked for | README:120, README:69 | falsifiable | e16.5 |
 | `SUB-2` | Every synthesis 200 carries `x-elvenspeak-voice`; `x-elvenspeak-voice-requested` appears only when the two differ | README:120, api.py:918 | falsifiable | e16.5 |
 | `SUB-3` | `x-elvenspeak-voice` names a voice that `GET /v1/voices` offers | api.py:919 | self-consistent | e16.5 |
-| `SUB-4` | With substitution off, an unknown `voice_id` is a 404 rather than audio | README:243 | falsifiable — the other arm of `SUB-1` | e16.5 |
+| `SUB-4` | With substitution off, an unknown `voice_id` is a 404 rather than audio | README:244 | falsifiable — the other arm of `SUB-1` | e16.5 |
 | `SUB-5` | An alias listed on a voice really reaches that voice | README:100 | falsifiable | e16.5 |
 | `SUB-6` | A voice id whose bytes are not latin-1 substitutes and is escaped into the header rather than answering 500 | api.py:1274 | falsifiable | e16.5 |
 
@@ -346,7 +346,7 @@ rule is the printable ASCII range, not the latin-1 range.
 | `FMT-2` | Each response's `Content-Type` is that codec's | api.py:1014, formats.py:84 | falsifiable | e16.4 |
 | `FMT-3` | Each response's bytes carry that format's real signature — RIFF for `wav_*`, an Ogg page for `opus_*`, a frame sync for `mp3_*`, no container at all for `pcm_*`, `ulaw_8000` and `alaw_8000` | README:65 | falsifiable | e16.4 |
 | `FMT-4` | A `pcm_*` response's byte count divided by two and by the rate named in the format is the utterance's real duration | README:61, speaks.py:63 | falsifiable | e16.4 |
-| `FMT-5` | A `wav_*` response's RIFF header states the rate the format named | README:61 | falsifiable | e16.4 |
+| `FMT-5` | A `wav_*` response's RIFF header states the rate the format named | README:62 | falsifiable | e16.4 |
 | `FMT-6` | An `mp3_*` response starts at a frame sync with no ID3 tag | README:67 | falsifiable | e16.4 |
 | `FMT-7` | Omitting `output_format` gives `mp3_44100_128` | README:62, formats.py:147 | falsifiable | e16.4 |
 | `FMT-8` | The 422's `supported` array lists exactly the 28 | api.py:847 | falsifiable | e16.4 |
@@ -582,8 +582,8 @@ its assets baked.
 throughput figures under "Running it" and "What this deliberately does not do";
 which engine's libraries and baked assets are in an image (README:399); the
 `ELVENSPEAK_*` misspelling refusal and its exit 2 (README:319); Piper's
-non-determinism (README:620); voice licensing (README:642); and that an engine
-raises from `acquire()` or `open()` rather than mid-request (README:562).
+non-determinism (README:705); voice licensing (README:727); and that an engine
+raises from `acquire()` or `open()` rather than mid-request (README:652).
 
 ## Overlap with speaks.py
 
