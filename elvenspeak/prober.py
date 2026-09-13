@@ -4406,10 +4406,17 @@ def _names_path(body: bytes, path: str) -> bool:
     that could not fail — a deployment naming only the settings path back was
     read as having named the catalogue too.
 
-    So the boundary is "not more path": a segment character after the match means
-    this is a different, longer path and not the one asked about.
+    So the boundary is "not more path", and it is needed on both sides: a segment
+    character either before or after the match means this is a different, longer
+    path and not the one asked about. Trailing alone would leave the mirror of
+    the same hole — `/v1/voices` is also the *tail* of `/api/v1/voices`, so a
+    deployment serving only a prefixed mount would be read as having named the
+    bare path back.
     """
-    return re.search(re.escape(path.encode()) + rb"(?![\w/-])", body) is not None
+    return (
+        re.search(rb"(?<![\w/-])" + re.escape(path.encode()) + rb"(?![\w/-])", body)
+        is not None
+    )
 
 
 def probe_unrouted(unrouted: Unrouted, deployment: Deployment) -> Verdict:

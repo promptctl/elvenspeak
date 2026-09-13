@@ -3968,24 +3968,40 @@ def test_a_guard_in_front_of_the_router_blocks_both_claims_rather_than_breaking_
         assert str(refusal) in verdicts[claim].blocker, claim
 
 
-def test_naming_a_longer_path_back_has_not_named_the_shorter_one() -> None:
-    """`/v1/voices` is spelled inside `/v1/voices/settings/default`.
+@pytest.mark.parametrize(
+    "served",
+    [
+        pytest.param(["GET /v1/models", "GET /v1/voices/settings/default"], id="tail"),
+        pytest.param(
+            [
+                "GET /v1/models",
+                "GET /v1/voices/settings/default",
+                "GET /api/v1/voices",
+            ],
+            id="head",
+        ),
+    ],
+)
+def test_naming_a_longer_path_back_has_not_named_the_shorter_one(
+    served: list[str],
+) -> None:
+    """`/v1/voices` is spelled inside both `/v1/voices/settings/default` and
+    `/api/v1/voices`.
 
-    Both are in `_NAMED_BACK`, so a substring reading let the longer entry
-    satisfy the shorter one and the catalogue's check could not fail — the one
-    entry a caller refused at an unrouted path most needs pointed back at.
+    Both sides, because a boundary on one is no boundary at all: the first is in
+    `_NAMED_BACK` beside it, so a substring reading let the longer entry satisfy
+    the shorter one, and the second is what a deployment mounted under a prefix
+    advertises. Either way the catalogue's check could not fail — the one entry a
+    caller refused at an unrouted path most needs pointed back at.
     """
 
-    def settings_only(method: str, path: str, status: int) -> Response:
+    def advertising(method: str, path: str, status: int) -> Response:
         return Response(
             content=json.dumps(
                 {
                     "detail": {
                         "message": f"this deployment does not serve {method} {path}",
-                        "served": [
-                            "GET /v1/models",
-                            "GET /v1/voices/settings/default",
-                        ],
+                        "served": served,
                     }
                 }
             ).encode(),
@@ -3993,7 +4009,7 @@ def test_naming_a_longer_path_back_has_not_named_the_shorter_one() -> None:
             media_type="application/json",
         )
 
-    with serving(lying_deployment([WELL_FORMED], refuses=settings_only)) as base_url:
+    with serving(lying_deployment([WELL_FORMED], refuses=advertising)) as base_url:
         verdicts = _verdicts(base_url)
 
     for claim in ("ROUTE-1", "ROUTE-2"):
